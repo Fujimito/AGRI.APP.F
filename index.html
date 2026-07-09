@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<meta name="theme-color" content="#2E7D4F" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+<meta name="apple-mobile-web-app-title" content="薬液調合" />
+<title>薬液調合ノート</title>
+<link rel="manifest" href="./manifest.json" />
+<link rel="icon" href="./icon-192.png" />
+<link rel="apple-touch-icon" href="./apple-touch-icon.png" />
+<style>
+  * { box-sizing: border-box; margin: 0; }
+  body { background: #F0F3EC; }
+  .num { font-variant-numeric: tabular-nums; }
+  input:focus-visible, button:focus-visible, select:focus-visible { outline: 3px solid #2E7D4F; outline-offset: 1px; }
+  button { touch-action: manipulation; }
+  @media print {
+    .no-print, nav { display: none !important; }
+    body { background: #fff; }
+    .print-only { display: block !important; }
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="./react.production.min.js"></script>
+<script src="./react-dom.production.min.js"></script>
+<script src="./app.js"></script>
+<script>
+  // Service Worker登録(オフライン対応)
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("./sw.js").catch((e) => console.error("SW登録失敗", e));
+    });
+  }
+</script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "薬液調合ノート",
+  "short_name": "薬液調合",
+  "description": "農薬タンクミックスの薬量・水量計算と防除記録",
+  "lang": "ja",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F0F3EC",
+  "theme_color": "#2E7D4F",
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
