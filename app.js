@@ -120,6 +120,64 @@ function App() {
     setTimeout(() => setToast(""), 2200);
   };
 
+  // ── 作業リスト(事前計画) ──
+  const [targetId, setTargetId] = useState(null); // 調合中の対象圃場
+
+  // 圃場を作業リストに追加
+  const addPlan = p => {
+    const rec = {
+      id: Date.now(),
+      date: "",
+      field: p.field || "(未入力)",
+      crop: p.crop || "",
+      memo: "",
+      areaA: p.areaA !== "" ? parseFloat(p.areaA) || "" : "",
+      plannedL: parseFloat(p.plannedL) || 0,
+      totalL: 0,
+      waterMl: 0,
+      synced: false,
+      reported: false,
+      reportSynced: false,
+      chems: []
+    };
+    const next = [...records, rec];
+    setRecords(next);
+    save("tankmix:records", next);
+    flash(`「${rec.field}」を作業リストに追加しました`);
+  };
+
+  // 作業リスト内の並べ替え(未報告のものの中で上下入替)
+  const movePlan = (id, dir) => {
+    const visible = records.filter(r => !r.reported).map(r => r.id);
+    const vi = visible.indexOf(id);
+    const vj = vi + dir;
+    if (vi < 0 || vj < 0 || vj >= visible.length) return;
+    const otherId = visible[vj];
+    const i = records.findIndex(r => r.id === id);
+    const j = records.findIndex(r => r.id === otherId);
+    const next = [...records];
+    [next[i], next[j]] = [next[j], next[i]];
+    setRecords(next);
+    save("tankmix:records", next);
+  };
+
+  // 調合計算画面で対象圃場を選択(総量に予定薬液量をセット)
+  const selectPlan = id => {
+    if (!id) {
+      setTargetId(null);
+      return;
+    }
+    const r = records.find(x => x.id === Number(id));
+    if (!r) return;
+    setTargetId(r.id);
+    setField(r.field);
+    setCrop(r.crop || "");
+    if (r.plannedL > 0) {
+      setMode("direct");
+      setTotalL(String(r.plannedL));
+    }
+  };
+
   // 1件送信(type: "record"=調合記録 / "report"=散布報告)
   const sendPayload = async (type, rec) => {
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
@@ -187,13 +245,7 @@ function App() {
     if (sent > 0) flash(`${sent}件をスプレッドシートに送信しました`);
   };
 
-  // 起動時と、電波が復帰したときに自動送信
-  useEffect(() => {
-    syncPending();
-    const h = () => syncPending();
-    window.addEventListener("online", h);
-    return () => window.removeEventListener("online", h);
-  }, []);
+  // 送信はユーザーの「一括送信」操作で行う(現場では圏外のことが多いため)
 
   // 接続テスト
   const testConnection = async () => {
@@ -269,44 +321,64 @@ function App() {
     save("tankmix:presets", next);
   };
   const saveRecord = () => {
-    const rec = {
-      id: Date.now(),
-      date: today(),
-      field: field || "(未入力)",
-      crop: crop || "",
-      memo: memo || "",
-      areaA: mode === "area" ? parseFloat(areaA) || "" : "",
-      totalL: effTotalL,
-      waterMl,
-      synced: false,
-      reported: false,
-      reportSynced: false,
-      chems: calc.filter(c => c.valid).map(({
-        name,
-        form,
-        ratio,
-        ml
-      }) => ({
-        name: name || "(無名)",
-        form,
-        ratio,
-        ml
-      }))
-    };
-    const next = [rec, ...records];
+    const chemsData = calc.filter(c => c.valid).map(({
+      name,
+      form,
+      ratio,
+      ml
+    }) => ({
+      name: name || "(無名)",
+      form,
+      ratio,
+      ml
+    }));
+    let next;
+    if (targetId && records.some(r => r.id === targetId)) {
+      // 作業リストの圃場に調合内容を紐付け
+      next = records.map(r => r.id === targetId ? {
+        ...r,
+        date: today(),
+        field: field || r.field,
+        crop: crop || r.crop,
+        memo: memo || r.memo,
+        totalL: effTotalL,
+        waterMl,
+        chems: chemsData,
+        synced: false
+      } : r);
+      setTargetId(null);
+    } else {
+      // 単独の新規記録
+      const rec = {
+        id: Date.now(),
+        date: today(),
+        field: field || "(未入力)",
+        crop: crop || "",
+        memo: memo || "",
+        areaA: mode === "area" ? parseFloat(areaA) || "" : "",
+        plannedL: 0,
+        totalL: effTotalL,
+        waterMl,
+        synced: false,
+        reported: false,
+        reportSynced: false,
+        chems: chemsData
+      };
+      next = [...records, rec];
+    }
     setRecords(next);
     save("tankmix:records", next);
-    flash("調合記録を保存しました");
-    setTab("records");
-    syncPending(next); // 電波があればその場でスプレッドシートへ
+    flash("調合を記録しました。散布後に実績を入力してください");
+    setTab("report");
   };
 
-  // 散布完了報告(実散布量・面積・備考を記録に追記して送信)
+  // 散布実績の入力(作業終了後の一括送信までは端末内に保持)
   const submitReport = (id, rep) => {
     const next = records.map(r => r.id === id ? {
       ...r,
       reported: true,
       reportSynced: false,
+      date: r.date || today(),
       sprayedL: parseFloat(rep.sprayedL) || 0,
       reportAreaA: rep.areaA !== "" ? parseFloat(rep.areaA) || "" : r.areaA || "",
       reportMemo: rep.memo || "",
@@ -314,8 +386,7 @@ function App() {
     } : r);
     setRecords(next);
     save("tankmix:records", next);
-    flash("散布報告を保存しました");
-    syncPending(next);
+    flash("実績を保存しました。作業終了後に一括送信してください");
   };
   const deleteRecord = id => {
     const next = records.filter(r => r.id !== id);
@@ -323,8 +394,12 @@ function App() {
     save("tankmix:records", next);
   };
   const exportCSV = () => {
-    const head = "日付,圃場,作物,面積(a),総量(L),水量(L),薬剤名,剤型,希釈倍率,薬量(mL),実散布量(L),状態,備考\n";
-    const body = records.flatMap(r => r.chems.map(c => [r.date, r.field, r.crop || "", r.reportAreaA || r.areaA || "", fmt(r.totalL, 3), fmtL(r.waterMl), c.name, formLabel(c.form), c.ratio, fmt(c.ml), r.reported ? fmt(r.sprayedL, 2) : "", r.reported ? "散布済" : "調合のみ", (r.reportMemo || r.memo || "").replace(/[,\n]/g, " ")].join(","))).join("\n");
+    const plain = (n, d = 2) => isFinite(n) ? Number(n).toFixed(d).replace(/\.?0+$/, "") : "";
+    const head = "日付,圃場,作物,面積(a),薬剤数,薬剤内容,総量(L),水量(L),実散布量(L),状態,報告日,備考\n";
+    const body = records.map(r => {
+      const chemsStr = r.chems.map(c => `${c.name}(${formLabel(c.form)}・${c.ratio}倍・${Math.round(c.ml)}mL)`).join(" / ");
+      return [r.date, r.field, r.crop || "", plain(parseFloat(r.reportAreaA || r.areaA), 1), r.chems.length, chemsStr, plain(r.totalL), plain(r.waterMl / 1000, 3), r.reported ? plain(r.sprayedL) : "", r.reported ? "散布済" : "調合のみ", r.reportDate || "", (r.reportMemo || r.memo || "").replace(/[,\n]/g, " ")].join(",");
+    }).join("\n");
     const blob = new Blob(["\uFEFF" + head + body], {
       type: "text/csv;charset=utf-8"
     });
@@ -375,7 +450,19 @@ function App() {
     memo,
     setMemo,
     savePreset,
-    saveRecord
+    saveRecord,
+    targetId,
+    selectPlan,
+    planOptions: records.filter(r => !r.reported && r.chems.length === 0)
+  }), tab === "report" && /*#__PURE__*/React.createElement(WorkTab, {
+    records: records,
+    submitReport: submitReport,
+    addPlan: addPlan,
+    movePlan: movePlan,
+    deleteRecord: deleteRecord,
+    syncPending: syncPending,
+    syncing: syncing,
+    gasUrl: gasUrl
   }), tab === "presets" && /*#__PURE__*/React.createElement(PresetsTab, {
     presets: presets,
     loadPreset: loadPreset,
@@ -390,12 +477,11 @@ function App() {
     setRecorder: setRecorder,
     testConnection: testConnection,
     syncPending: syncPending,
-    syncing: syncing,
-    submitReport: submitReport
+    syncing: syncing
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
     className: "no-print"
-  }, [["calc", "🧮", "調合計算"], ["presets", "⭐", "プリセット"], ["records", "📋", "記録"]].map(([k, icon, label]) => /*#__PURE__*/React.createElement("button", {
+  }, [["calc", "🧮", "調合計算"], ["report", "🚁", "作業リスト"], ["presets", "⭐", "プリセット"], ["records", "📋", "記録"]].map(([k, icon, label]) => /*#__PURE__*/React.createElement("button", {
     key: k,
     onClick: () => setTab(k),
     style: {
@@ -404,11 +490,11 @@ function App() {
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
-      fontSize: 20
+      fontSize: 22
     }
   }, icon), /*#__PURE__*/React.createElement("span", {
     style: {
-      fontSize: 11,
+      fontSize: 12,
       fontWeight: 700
     }
   }, label)))));
@@ -420,7 +506,16 @@ function CalcTab(p) {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "薬液の総量"), /*#__PURE__*/React.createElement("div", {
+  }, "薬液の総量"), p.planOptions.length > 0 && /*#__PURE__*/React.createElement("select", {
+    value: p.targetId || "",
+    onChange: e => p.selectPlan(e.target.value),
+    style: S.planSelect
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "▼ 作業リストの圃場を選ぶ(任意)"), p.planOptions.map(r => /*#__PURE__*/React.createElement("option", {
+    key: r.id,
+    value: r.id
+  }, r.field, r.crop ? `(${r.crop})` : "", r.plannedL ? ` — 予定${r.plannedL}L` : ""))), /*#__PURE__*/React.createElement("div", {
     style: S.segWrap
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => p.setMode("direct"),
@@ -736,29 +831,46 @@ function PresetsTab({
   }, "削除"))));
 }
 
-// ═══════════════════ 記録タブ ═══════════════════
-function RecordsTab({
+// ═══════════════════ 作業リストタブ ═══════════════════
+function WorkTab({
   records,
+  submitReport,
+  addPlan,
+  movePlan,
   deleteRecord,
-  exportCSV,
-  gasUrl,
-  setGasUrl,
-  recorder,
-  setRecorder,
-  testConnection,
   syncPending,
   syncing,
-  submitReport
+  gasUrl
 }) {
-  const [showSettings, setShowSettings] = useState(() => !gasUrl);
+  // 追加フォーム
+  const [pField, setPField] = useState("");
+  const [pCrop, setPCrop] = useState("");
+  const [pArea, setPArea] = useState("");
+  const [pLiters, setPLiters] = useState("");
+  // 実績入力フォーム
   const [reportingId, setReportingId] = useState(null);
   const [repSprayed, setRepSprayed] = useState("");
   const [repArea, setRepArea] = useState("");
   const [repMemo, setRepMemo] = useState("");
+  const worklist = records.filter(r => !r.reported);
+  const doneToday = records.filter(r => r.reported && r.reportDate === today());
   const pending = records.filter(r => !r.synced || r.reported && !r.reportSynced).length;
+  const add = () => {
+    if (!pField.trim()) return;
+    addPlan({
+      field: pField.trim(),
+      crop: pCrop.trim(),
+      areaA: pArea,
+      plannedL: pLiters
+    });
+    setPField("");
+    setPCrop("");
+    setPArea("");
+    setPLiters("");
+  };
   const openReport = r => {
     setReportingId(r.id);
-    setRepSprayed(String(r.totalL || ""));
+    setRepSprayed(String(r.totalL || r.plannedL || ""));
     setRepArea(r.areaA !== "" && r.areaA != null ? String(r.areaA) : "");
     setRepMemo("");
   };
@@ -770,6 +882,248 @@ function RecordsTab({
     });
     setReportingId(null);
   };
+  const chemsLine = r => r.chems.map(c => `${c.name} ${c.ratio}倍`).join(" ／ ");
+  const statusOf = r => r.chems.length > 0 ? "調合済" : "計画";
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "圃場を追加(出発前にまとめて登録)"), /*#__PURE__*/React.createElement("div", {
+    style: S.areaGrid
+  }, /*#__PURE__*/React.createElement("input", {
+    value: pField,
+    placeholder: "圃場名 ※必須",
+    onChange: e => setPField(e.target.value),
+    style: S.fieldInput
+  }), /*#__PURE__*/React.createElement("input", {
+    value: pCrop,
+    placeholder: "作物名",
+    onChange: e => setPCrop(e.target.value),
+    style: S.fieldInput
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.areaGrid,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "面積(a)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    value: pArea,
+    onChange: e => setPArea(e.target.value),
+    style: S.midInput,
+    className: "num"
+  })), /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "予定薬液量(L)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    value: pLiters,
+    onChange: e => setPLiters(e.target.value),
+    style: S.midInput,
+    className: "num"
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: add,
+    disabled: !pField.trim(),
+    style: {
+      ...S.primaryBtn,
+      width: "100%",
+      marginTop: 12,
+      opacity: pField.trim() ? 1 : 0.4
+    }
+  }, "＋ 作業リストに追加")), /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "作業リスト(", worklist.length, "件)— ▲▼で順番を入替"), worklist.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "圃場がまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "上のフォームから散布予定の圃場を追加してください。"), worklist.map((r, idx) => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    style: S.record
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.recordHead
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.orderNum,
+    className: "num"
+  }, idx + 1), /*#__PURE__*/React.createElement("div", {
+    style: {
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.recordField
+  }, r.field, r.crop ? `(${r.crop})` : ""), /*#__PURE__*/React.createElement("div", {
+    style: S.listSub,
+    className: "num"
+  }, r.areaA ? `${fmt(parseFloat(r.areaA), 1)} a` : "面積未定", r.plannedL ? ` ／ 予定 ${fmt(r.plannedL, 1)} L` : ""))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 6,
+      alignItems: "center",
+      flexShrink: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: r.chems.length > 0 ? S.badgeOk : S.badgePlan
+  }, statusOf(r)), /*#__PURE__*/React.createElement("button", {
+    onClick: () => movePlan(r.id, -1),
+    disabled: idx === 0,
+    style: {
+      ...S.orderBtn,
+      opacity: idx === 0 ? 0.3 : 1
+    },
+    "aria-label": "上へ"
+  }, "▲"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => movePlan(r.id, 1),
+    disabled: idx === worklist.length - 1,
+    style: {
+      ...S.orderBtn,
+      opacity: idx === worklist.length - 1 ? 0.3 : 1
+    },
+    "aria-label": "下へ"
+  }, "▼"))), /*#__PURE__*/React.createElement("div", {
+    style: S.recordBody
+  }, r.chems.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: S.recordTotal,
+    className: "num"
+  }, "🧪 総量 ", /*#__PURE__*/React.createElement("strong", null, fmt(r.totalL, 2), " L"), "(薬剤", r.chems.length, "種):", chemsLine(r)), reportingId === r.id ? /*#__PURE__*/React.createElement("div", {
+    style: S.reportForm
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "散布実績の入力"), /*#__PURE__*/React.createElement("div", {
+    style: S.areaGrid
+  }, /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "実散布量(L)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    value: repSprayed,
+    onChange: e => setRepSprayed(e.target.value),
+    style: S.midInput,
+    className: "num"
+  })), /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "散布面積(a)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    value: repArea,
+    onChange: e => setRepArea(e.target.value),
+    style: S.midInput,
+    className: "num"
+  }))), /*#__PURE__*/React.createElement("input", {
+    value: repMemo,
+    placeholder: "備考(残液・中断理由など任意)",
+    onChange: e => setRepMemo(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 10
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setReportingId(null),
+    style: S.secondaryBtn
+  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
+    onClick: sendReport,
+    style: S.primaryBtn
+  }, "実績を保存"))) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 10,
+      marginTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => openReport(r),
+    style: {
+      ...S.reportBtn,
+      flex: 1,
+      marginTop: 0
+    }
+  }, "🚁 実績を入力"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (confirm(`「${r.field}」をリストから削除しますか？`)) deleteRecord(r.id);
+    },
+    style: {
+      ...S.smallDanger,
+      alignSelf: "stretch"
+    }
+  }, "削除")))))), doneToday.length > 0 && /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "本日の完了(", doneToday.length, "件)"), doneToday.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    style: S.listItem
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.listTitle
+  }, r.field, r.crop ? `(${r.crop})` : ""), /*#__PURE__*/React.createElement("div", {
+    style: S.listSub,
+    className: "num"
+  }, "実散布 ", fmt(r.sprayedL, 2), " L", r.reportAreaA ? ` ／ ${fmt(parseFloat(r.reportAreaA), 1)} a` : "", " ／ 薬剤", r.chems.length, "種")), /*#__PURE__*/React.createElement("span", {
+    style: S.badgeDone
+  }, "🚁完了")))), /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "作業終了後に"), !gasUrl && /*#__PURE__*/React.createElement("p", {
+    style: {
+      ...S.memoLine,
+      marginBottom: 10
+    }
+  }, "※送信先が未設定です。「記録」タブの設定からURLを登録してください。"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => syncPending(),
+    disabled: syncing || pending === 0 || !gasUrl,
+    style: {
+      ...S.bigSendBtn,
+      opacity: syncing || pending === 0 || !gasUrl ? 0.45 : 1
+    }
+  }, syncing ? "送信中…" : pending === 0 ? "☁ 送信するデータはありません" : `☁ 全データを送信(未送信 ${pending}件)`), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "電波のある場所で押してください。送信済みのデータは二重登録されません。")));
+}
+
+// ═══════════════════ 記録タブ ═══════════════════
+function RecordsTab({
+  records,
+  deleteRecord,
+  exportCSV,
+  gasUrl,
+  setGasUrl,
+  recorder,
+  setRecorder,
+  testConnection,
+  syncPending,
+  syncing
+}) {
+  const [showSettings, setShowSettings] = useState(() => !gasUrl);
+  const list = [...records].sort((a, b) => b.id - a.id);
+  const pending = records.filter(r => !r.synced || r.reported && !r.reportSynced).length;
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
@@ -870,7 +1224,7 @@ function RecordsTab({
     className: "print-only"
   }, "調合記録一覧"), records.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "まだ記録がありません。", /*#__PURE__*/React.createElement("br", null), "調合計算の画面で「📋 記録に保存」を押すと、日付・圃場・薬量が履歴として残ります。"), records.map(r => /*#__PURE__*/React.createElement("div", {
+  }, "まだ記録がありません。", /*#__PURE__*/React.createElement("br", null), "調合計算の画面で「📋 記録に保存」を押すと、日付・圃場・薬量が履歴として残ります。"), list.map(r => /*#__PURE__*/React.createElement("div", {
     key: r.id,
     style: S.record
   }, /*#__PURE__*/React.createElement("div", {
@@ -918,64 +1272,10 @@ function RecordsTab({
     }
   }, fmt(c.ml), " mL"))), r.memo && /*#__PURE__*/React.createElement("div", {
     style: S.memoLine
-  }, "備考:", r.memo), r.reported ? /*#__PURE__*/React.createElement("div", {
+  }, "備考:", r.memo), r.reported && /*#__PURE__*/React.createElement("div", {
     style: S.reportDone,
     className: "num"
-  }, "🚁 ", r.reportDate, " 散布報告:実散布量 ", /*#__PURE__*/React.createElement("strong", null, fmt(r.sprayedL, 2), " L"), r.reportAreaA ? ` ／ ${fmt(parseFloat(r.reportAreaA), 1)} a` : "", r.reportMemo ? ` ／ ${r.reportMemo}` : "") : reportingId === r.id ? /*#__PURE__*/React.createElement("div", {
-    style: S.reportForm,
-    className: "no-print"
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.smallLabel
-  }, "散布完了報告"), /*#__PURE__*/React.createElement("div", {
-    style: S.areaGrid
-  }, /*#__PURE__*/React.createElement("label", {
-    style: S.areaField
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "実散布量(L)"), /*#__PURE__*/React.createElement("input", {
-    type: "number",
-    inputMode: "decimal",
-    min: "0",
-    value: repSprayed,
-    onChange: e => setRepSprayed(e.target.value),
-    style: S.midInput,
-    className: "num"
-  })), /*#__PURE__*/React.createElement("label", {
-    style: S.areaField
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "散布面積(a)"), /*#__PURE__*/React.createElement("input", {
-    type: "number",
-    inputMode: "decimal",
-    min: "0",
-    value: repArea,
-    onChange: e => setRepArea(e.target.value),
-    style: S.midInput,
-    className: "num"
-  }))), /*#__PURE__*/React.createElement("input", {
-    value: repMemo,
-    placeholder: "備考(残液処理・中断理由など任意)",
-    onChange: e => setRepMemo(e.target.value),
-    style: {
-      ...S.fieldInput,
-      marginTop: 8
-    }
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.btnRow,
-      marginTop: 10
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setReportingId(null),
-    style: S.secondaryBtn
-  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
-    onClick: sendReport,
-    style: S.primaryBtn
-  }, "報告を送信"))) : /*#__PURE__*/React.createElement("button", {
-    onClick: () => openReport(r),
-    style: S.reportBtn,
-    className: "no-print"
-  }, "🚁 散布完了を報告する"))))));
+  }, "🚁 ", r.reportDate, " 散布報告:実散布量 ", /*#__PURE__*/React.createElement("strong", null, fmt(r.sprayedL, 2), " L"), r.reportAreaA ? ` ／ ${fmt(parseFloat(r.reportAreaA), 1)} a` : "", r.reportMemo ? ` ／ ${r.reportMemo}` : ""))))));
 }
 
 // ═══════════════════ スタイル ═══════════════════
@@ -993,13 +1293,13 @@ const S = {
     margin: "0 auto"
   },
   eyebrow: {
-    fontSize: 10,
+    fontSize: 11,
     letterSpacing: "0.2em",
     fontWeight: 700,
     color: "#2E7D4F"
   },
   title: {
-    fontSize: 24,
+    fontSize: 27,
     fontWeight: 800,
     margin: "2px 0 0",
     letterSpacing: "-0.01em"
@@ -1034,7 +1334,7 @@ const S = {
     boxShadow: "0 2px 8px rgba(28,43,33,0.05)"
   },
   cardLabel: {
-    fontSize: 11,
+    fontSize: 13,
     letterSpacing: "0.14em",
     fontWeight: 700,
     color: "#66756a",
@@ -1049,8 +1349,8 @@ const S = {
   },
   seg: {
     flex: 1,
-    padding: "10px 0",
-    fontSize: 13.5,
+    padding: "12px 0",
+    fontSize: 15,
     fontWeight: 700,
     border: "none",
     background: "transparent",
@@ -1069,7 +1369,7 @@ const S = {
     gap: 8
   },
   totalInput: {
-    fontSize: 38,
+    fontSize: 44,
     fontWeight: 800,
     width: 150,
     border: "none",
@@ -1079,7 +1379,7 @@ const S = {
     color: "#1C2B21"
   },
   totalUnit: {
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: 700,
     color: "#2E7D4F"
   },
@@ -1094,7 +1394,7 @@ const S = {
     gap: 5
   },
   smallLabel: {
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 700,
     color: "#66756a"
   },
@@ -1105,24 +1405,24 @@ const S = {
   },
   midInput: {
     width: "100%",
-    fontSize: 22,
+    fontSize: 26,
     fontWeight: 700,
-    padding: "8px 10px",
+    padding: "10px 12px",
     border: "1.5px solid #D8E0D2",
     borderRadius: 9,
     background: "#FAFBF8"
   },
   midUnit: {
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: 700,
     color: "#66756a"
   },
   derived: {
     marginTop: 12,
-    padding: "10px 14px",
+    padding: "12px 14px",
     background: "#EDF5EE",
     borderRadius: 9,
-    fontSize: 14,
+    fontSize: 16,
     fontWeight: 600,
     color: "#2E7D4F"
   },
@@ -1155,32 +1455,32 @@ const S = {
   nameInput: {
     flex: 1,
     minWidth: 0,
-    fontSize: 16,
-    padding: "10px 10px",
+    fontSize: 17,
+    padding: "12px 12px",
     border: "1.5px solid #D8E0D2",
     borderRadius: 8,
     background: "#fff"
   },
   formSelect: {
-    fontSize: 14,
+    fontSize: 15.5,
     fontWeight: 600,
-    padding: "10px 8px",
+    padding: "12px 8px",
     border: "1.5px solid #D8E0D2",
     borderRadius: 8,
     background: "#fff"
   },
   ratioInput: {
-    width: 82,
-    fontSize: 17,
+    width: 92,
+    fontSize: 20,
     fontWeight: 700,
-    padding: "9px 8px",
+    padding: "11px 8px",
     textAlign: "right",
     border: "1.5px solid #D8E0D2",
     borderRadius: 8,
     background: "#fff"
   },
   chemResult: {
-    fontSize: 14.5,
+    fontSize: 16,
     marginLeft: "auto",
     whiteSpace: "nowrap"
   },
@@ -1194,8 +1494,8 @@ const S = {
   },
   addBtn: {
     width: "100%",
-    padding: "13px 0",
-    fontSize: 14.5,
+    padding: "15px 0",
+    fontSize: 16,
     fontWeight: 700,
     color: "#2E7D4F",
     background: "#EDF5EE",
@@ -1208,8 +1508,8 @@ const S = {
     border: "1.5px solid #C74E36",
     color: "#8a2f1c",
     borderRadius: 9,
-    padding: "10px 12px",
-    fontSize: 13.5,
+    padding: "12px 14px",
+    fontSize: 15,
     fontWeight: 600,
     marginBottom: 12
   },
@@ -1244,27 +1544,27 @@ const S = {
     borderBottom: "1px solid #EDF1EA"
   },
   tdName: {
-    padding: "10px 4px",
-    fontSize: 14.5,
+    padding: "12px 4px",
+    fontSize: 16,
     display: "flex",
     alignItems: "center",
     gap: 7,
     flexWrap: "wrap"
   },
   tdSub: {
-    fontSize: 11.5,
+    fontSize: 13,
     color: "#8a978e",
     marginLeft: 3
   },
   tdMl: {
-    padding: "10px 4px",
+    padding: "12px 4px",
     textAlign: "right",
-    fontSize: 17,
+    fontSize: 20,
     fontWeight: 700,
     whiteSpace: "nowrap"
   },
   unit: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: 400,
     color: "#8a978e"
   },
@@ -1276,7 +1576,7 @@ const S = {
     marginBottom: 16
   },
   orderTitle: {
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: 800,
     color: "#7a621f",
     marginBottom: 9
@@ -1293,16 +1593,16 @@ const S = {
     display: "flex",
     alignItems: "center",
     gap: 8,
-    fontSize: 13.5,
+    fontSize: 15,
     flexWrap: "wrap"
   },
   orderStep: {
-    width: 22,
-    height: 22,
+    width: 26,
+    height: 26,
     borderRadius: "50%",
     background: "#B78A1F",
     color: "#fff",
-    fontSize: 12,
+    fontSize: 14,
     fontWeight: 800,
     display: "inline-flex",
     alignItems: "center",
@@ -1310,7 +1610,7 @@ const S = {
     flexShrink: 0
   },
   note: {
-    fontSize: 11.5,
+    fontSize: 13,
     color: "#8a978e",
     margin: "10px 0 0"
   },
@@ -1319,8 +1619,8 @@ const S = {
   },
   fieldInput: {
     width: "100%",
-    fontSize: 15,
-    padding: "11px 12px",
+    fontSize: 17,
+    padding: "13px 14px",
     border: "1.5px solid #D8E0D2",
     borderRadius: 9,
     background: "#FAFBF8"
@@ -1331,8 +1631,8 @@ const S = {
     gap: 10
   },
   primaryBtn: {
-    padding: "14px 0",
-    fontSize: 15,
+    padding: "16px 0",
+    fontSize: 17,
     fontWeight: 800,
     color: "#fff",
     background: "#2E7D4F",
@@ -1341,8 +1641,8 @@ const S = {
     cursor: "pointer"
   },
   secondaryBtn: {
-    padding: "14px 0",
-    fontSize: 15,
+    padding: "16px 0",
+    fontSize: 17,
     fontWeight: 800,
     color: "#2E7D4F",
     background: "#EDF5EE",
@@ -1351,8 +1651,8 @@ const S = {
     cursor: "pointer"
   },
   smallPrimary: {
-    padding: "8px 14px",
-    fontSize: 13,
+    padding: "10px 16px",
+    fontSize: 14.5,
     fontWeight: 700,
     color: "#fff",
     background: "#2E7D4F",
@@ -1362,8 +1662,8 @@ const S = {
     flexShrink: 0
   },
   smallSecondary: {
-    padding: "8px 14px",
-    fontSize: 13,
+    padding: "10px 16px",
+    fontSize: 14.5,
     fontWeight: 700,
     color: "#2E7D4F",
     background: "#EDF5EE",
@@ -1373,8 +1673,8 @@ const S = {
     flexShrink: 0
   },
   smallDanger: {
-    padding: "8px 12px",
-    fontSize: 13,
+    padding: "10px 14px",
+    fontSize: 14.5,
     fontWeight: 700,
     color: "#8a2f1c",
     background: "#FBEBE7",
@@ -1391,18 +1691,18 @@ const S = {
     borderBottom: "1px solid #EDF1EA"
   },
   listTitle: {
-    fontSize: 15,
+    fontSize: 17,
     fontWeight: 800
   },
   listSub: {
-    fontSize: 12.5,
+    fontSize: 14,
     color: "#66756a",
     marginTop: 2,
     overflow: "hidden",
     textOverflow: "ellipsis"
   },
   empty: {
-    fontSize: 14,
+    fontSize: 15.5,
     color: "#8a978e",
     lineHeight: 1.8,
     textAlign: "center",
@@ -1423,11 +1723,11 @@ const S = {
     borderBottom: "1px solid #E4EAE0"
   },
   recordDate: {
-    fontSize: 13.5,
+    fontSize: 15.5,
     fontWeight: 800
   },
   recordField: {
-    fontSize: 13.5,
+    fontSize: 16.5,
     fontWeight: 600,
     color: "#2E7D4F",
     marginLeft: 10
@@ -1436,7 +1736,7 @@ const S = {
     padding: "10px 12px"
   },
   recordTotal: {
-    fontSize: 13.5,
+    fontSize: 15.5,
     marginBottom: 8,
     color: "#33443a"
   },
@@ -1444,7 +1744,7 @@ const S = {
     display: "flex",
     alignItems: "center",
     gap: 7,
-    fontSize: 13.5,
+    fontSize: 15,
     padding: "5px 0",
     borderTop: "1px dashed #EDF1EA"
   },
@@ -1483,14 +1783,14 @@ const S = {
     marginTop: 12,
     paddingTop: 12,
     borderTop: "1px solid #EDF1EA",
-    fontSize: 13,
+    fontSize: 14.5,
     flexWrap: "wrap"
   },
   linkBtn: {
     border: "none",
     background: "transparent",
     color: "#3B7EA1",
-    fontSize: 13,
+    fontSize: 15,
     fontWeight: 700,
     cursor: "pointer",
     textDecoration: "underline",
@@ -1504,7 +1804,7 @@ const S = {
     borderRadius: 10
   },
   badgeOk: {
-    fontSize: 11,
+    fontSize: 12.5,
     fontWeight: 800,
     color: "#2E7D4F",
     background: "#EDF5EE",
@@ -1513,7 +1813,7 @@ const S = {
     marginLeft: 8
   },
   badgePending: {
-    fontSize: 11,
+    fontSize: 12.5,
     fontWeight: 800,
     color: "#8a5a1c",
     background: "#FBF7EC",
@@ -1523,7 +1823,7 @@ const S = {
     marginLeft: 8
   },
   badgeDone: {
-    fontSize: 11,
+    fontSize: 12.5,
     fontWeight: 800,
     color: "#2b5a7a",
     background: "#EAF3FA",
@@ -1531,8 +1831,54 @@ const S = {
     padding: "2px 7px",
     marginLeft: 8
   },
+  orderNum: {
+    width: 34,
+    height: 34,
+    borderRadius: 9,
+    background: "#1C2B21",
+    color: "#fff",
+    fontSize: 17,
+    fontWeight: 800,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0
+  },
+  orderBtn: {
+    width: 42,
+    height: 42,
+    fontSize: 16,
+    fontWeight: 800,
+    color: "#1C2B21",
+    background: "#EDF1EA",
+    border: "1.5px solid #D8E0D2",
+    borderRadius: 9,
+    cursor: "pointer"
+  },
+  bigSendBtn: {
+    width: "100%",
+    padding: "20px 0",
+    fontSize: 18,
+    fontWeight: 800,
+    color: "#fff",
+    background: "#3B7EA1",
+    border: "none",
+    borderRadius: 13,
+    cursor: "pointer"
+  },
+  planSelect: {
+    width: "100%",
+    fontSize: 16,
+    fontWeight: 700,
+    padding: "13px 10px",
+    marginBottom: 12,
+    border: "2px solid #2E7D4F",
+    borderRadius: 10,
+    background: "#EDF5EE",
+    color: "#1C2B21"
+  },
   badgePlan: {
-    fontSize: 11,
+    fontSize: 12.5,
     fontWeight: 800,
     color: "#66756a",
     background: "#EDF1EA",
@@ -1541,15 +1887,15 @@ const S = {
     marginLeft: 8
   },
   memoLine: {
-    fontSize: 12.5,
+    fontSize: 14,
     color: "#66756a",
     marginTop: 8
   },
   reportBtn: {
     width: "100%",
     marginTop: 10,
-    padding: "12px 0",
-    fontSize: 14,
+    padding: "15px 0",
+    fontSize: 16.5,
     fontWeight: 800,
     color: "#2b5a7a",
     background: "#EAF3FA",
@@ -1566,10 +1912,10 @@ const S = {
   },
   reportDone: {
     marginTop: 10,
-    padding: "10px 12px",
+    padding: "12px 14px",
     background: "#EAF3FA",
     borderRadius: 9,
-    fontSize: 13,
+    fontSize: 15,
     color: "#2b5a7a",
     fontWeight: 600
   }
