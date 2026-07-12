@@ -98,6 +98,8 @@ function App() {
     ratio: "16"
   }]);
   const [field, setField] = useState("");
+  const [crop, setCrop] = useState("");
+  const [memo, setMemo] = useState("");
   const [presets, setPresets] = useState(() => load("tankmix:presets", []));
   const [records, setRecords] = useState(() => load("tankmix:records", []));
 
@@ -119,8 +121,8 @@ function App() {
     setTimeout(() => setToast(""), 2200);
   };
 
-  // 1件送信(成功でtrue)
-  const sendRecord = async rec => {
+  // 1件送信(type: "record"=調合記録 / "report"=散布報告)
+  const sendPayload = async (type, rec) => {
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
     if (!url) return false;
     try {
@@ -130,6 +132,7 @@ function App() {
           "Content-Type": "text/plain;charset=utf-8"
         },
         body: JSON.stringify({
+          type,
           recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
           record: {
             ...rec,
@@ -147,7 +150,7 @@ function App() {
     }
   };
 
-  // 未送信レコードをまとめて送信(圏外なら次の機会に自動再試行)
+  // 未送信の記録・報告をまとめて送信(圏外なら次の機会に自動再試行)
   const syncPending = async list => {
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
     if (!url || syncingRef.current) return;
@@ -155,16 +158,30 @@ function App() {
     setSyncing(true);
     let current = list || load("tankmix:records", []);
     let sent = 0;
-    for (const rec of current.filter(r => !r.synced)) {
-      const ok = await sendRecord(rec);
-      if (!ok) break;
-      current = current.map(r => r.id === rec.id ? {
-        ...r,
-        synced: true
-      } : r);
-      setRecords(current);
-      save("tankmix:records", current);
-      sent++;
+    for (const rec of current) {
+      if (!rec.synced) {
+        const ok = await sendPayload("record", rec);
+        if (!ok) break;
+        current = current.map(r => r.id === rec.id ? {
+          ...r,
+          synced: true
+        } : r);
+        setRecords(current);
+        save("tankmix:records", current);
+        sent++;
+      }
+      const cur = current.find(r => r.id === rec.id);
+      if (cur && cur.reported && !cur.reportSynced && cur.synced) {
+        const ok = await sendPayload("report", cur);
+        if (!ok) break;
+        current = current.map(r => r.id === rec.id ? {
+          ...r,
+          reportSynced: true
+        } : r);
+        setRecords(current);
+        save("tankmix:records", current);
+        sent++;
+      }
     }
     syncingRef.current = false;
     setSyncing(false);
@@ -257,9 +274,14 @@ function App() {
       id: Date.now(),
       date: today(),
       field: field || "(未入力)",
+      crop: crop || "",
+      memo: memo || "",
+      areaA: mode === "area" ? parseFloat(areaA) || "" : "",
       totalL: effTotalL,
       waterMl,
       synced: false,
+      reported: false,
+      reportSynced: false,
       chems: calc.filter(c => c.valid).map(({
         name,
         form,
@@ -279,14 +301,31 @@ function App() {
     setTab("records");
     syncPending(next); // 電波があればその場でスプレッドシートへ
   };
+
+  // 散布完了報告(実散布量・面積・備考を記録に追記して送信)
+  const submitReport = (id, rep) => {
+    const next = records.map(r => r.id === id ? {
+      ...r,
+      reported: true,
+      reportSynced: false,
+      sprayedL: parseFloat(rep.sprayedL) || 0,
+      reportAreaA: rep.areaA !== "" ? parseFloat(rep.areaA) || "" : r.areaA || "",
+      reportMemo: rep.memo || "",
+      reportDate: today()
+    } : r);
+    setRecords(next);
+    save("tankmix:records", next);
+    flash("散布報告を保存しました");
+    syncPending(next);
+  };
   const deleteRecord = id => {
     const next = records.filter(r => r.id !== id);
     setRecords(next);
     save("tankmix:records", next);
   };
   const exportCSV = () => {
-    const head = "日付,圃場,総量(L),水量(L),薬剤名,剤型,希釈倍率,薬量(mL)\n";
-    const body = records.flatMap(r => r.chems.map(c => [r.date, r.field, fmt(r.totalL, 3), fmtL(r.waterMl), c.name, formLabel(c.form), c.ratio, fmt(c.ml)].join(","))).join("\n");
+    const head = "日付,圃場,作物,面積(a),総量(L),水量(L),薬剤名,剤型,希釈倍率,薬量(mL),実散布量(L),状態,備考\n";
+    const body = records.flatMap(r => r.chems.map(c => [r.date, r.field, r.crop || "", r.reportAreaA || r.areaA || "", fmt(r.totalL, 3), fmtL(r.waterMl), c.name, formLabel(c.form), c.ratio, fmt(c.ml), r.reported ? fmt(r.sprayedL, 2) : "", r.reported ? "散布済" : "調合のみ", (r.reportMemo || r.memo || "").replace(/[,\n]/g, " ")].join(","))).join("\n");
     const blob = new Blob(["\uFEFF" + head + body], {
       type: "text/csv;charset=utf-8"
     });
@@ -336,6 +375,10 @@ function App() {
         mixOrder,
         field,
         setField,
+        crop,
+        setCrop,
+        memo,
+        setMemo,
         savePreset,
         saveRecord
       }, void 0, false), tab === "presets" && /*#__PURE__*/_jsxDEV(PresetsTab, {
@@ -352,7 +395,8 @@ function App() {
         setRecorder: setRecorder,
         testConnection: testConnection,
         syncPending: syncPending,
-        syncing: syncing
+        syncing: syncing,
+        submitReport: submitReport
       }, void 0, false)]
     }, void 0, true), /*#__PURE__*/_jsxDEV("nav", {
       style: S.tabbar,
@@ -669,13 +713,29 @@ function CalcTab(p) {
         }, void 0, true)]
       }, void 0, true), /*#__PURE__*/_jsxDEV("div", {
         style: S.saveRow,
-        children: /*#__PURE__*/_jsxDEV("input", {
-          value: p.field,
-          placeholder: "圃場名(記録用)",
-          onChange: e => p.setField(e.target.value),
-          style: S.fieldInput
-        }, void 0, false)
-      }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
+        children: [/*#__PURE__*/_jsxDEV("div", {
+          style: S.areaGrid,
+          children: [/*#__PURE__*/_jsxDEV("input", {
+            value: p.field,
+            placeholder: "圃場名",
+            onChange: e => p.setField(e.target.value),
+            style: S.fieldInput
+          }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
+            value: p.crop,
+            placeholder: "作物名(例:水稲)",
+            onChange: e => p.setCrop(e.target.value),
+            style: S.fieldInput
+          }, void 0, false)]
+        }, void 0, true), /*#__PURE__*/_jsxDEV("input", {
+          value: p.memo,
+          placeholder: "備考(天候・風速など任意)",
+          onChange: e => p.setMemo(e.target.value),
+          style: {
+            ...S.fieldInput,
+            marginTop: 8
+          }
+        }, void 0, false)]
+      }, void 0, true), /*#__PURE__*/_jsxDEV("div", {
         style: S.btnRow,
         children: [/*#__PURE__*/_jsxDEV("button", {
           onClick: p.savePreset,
@@ -781,10 +841,29 @@ function RecordsTab({
   setRecorder,
   testConnection,
   syncPending,
-  syncing
+  syncing,
+  submitReport
 }) {
   const [showSettings, setShowSettings] = useState(() => !gasUrl);
-  const pending = records.filter(r => !r.synced).length;
+  const [reportingId, setReportingId] = useState(null);
+  const [repSprayed, setRepSprayed] = useState("");
+  const [repArea, setRepArea] = useState("");
+  const [repMemo, setRepMemo] = useState("");
+  const pending = records.filter(r => !r.synced || r.reported && !r.reportSynced).length;
+  const openReport = r => {
+    setReportingId(r.id);
+    setRepSprayed(String(r.totalL || ""));
+    setRepArea(r.areaA !== "" && r.areaA != null ? String(r.areaA) : "");
+    setRepMemo("");
+  };
+  const sendReport = () => {
+    submitReport(reportingId, {
+      sprayedL: repSprayed,
+      areaA: repArea,
+      memo: repMemo
+    });
+    setReportingId(null);
+  };
   return /*#__PURE__*/_jsxDEV(React.Fragment, {
     children: [/*#__PURE__*/_jsxDEV("section", {
       style: S.card,
@@ -917,11 +996,15 @@ function RecordsTab({
               children: r.date
             }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
               style: S.recordField,
-              children: r.field
-            }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
-              style: r.synced ? S.badgeOk : S.badgePending,
+              children: [r.field, r.crop ? `(${r.crop})` : ""]
+            }, void 0, true), /*#__PURE__*/_jsxDEV("span", {
+              style: r.reported ? S.badgeDone : S.badgePlan,
               className: "no-print",
-              children: r.synced ? "✓送信済" : "未送信"
+              children: r.reported ? "🚁散布済" : "調合のみ"
+            }, void 0, false), /*#__PURE__*/_jsxDEV("span", {
+              style: r.synced && (!r.reported || r.reportSynced) ? S.badgeOk : S.badgePending,
+              className: "no-print",
+              children: r.synced && (!r.reported || r.reportSynced) ? "✓送信済" : "未送信"
             }, void 0, false)]
           }, void 0, true), /*#__PURE__*/_jsxDEV("button", {
             onClick: () => {
@@ -941,7 +1024,7 @@ function RecordsTab({
             className: "num",
             children: ["総量 ", /*#__PURE__*/_jsxDEV("strong", {
               children: [fmt(r.totalL, 2), " L"]
-            }, void 0, true), "(水 ", fmtL(r.waterMl), " L)"]
+            }, void 0, true), "(水 ", fmtL(r.waterMl), " L)", r.areaA || r.reportAreaA ? ` ／ 面積 ${fmt(parseFloat(r.reportAreaA || r.areaA), 1)} a` : ""]
           }, void 0, true), r.chems.map((c, i) => /*#__PURE__*/_jsxDEV("div", {
             style: S.recordChem,
             className: "num",
@@ -960,7 +1043,81 @@ function RecordsTab({
               },
               children: [fmt(c.ml), " mL"]
             }, void 0, true)]
-          }, i, true))]
+          }, i, true)), r.memo && /*#__PURE__*/_jsxDEV("div", {
+            style: S.memoLine,
+            children: ["備考:", r.memo]
+          }, void 0, true), r.reported ? /*#__PURE__*/_jsxDEV("div", {
+            style: S.reportDone,
+            className: "num",
+            children: ["🚁 ", r.reportDate, " 散布報告:実散布量 ", /*#__PURE__*/_jsxDEV("strong", {
+              children: [fmt(r.sprayedL, 2), " L"]
+            }, void 0, true), r.reportAreaA ? ` ／ ${fmt(parseFloat(r.reportAreaA), 1)} a` : "", r.reportMemo ? ` ／ ${r.reportMemo}` : ""]
+          }, void 0, true) : reportingId === r.id ? /*#__PURE__*/_jsxDEV("div", {
+            style: S.reportForm,
+            className: "no-print",
+            children: [/*#__PURE__*/_jsxDEV("div", {
+              style: S.smallLabel,
+              children: "散布完了報告"
+            }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
+              style: S.areaGrid,
+              children: [/*#__PURE__*/_jsxDEV("label", {
+                style: S.areaField,
+                children: [/*#__PURE__*/_jsxDEV("span", {
+                  style: S.smallLabel,
+                  children: "実散布量(L)"
+                }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
+                  type: "number",
+                  inputMode: "decimal",
+                  min: "0",
+                  value: repSprayed,
+                  onChange: e => setRepSprayed(e.target.value),
+                  style: S.midInput,
+                  className: "num"
+                }, void 0, false)]
+              }, void 0, true), /*#__PURE__*/_jsxDEV("label", {
+                style: S.areaField,
+                children: [/*#__PURE__*/_jsxDEV("span", {
+                  style: S.smallLabel,
+                  children: "散布面積(a)"
+                }, void 0, false), /*#__PURE__*/_jsxDEV("input", {
+                  type: "number",
+                  inputMode: "decimal",
+                  min: "0",
+                  value: repArea,
+                  onChange: e => setRepArea(e.target.value),
+                  style: S.midInput,
+                  className: "num"
+                }, void 0, false)]
+              }, void 0, true)]
+            }, void 0, true), /*#__PURE__*/_jsxDEV("input", {
+              value: repMemo,
+              placeholder: "備考(残液処理・中断理由など任意)",
+              onChange: e => setRepMemo(e.target.value),
+              style: {
+                ...S.fieldInput,
+                marginTop: 8
+              }
+            }, void 0, false), /*#__PURE__*/_jsxDEV("div", {
+              style: {
+                ...S.btnRow,
+                marginTop: 10
+              },
+              children: [/*#__PURE__*/_jsxDEV("button", {
+                onClick: () => setReportingId(null),
+                style: S.secondaryBtn,
+                children: "キャンセル"
+              }, void 0, false), /*#__PURE__*/_jsxDEV("button", {
+                onClick: sendReport,
+                style: S.primaryBtn,
+                children: "報告を送信"
+              }, void 0, false)]
+            }, void 0, true)]
+          }, void 0, true) : /*#__PURE__*/_jsxDEV("button", {
+            onClick: () => openReport(r),
+            style: S.reportBtn,
+            className: "no-print",
+            children: "🚁 散布完了を報告する"
+          }, void 0, false)]
         }, void 0, true)]
       }, r.id, true))]
     }, void 0, true)]
@@ -1510,6 +1667,57 @@ const S = {
     borderRadius: 6,
     padding: "2px 7px",
     marginLeft: 8
+  },
+  badgeDone: {
+    fontSize: 11,
+    fontWeight: 800,
+    color: "#2b5a7a",
+    background: "#EAF3FA",
+    borderRadius: 6,
+    padding: "2px 7px",
+    marginLeft: 8
+  },
+  badgePlan: {
+    fontSize: 11,
+    fontWeight: 800,
+    color: "#66756a",
+    background: "#EDF1EA",
+    borderRadius: 6,
+    padding: "2px 7px",
+    marginLeft: 8
+  },
+  memoLine: {
+    fontSize: 12.5,
+    color: "#66756a",
+    marginTop: 8
+  },
+  reportBtn: {
+    width: "100%",
+    marginTop: 10,
+    padding: "12px 0",
+    fontSize: 14,
+    fontWeight: 800,
+    color: "#2b5a7a",
+    background: "#EAF3FA",
+    border: "1.5px solid #BBD6E8",
+    borderRadius: 10,
+    cursor: "pointer"
+  },
+  reportForm: {
+    marginTop: 10,
+    padding: "12px 12px 14px",
+    background: "#F4F9FC",
+    border: "1.5px solid #BBD6E8",
+    borderRadius: 10
+  },
+  reportDone: {
+    marginTop: 10,
+    padding: "10px 12px",
+    background: "#EAF3FA",
+    borderRadius: 9,
+    fontSize: 13,
+    color: "#2b5a7a",
+    fontWeight: 600
   }
 };
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/_jsxDEV(App, {}, void 0, false));

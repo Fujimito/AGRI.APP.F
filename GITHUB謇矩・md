@@ -1,0 +1,125 @@
+# GitHub Pages 公開・更新の詳細手順
+
+## 全体像
+
+```
+[このZIPのファイル一式]
+      ↓ アップロード(push)
+[GitHubリポジトリ] ──自動──→ [GitHub Pages(公開URL)]
+      ↑ 更新もここに上書き           ↓
+                            [各スマホ:ホーム画面アプリ]
+```
+
+GitHubに置いたファイルがそのままWebサイトとして公開され、
+スマホはそのURLをアプリとして使う、という構造です。
+
+---
+
+## 【A】初回公開(ブラウザだけで完結する方法)
+
+### A-1. リポジトリ作成
+1. https://github.com にログイン
+2. 右上「＋」→「New repository」
+3. Repository name: `tankmix-note`(好きな名前でOK)
+4. **Public** を選択(PrivateはPagesが有料プランのため)
+5. 「Add a README file」は**チェックしない**
+6. 「Create repository」
+
+### A-2. ファイルをアップロード
+1. 作成直後の画面で「uploading an existing file」リンクをクリック
+   (見当たらない場合は「Add file」→「Upload files」)
+2. ZIPを解凍した中身の**ファイルを直接**ドラッグ&ドロップ
+   ※フォルダごとではなく、index.html などのファイル自体を入れる
+   ※Code.gs と README類は入れても害はないが、公開に必要なのは:
+     index.html / app.js / sw.js / manifest.json /
+     react.production.min.js / react-dom.production.min.js /
+     icon-192.png / icon-512.png / apple-touch-icon.png
+3. 下の「Commit changes」欄はそのままで緑のボタンを押す
+
+### A-3. Pages を有効化
+1. リポジトリ上部の「Settings」タブ
+2. 左メニュー「Pages」
+3. Build and deployment:
+   - Source: **Deploy from a branch**
+   - Branch: **main** / フォルダ **/(root)** → **Save**
+4. 1〜2分待ってページを再読み込みすると、上部に
+   `Your site is live at https://<ユーザー名>.github.io/tankmix-note/`
+   と表示される。これが公開URL
+
+### A-4. 動作確認
+1. 公開URLをPCブラウザで開き、アプリが表示されるか確認
+2. スマホでも開き、ホーム画面に追加
+3. 一度開いた後、**機内モードにして再起動**→動けばオフライン化成功
+
+---
+
+## 【B】初回公開(WSL/コマンドで行う方法)
+
+Claude CodeやWSLをお使いなら、こちらが後々の更新も楽です。
+
+```bash
+# 解凍したフォルダに移動
+cd tankmix-note-pwa
+
+# Gitリポジトリ化して初回コミット
+git init
+git add .
+git commit -m "薬液調合ノート v3 初回公開"
+git branch -M main
+
+# GitHubのリポジトリ(A-1で作成)を登録してプッシュ
+git remote add origin https://github.com/<ユーザー名>/tankmix-note.git
+git push -u origin main
+```
+
+※push時に認証を求められたら、パスワードではなく
+  **Personal Access Token**(GitHub → Settings → Developer settings →
+  Personal access tokens → Generate)を使います。
+  `gh auth login`(GitHub CLI)を使うともっと簡単です。
+
+その後の Pages 有効化は【A-3】と同じです。
+
+---
+
+## 【C】更新のしかた(2回目以降)
+
+アプリを修正して配布し直すときの流れです。
+
+### C-0. 必ずやること
+**sw.js の3行目 `CACHE_VERSION` の数字を上げる**
+```js
+const CACHE_VERSION = "tankmix-v3";  →  "tankmix-v4"
+```
+これが各スマホに「新しい版があるよ」と知らせる合図です。
+忘れると古いキャッシュが使われ続けます。
+
+### C-1. ブラウザで更新する場合
+1. リポジトリで「Add file」→「Upload files」
+2. 変更したファイル(通常は app.js と sw.js)をドラッグ&ドロップ
+   → 同名ファイルは自動で上書きされる
+3. 「Commit changes」
+
+### C-2. コマンドで更新する場合
+```bash
+git add .
+git commit -m "散布報告機能を追加"
+git push
+```
+
+### C-3. 反映の確認
+- リポジトリの「Actions」タブに「pages build and deployment」が
+  表示され、緑のチェックが付けば公開完了(通常1〜2分)
+- 各スマホは、**電波のある場所でアプリを一度開いて閉じ、
+  もう一度開く**と新版に切り替わります(Service Workerの仕様)
+
+---
+
+## 【D】よくあるつまずき
+
+| 症状 | 原因と対処 |
+|---|---|
+| 404 Not Found | Pagesの反映待ち(数分待つ)/ index.html がルート直下にない |
+| 白い画面 | app.js等のアップロード漏れ。リポジトリのファイル一覧を確認 |
+| 更新が反映されない | sw.jsのCACHE_VERSIONを上げ忘れ。上げてpush→スマホで開き直す |
+| アイコンが出ない | icon-192.png等の漏れ。ホーム画面から一度削除して追加し直す |
+| push時に認証エラー | パスワード認証は廃止済み。Personal Access Tokenか gh CLI を使用 |
