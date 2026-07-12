@@ -16,35 +16,51 @@ const FORMS = [{
   order: 2
 }, {
   key: "wg",
-  label: "顆粒水和剤",
+  label: "顆粒水和剤(DF)",
   order: 3
 }, {
   key: "sc",
-  label: "フロアブル",
+  label: "フロアブル(ゾル)",
   order: 4
 }, {
   key: "sp",
   label: "水溶剤",
   order: 5
 }, {
+  key: "sg",
+  label: "顆粒水溶剤",
+  order: 6
+}, {
   key: "ec",
   label: "乳剤",
-  order: 6
+  order: 7
+}, {
+  key: "ew",
+  label: "EW(エマルション)",
+  order: 8
+}, {
+  key: "me",
+  label: "マイクロエマルション",
+  order: 9
 }, {
   key: "sl",
   label: "液剤",
-  order: 7
+  order: 10
+}, {
+  key: "oil",
+  label: "油剤",
+  order: 11
 }, {
   key: "sti",
   label: "展着剤",
-  order: 8
+  order: 12
 }, {
   key: "etc",
   label: "その他",
-  order: 9
+  order: 13
 }];
 const formLabel = k => (FORMS.find(f => f.key === k) || {}).label || "その他";
-const formOrder = k => (FORMS.find(f => f.key === k) || {}).order || 9;
+const formOrder = k => (FORMS.find(f => f.key === k) || {}).order || 13;
 const fmt = (n, d = 1) => !isFinite(n) ? "—" : n % 1 === 0 ? n.toLocaleString("ja-JP") : n.toLocaleString("ja-JP", {
   maximumFractionDigits: d
 });
@@ -97,8 +113,6 @@ function App() {
     ratio: "16"
   }]);
   const [field, setField] = useState("");
-  const [crop, setCrop] = useState("");
-  const [memo, setMemo] = useState("");
   const [presets, setPresets] = useState(() => load("tankmix:presets", []));
   const [records, setRecords] = useState(() => load("tankmix:records", []));
 
@@ -171,7 +185,6 @@ function App() {
     if (!r) return;
     setTargetId(r.id);
     setField(r.field);
-    setCrop(r.crop || "");
     if (r.plannedL > 0) {
       setMode("direct");
       setTotalL(String(r.plannedL));
@@ -338,9 +351,6 @@ function App() {
       next = records.map(r => r.id === targetId ? {
         ...r,
         date: today(),
-        field: field || r.field,
-        crop: crop || r.crop,
-        memo: memo || r.memo,
         totalL: effTotalL,
         waterMl,
         chems: chemsData,
@@ -348,13 +358,15 @@ function App() {
       } : r);
       setTargetId(null);
     } else {
-      // 単独の新規記録
+      // 圃場を選んでいない場合は、その場で圃場名を入力して作業リストに追加
+      const name = prompt("圃場名を入力してください(作業リストに追加されます)", "");
+      if (name === null) return; // キャンセル
       const rec = {
         id: Date.now(),
         date: today(),
-        field: field || "(未入力)",
-        crop: crop || "",
-        memo: memo || "",
+        field: name.trim() || "(未入力)",
+        crop: "",
+        memo: "",
         areaA: mode === "area" ? parseFloat(areaA) || "" : "",
         plannedL: 0,
         totalL: effTotalL,
@@ -444,11 +456,6 @@ function App() {
     ready,
     mixOrder,
     field,
-    setField,
-    crop,
-    setCrop,
-    memo,
-    setMemo,
     savePreset,
     saveRecord,
     targetId,
@@ -462,26 +469,20 @@ function App() {
     deleteRecord: deleteRecord,
     syncPending: syncPending,
     syncing: syncing,
-    gasUrl: gasUrl
-  }), tab === "presets" && /*#__PURE__*/React.createElement(PresetsTab, {
-    presets: presets,
-    loadPreset: loadPreset,
-    deletePreset: deletePreset
-  }), tab === "records" && /*#__PURE__*/React.createElement(RecordsTab, {
-    records: records,
-    deleteRecord: deleteRecord,
-    exportCSV: exportCSV,
     gasUrl: gasUrl,
     setGasUrl: setGasUrl,
     recorder: recorder,
     setRecorder: setRecorder,
     testConnection: testConnection,
-    syncPending: syncPending,
-    syncing: syncing
+    exportCSV: exportCSV
+  }), tab === "presets" && /*#__PURE__*/React.createElement(PresetsTab, {
+    presets: presets,
+    loadPreset: loadPreset,
+    deletePreset: deletePreset
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
     className: "no-print"
-  }, [["calc", "🧮", "調合計算"], ["report", "🚁", "作業リスト"], ["presets", "⭐", "プリセット"], ["records", "📋", "記録"]].map(([k, icon, label]) => /*#__PURE__*/React.createElement("button", {
+  }, [["calc", "🧮", "調合計算"], ["report", "🚁", "作業・記録"], ["presets", "⭐", "プリセット"]].map(([k, icon, label]) => /*#__PURE__*/React.createElement("button", {
     key: k,
     onClick: () => setTab(k),
     style: {
@@ -729,29 +730,12 @@ function CalcTab(p) {
     style: S.orderStep
   }, p.mixOrder.length + 2), "残りの水を加えて全量にする")), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "※ 一般的な剤型順の目安です。", /*#__PURE__*/React.createElement("strong", null, "混用可否と順序は必ず各薬剤のラベル・メーカー指示を優先"), "してください。")), /*#__PURE__*/React.createElement("div", {
-    style: S.saveRow
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.areaGrid
-  }, /*#__PURE__*/React.createElement("input", {
-    value: p.field,
-    placeholder: "圃場名",
-    onChange: e => p.setField(e.target.value),
-    style: S.fieldInput
-  }), /*#__PURE__*/React.createElement("input", {
-    value: p.crop,
-    placeholder: "作物名(例:水稲)",
-    onChange: e => p.setCrop(e.target.value),
-    style: S.fieldInput
-  })), /*#__PURE__*/React.createElement("input", {
-    value: p.memo,
-    placeholder: "備考(天候・風速など任意)",
-    onChange: e => p.setMemo(e.target.value),
+  }, "※ 一般的な剤型順の目安です。", /*#__PURE__*/React.createElement("strong", null, "混用可否と順序は必ず各薬剤のラベル・メーカー指示を優先"), "してください。")), p.targetId && /*#__PURE__*/React.createElement("div", {
     style: {
-      ...S.fieldInput,
-      marginTop: 8
+      ...S.derived,
+      marginBottom: 10
     }
-  })), /*#__PURE__*/React.createElement("div", {
+  }, "保存先:", p.field, " の作業に紐付けます"), /*#__PURE__*/React.createElement("div", {
     style: S.btnRow
   }, /*#__PURE__*/React.createElement("button", {
     onClick: p.savePreset,
@@ -831,7 +815,7 @@ function PresetsTab({
   }, "削除"))));
 }
 
-// ═══════════════════ 作業リストタブ ═══════════════════
+// ═══════════════════ 作業・記録タブ ═══════════════════
 function WorkTab({
   records,
   submitReport,
@@ -840,9 +824,14 @@ function WorkTab({
   deleteRecord,
   syncPending,
   syncing,
-  gasUrl
+  gasUrl,
+  setGasUrl,
+  recorder,
+  setRecorder,
+  testConnection,
+  exportCSV
 }) {
-  // 追加フォーム
+  // 圃場追加フォーム
   const [pField, setPField] = useState("");
   const [pCrop, setPCrop] = useState("");
   const [pArea, setPArea] = useState("");
@@ -852,8 +841,11 @@ function WorkTab({
   const [repSprayed, setRepSprayed] = useState("");
   const [repArea, setRepArea] = useState("");
   const [repMemo, setRepMemo] = useState("");
+  // 履歴・設定の表示切替
+  const [showHistory, setShowHistory] = useState(false);
+  const [showSettings, setShowSettings] = useState(() => !gasUrl);
   const worklist = records.filter(r => !r.reported);
-  const doneToday = records.filter(r => r.reported && r.reportDate === today());
+  const history = records.filter(r => r.reported).sort((a, b) => b.id - a.id);
   const pending = records.filter(r => !r.synced || r.reported && !r.reportSynced).length;
   const add = () => {
     if (!pField.trim()) return;
@@ -883,9 +875,9 @@ function WorkTab({
     setReportingId(null);
   };
   const chemsLine = r => r.chems.map(c => `${c.name} ${c.ratio}倍`).join(" ／ ");
-  const statusOf = r => r.chems.length > 0 ? "調合済" : "計画";
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
-    style: S.card
+    style: S.card,
+    className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
   }, "圃場を追加(出発前にまとめて登録)"), /*#__PURE__*/React.createElement("div", {
@@ -939,7 +931,8 @@ function WorkTab({
       opacity: pField.trim() ? 1 : 0.4
     }
   }, "＋ 作業リストに追加")), /*#__PURE__*/React.createElement("section", {
-    style: S.card
+    style: S.card,
+    className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
   }, "作業リスト(", worklist.length, "件)— ▲▼で順番を入替"), worklist.length === 0 && /*#__PURE__*/React.createElement("p", {
@@ -977,7 +970,7 @@ function WorkTab({
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: r.chems.length > 0 ? S.badgeOk : S.badgePlan
-  }, statusOf(r)), /*#__PURE__*/React.createElement("button", {
+  }, r.chems.length > 0 ? "調合済" : "計画"), /*#__PURE__*/React.createElement("button", {
     onClick: () => movePlan(r.id, -1),
     disabled: idx === 0,
     style: {
@@ -1068,63 +1061,7 @@ function WorkTab({
       ...S.smallDanger,
       alignSelf: "stretch"
     }
-  }, "削除")))))), doneToday.length > 0 && /*#__PURE__*/React.createElement("section", {
-    style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "本日の完了(", doneToday.length, "件)"), doneToday.map(r => /*#__PURE__*/React.createElement("div", {
-    key: r.id,
-    style: S.listItem
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.listTitle
-  }, r.field, r.crop ? `(${r.crop})` : ""), /*#__PURE__*/React.createElement("div", {
-    style: S.listSub,
-    className: "num"
-  }, "実散布 ", fmt(r.sprayedL, 2), " L", r.reportAreaA ? ` ／ ${fmt(parseFloat(r.reportAreaA), 1)} a` : "", " ／ 薬剤", r.chems.length, "種")), /*#__PURE__*/React.createElement("span", {
-    style: S.badgeDone
-  }, "🚁完了")))), /*#__PURE__*/React.createElement("section", {
-    style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "作業終了後に"), !gasUrl && /*#__PURE__*/React.createElement("p", {
-    style: {
-      ...S.memoLine,
-      marginBottom: 10
-    }
-  }, "※送信先が未設定です。「記録」タブの設定からURLを登録してください。"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => syncPending(),
-    disabled: syncing || pending === 0 || !gasUrl,
-    style: {
-      ...S.bigSendBtn,
-      opacity: syncing || pending === 0 || !gasUrl ? 0.45 : 1
-    }
-  }, syncing ? "送信中…" : pending === 0 ? "☁ 送信するデータはありません" : `☁ 全データを送信(未送信 ${pending}件)`), /*#__PURE__*/React.createElement("p", {
-    style: S.note
-  }, "電波のある場所で押してください。送信済みのデータは二重登録されません。")));
-}
-
-// ═══════════════════ 記録タブ ═══════════════════
-function RecordsTab({
-  records,
-  deleteRecord,
-  exportCSV,
-  gasUrl,
-  setGasUrl,
-  recorder,
-  setRecorder,
-  testConnection,
-  syncPending,
-  syncing
-}) {
-  const [showSettings, setShowSettings] = useState(() => !gasUrl);
-  const list = [...records].sort((a, b) => b.id - a.id);
-  const pending = records.filter(r => !r.synced || r.reported && !r.reportSynced).length;
-  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+  }, "削除")))))), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -1135,54 +1072,14 @@ function RecordsTab({
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "調合記録(防除履歴)"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: exportCSV,
-    disabled: records.length === 0,
-    style: {
-      ...S.smallPrimary,
-      opacity: records.length ? 1 : 0.4
-    }
-  }, "CSV出力"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => window.print(),
-    disabled: records.length === 0,
-    style: {
-      ...S.smallSecondary,
-      opacity: records.length ? 1 : 0.4
-    }
-  }, "印刷"))), /*#__PURE__*/React.createElement("div", {
-    style: S.syncBar
-  }, gasUrl ? pending === 0 ? /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: "#2E7D4F",
-      fontWeight: 700
-    }
-  }, "☁️ すべてスプレッドシートに送信済み") : /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: "#8a5a1c",
-      fontWeight: 700
-    }
-  }, "☁️ 未送信 ", pending, "件", /*#__PURE__*/React.createElement("button", {
-    onClick: () => syncPending(),
-    disabled: syncing,
-    style: {
-      ...S.smallPrimary,
-      marginLeft: 10,
-      opacity: syncing ? 0.5 : 1
-    }
-  }, syncing ? "送信中…" : "今すぐ送信")) : /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: "#8a978e"
-    }
-  }, "☁️ スプレッドシート連携:未設定"), /*#__PURE__*/React.createElement("button", {
+  }, "作業終了後に"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowSettings(!showSettings),
     style: S.linkBtn
-  }, showSettings ? "設定を閉じる" : "設定")), showSettings && /*#__PURE__*/React.createElement("div", {
-    style: S.settingsBox
+  }, showSettings ? "設定を閉じる" : "送信設定")), showSettings && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.settingsBox,
+      marginBottom: 14
+    }
   }, /*#__PURE__*/React.createElement("label", {
     style: S.areaField
   }, /*#__PURE__*/React.createElement("span", {
@@ -1201,7 +1098,7 @@ function RecordsTab({
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: S.smallLabel
-  }, "記録者名(シートに記載されます・任意)"), /*#__PURE__*/React.createElement("input", {
+  }, "記録者名(シートに記載されます)"), /*#__PURE__*/React.createElement("input", {
     value: recorder,
     onChange: e => setRecorder(e.target.value),
     placeholder: "例:藤本",
@@ -1213,18 +1110,58 @@ function RecordsTab({
       width: "100%",
       marginTop: 12
     }
-  }, "接続テスト"))), /*#__PURE__*/React.createElement("section", {
+  }, "接続テスト")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => syncPending(),
+    disabled: syncing || pending === 0 || !gasUrl,
+    style: {
+      ...S.bigSendBtn,
+      opacity: syncing || pending === 0 || !gasUrl ? 0.45 : 1
+    }
+  }, syncing ? "送信中…" : !gasUrl ? "☁ 送信先が未設定です" : pending === 0 ? "☁ 送信するデータはありません" : `☁ 全データを送信(未送信 ${pending}件)`), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "電波のある場所で押してください。送信済みのデータは二重登録されません。")), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     id: "print-area"
   }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between"
+    },
+    className: "no-print"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "記録(完了 ", history.length, "件)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: exportCSV,
+    disabled: records.length === 0,
+    style: {
+      ...S.smallPrimary,
+      opacity: records.length ? 1 : 0.4
+    }
+  }, "CSV"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => window.print(),
+    disabled: history.length === 0,
+    style: {
+      ...S.smallSecondary,
+      opacity: history.length ? 1 : 0.4
+    }
+  }, "印刷"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowHistory(!showHistory),
+    style: S.smallSecondary
+  }, showHistory ? "閉じる" : "表示"))), /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.cardLabel,
       display: "none"
     },
     className: "print-only"
-  }, "調合記録一覧"), records.length === 0 && /*#__PURE__*/React.createElement("p", {
+  }, "散布記録一覧"), showHistory && history.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "まだ記録がありません。", /*#__PURE__*/React.createElement("br", null), "調合計算の画面で「📋 記録に保存」を押すと、日付・圃場・薬量が履歴として残ります。"), list.map(r => /*#__PURE__*/React.createElement("div", {
+  }, "完了した記録はまだありません。"), showHistory && history.map(r => /*#__PURE__*/React.createElement("div", {
     key: r.id,
     style: S.record
   }, /*#__PURE__*/React.createElement("div", {
@@ -1232,21 +1169,18 @@ function RecordsTab({
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("span", {
     style: S.recordDate,
     className: "num"
-  }, r.date), /*#__PURE__*/React.createElement("span", {
+  }, r.reportDate || r.date), /*#__PURE__*/React.createElement("span", {
     style: S.recordField
   }, r.field, r.crop ? `(${r.crop})` : ""), /*#__PURE__*/React.createElement("span", {
-    style: r.reported ? S.badgeDone : S.badgePlan,
+    style: r.synced && r.reportSynced ? S.badgeOk : S.badgePending,
     className: "no-print"
-  }, r.reported ? "🚁散布済" : "調合のみ"), /*#__PURE__*/React.createElement("span", {
-    style: r.synced && (!r.reported || r.reportSynced) ? S.badgeOk : S.badgePending,
-    className: "no-print"
-  }, r.synced && (!r.reported || r.reportSynced) ? "✓送信済" : "未送信")), /*#__PURE__*/React.createElement("button", {
+  }, r.synced && r.reportSynced ? "✓送信済" : "未送信")), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       if (confirm("この記録を削除しますか？")) deleteRecord(r.id);
     },
     style: {
       ...S.smallDanger,
-      padding: "4px 10px"
+      padding: "6px 12px"
     },
     className: "no-print"
   }, "削除")), /*#__PURE__*/React.createElement("div", {
@@ -1254,7 +1188,7 @@ function RecordsTab({
   }, /*#__PURE__*/React.createElement("div", {
     style: S.recordTotal,
     className: "num"
-  }, "総量 ", /*#__PURE__*/React.createElement("strong", null, fmt(r.totalL, 2), " L"), "(水 ", fmtL(r.waterMl), " L)", r.areaA || r.reportAreaA ? ` ／ 面積 ${fmt(parseFloat(r.reportAreaA || r.areaA), 1)} a` : ""), r.chems.map((c, i) => /*#__PURE__*/React.createElement("div", {
+  }, "実散布 ", /*#__PURE__*/React.createElement("strong", null, fmt(r.sprayedL, 2), " L"), "(調合 ", fmt(r.totalL, 2), " L ／ 水 ", fmtL(r.waterMl), " L)", r.reportAreaA || r.areaA ? ` ／ ${fmt(parseFloat(r.reportAreaA || r.areaA), 1)} a` : ""), r.chems.map((c, i) => /*#__PURE__*/React.createElement("div", {
     key: i,
     style: S.recordChem,
     className: "num"
@@ -1270,12 +1204,9 @@ function RecordsTab({
       marginLeft: "auto",
       fontWeight: 700
     }
-  }, fmt(c.ml), " mL"))), r.memo && /*#__PURE__*/React.createElement("div", {
+  }, fmt(c.ml), " mL"))), (r.reportMemo || r.memo) && /*#__PURE__*/React.createElement("div", {
     style: S.memoLine
-  }, "備考:", r.memo), r.reported && /*#__PURE__*/React.createElement("div", {
-    style: S.reportDone,
-    className: "num"
-  }, "🚁 ", r.reportDate, " 散布報告:実散布量 ", /*#__PURE__*/React.createElement("strong", null, fmt(r.sprayedL, 2), " L"), r.reportAreaA ? ` ／ ${fmt(parseFloat(r.reportAreaA), 1)} a` : "", r.reportMemo ? ` ／ ${r.reportMemo}` : ""))))));
+  }, "備考:", r.reportMemo || r.memo))))));
 }
 
 // ═══════════════════ スタイル ═══════════════════
