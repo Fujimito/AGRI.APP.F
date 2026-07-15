@@ -440,6 +440,55 @@ function App() {
     if (toAdd.length > 0) setWorksSave([...works, ...toAdd]);
     flash("コースを投入:" + added + "圃場追加" + (skipped > 0 ? "(" + skipped + "件は既存)" : ""));
   };
+
+  // 本日の散布投下量(10aあたりL)から、その日の全圃場の予定薬液量を面積に応じて一括計算
+  const applyRatePerDay = ratePer10a => {
+    const rate = parseFloat(ratePer10a);
+    if (!(rate > 0)) {
+      flash("10aあたりの量を入力してください");
+      return;
+    }
+    const dayWorks = works.filter(w => w.workDate === workDate && !w.reported);
+    if (dayWorks.length === 0) {
+      flash("この日の作業リストが空です");
+      return;
+    }
+    let updated = 0;
+    let noArea = 0;
+    // 対象圃場のマスタを更新(予定薬液量 = 面積/10 × 10aあたり量)
+    let nextFields = [...fields];
+    dayWorks.forEach(w => {
+      const f = resolveWork(w);
+      const area = parseFloat(f.areaA) || 0;
+      if (area <= 0) {
+        noArea++;
+        return;
+      }
+      const planned = Math.round(area / 10 * rate * 100) / 100;
+      const fi = nextFields.findIndex(x => x.id === w.fieldId);
+      if (fi >= 0) {
+        nextFields[fi] = {
+          ...nextFields[fi],
+          plannedL: planned
+        };
+        updated++;
+      }
+    });
+    setFieldsSave(nextFields);
+    // 作業リストのスナップショットも追従
+    setWorksSave(works.map(w => {
+      if (w.workDate !== workDate || w.reported) return w;
+      const f = nextFields.find(x => x.id === w.fieldId);
+      return f ? {
+        ...w,
+        snapshot: {
+          ...w.snapshot,
+          plannedL: f.plannedL
+        }
+      } : w;
+    }));
+    flash(updated + "圃場の予定薬液量を計算しました" + (noArea > 0 ? "(面積未入力 " + noArea + "件は対象外)" : ""));
+  };
   const moveWork = (id, dir) => {
     const visible = works.filter(w => w.workDate === workDate && !w.reported).map(w => w.id);
     const vi = visible.indexOf(id);
@@ -965,6 +1014,7 @@ function App() {
     upsertField,
     routes,
     applyRoute,
+    applyRatePerDay,
     submitReport,
     submitGroupReport,
     deleteWork,
@@ -1392,6 +1442,7 @@ function WorkTab(p) {
   });
   const [showHistory, setShowHistory] = useState(false);
   const [showSettings, setShowSettings] = useState(() => !p.gasUrl);
+  const [ratePerDay, setRatePerDay] = useState("");
   const dayList = p.works.filter(w => w.workDate === p.workDate && !w.reported);
   const history = p.works.filter(w => w.reported && !w.groupedInto).sort((a, b) => b.id - a.id);
   const pending = p.works.filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced)).length;
@@ -1530,7 +1581,47 @@ function WorkTab(p) {
     style: S.totalsUnit
   }, " L")), /*#__PURE__*/React.createElement("div", {
     style: S.totalsLabel
-  }, "合計薬量")))), p.routes.length > 0 && /*#__PURE__*/React.createElement("section", {
+  }, "合計薬量"))), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: S.rateBox
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "本日の散布投下量から予定薬液量をまとめて計算"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      marginTop: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.inline
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    placeholder: "10a",
+    value: ratePerDay,
+    onChange: e => setRatePerDay(e.target.value),
+    style: {
+      ...S.midInput,
+      width: 110
+    },
+    className: "num"
+  }), /*#__PURE__*/React.createElement("span", {
+    style: S.midUnit
+  }, "L/10a")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      p.applyRatePerDay(ratePerDay);
+    },
+    disabled: !(parseFloat(ratePerDay) > 0),
+    style: {
+      ...S.smallPrimary,
+      padding: "13px 16px",
+      opacity: parseFloat(ratePerDay) > 0 ? 1 : 0.4
+    }
+  }, "面積から一括計算")), parseFloat(ratePerDay) > 0 && /*#__PURE__*/React.createElement("div", {
+    style: S.rateHint,
+    className: "num"
+  }, "例:合計 ", fmt(sumArea, 1), "a → 約 ", fmt(sumArea / 10 * parseFloat(ratePerDay), 1), "L(全圃場の予定を上書きします)"))), p.routes.length > 0 && /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -3471,6 +3562,19 @@ const S = {
     border: "none",
     borderRadius: 10,
     cursor: "pointer"
+  },
+  rateBox: {
+    marginTop: 14,
+    padding: "12px 14px",
+    background: "#FBF7EC",
+    border: "1.5px solid #E4D6AC",
+    borderRadius: 10
+  },
+  rateHint: {
+    marginTop: 8,
+    fontSize: 13.5,
+    color: "#7a621f",
+    fontWeight: 600
   }
 };
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
