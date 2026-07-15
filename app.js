@@ -81,6 +81,34 @@ const FORMS = [{
 }];
 const formLabel = k => (FORMS.find(f => f.key === k) || {}).label || "その他";
 const formOrder = k => (FORMS.find(f => f.key === k) || {}).order || 17;
+
+// 用途(農薬の種類)
+const USES = [{
+  key: "fungicide",
+  label: "殺菌剤"
+}, {
+  key: "insecticide",
+  label: "殺虫剤"
+}, {
+  key: "fung_insect",
+  label: "殺虫殺菌剤"
+}, {
+  key: "herbicide",
+  label: "除草剤"
+}, {
+  key: "growth",
+  label: "植物成長調整剤"
+}, {
+  key: "spreader",
+  label: "展着剤"
+}, {
+  key: "fertilizer",
+  label: "葉面散布肥料"
+}, {
+  key: "other",
+  label: "その他"
+}];
+const useLabel = k => (USES.find(u => u.key === k) || {}).label || "";
 const fmt = (n, d = 1) => !isFinite(n) ? "—" : n % 1 === 0 ? n.toLocaleString("ja-JP") : n.toLocaleString("ja-JP", {
   maximumFractionDigits: d
 });
@@ -106,6 +134,7 @@ const newChem = () => ({
   id: uid++,
   name: "",
   form: "sc",
+  use: "fungicide",
   ratio: ""
 });
 const load = (key, fallback) => {
@@ -186,13 +215,15 @@ function App() {
     id: 1,
     name: "",
     form: "sc",
+    use: "fungicide",
     ratio: ""
   }]);
-  const [targetId, setTargetId] = useState(null);
+  const [targetIds, setTargetIds] = useState([]);
   const [fields, setFields] = useState(() => load("tankmix:fields", []));
   const [works, setWorks] = useState(() => load("tankmix:works", []));
   const [chemMaster, setChemMaster] = useState(() => load("tankmix:chemmaster", []));
   const [presets, setPresets] = useState(() => load("tankmix:presets", []));
+  const [routes, setRoutes] = useState(() => load("tankmix:routes", []));
   const [workDate, setWorkDate] = useState(today());
   const [gasUrl, setGasUrlState] = useState(() => localStorage.getItem("tankmix:gasurl") || "");
   const [recorder, setRecorderState] = useState(() => localStorage.getItem("tankmix:recorder") || "");
@@ -230,6 +261,10 @@ function App() {
   const setPresetsSave = next => {
     setPresets(next);
     save("tankmix:presets", next);
+  };
+  const setRoutesSave = next => {
+    setRoutes(next);
+    save("tankmix:routes", next);
   };
   const resolveWork = w => {
     if (w.isGroup) return {
@@ -271,6 +306,24 @@ function App() {
     };
     setFieldsSave([...fields, f]);
     return f.id;
+  };
+  const deleteField = id => {
+    setFieldsSave(fields.filter(f => f.id !== id));
+    flash("圃場をマスタから削除しました(過去の記録は残ります)");
+  };
+  const addFieldOnly = data => {
+    if (fields.some(x => x.name === data.name)) {
+      flash("同名の圃場が既にあります");
+      return;
+    }
+    setFieldsSave([...fields, {
+      id: Date.now() + Math.floor(Math.random() * 1000),
+      name: data.name,
+      crop: data.crop || "",
+      areaA: data.areaA,
+      plannedL: data.plannedL
+    }]);
+    flash("圃場「" + data.name + "」を登録しました");
   };
   const makeWork = f => ({
     id: Date.now() + Math.floor(Math.random() * 1000),
@@ -327,6 +380,65 @@ function App() {
     return w.id;
   };
   const removeWork = id => setWorksSave(works.filter(w => w.id !== id));
+
+  // ══ 圃場コース(ルート・プリセット) ══
+  // 現在の作業リスト(この日ぶん)をコースとして保存
+  const saveRouteFromToday = () => {
+    const day = works.filter(w => w.workDate === workDate && !w.reported);
+    if (day.length === 0) {
+      flash("この日の作業リストが空です");
+      return;
+    }
+    const name = prompt("コース名を入力してください(例:月曜ルート)", "");
+    if (!name) return;
+    const fieldIds = day.map(w => w.fieldId).filter(id => fields.some(f => f.id === id));
+    if (fieldIds.length === 0) {
+      flash("登録できる圃場がありません");
+      return;
+    }
+    setRoutesSave([{
+      id: Date.now(),
+      name: name.trim(),
+      fieldIds
+    }, ...routes]);
+    flash("コース「" + name.trim() + "」を保存しました(" + fieldIds.length + "圃場)");
+  };
+  // 任意の圃場IDリストからコースを作成
+  const createRoute = (name, fieldIds) => {
+    if (!name || fieldIds.length === 0) return;
+    setRoutesSave([{
+      id: Date.now(),
+      name,
+      fieldIds
+    }, ...routes]);
+    flash("コース「" + name + "」を保存しました");
+  };
+  const deleteRoute = id => setRoutesSave(routes.filter(r => r.id !== id));
+  const renameRoute = (id, name) => setRoutesSave(routes.map(r => r.id === id ? {
+    ...r,
+    name
+  } : r));
+
+  // コースを選んだ日の作業リストへ一括投入(順番を保持、重複はスキップ)
+  const applyRoute = routeId => {
+    const route = routes.find(r => r.id === routeId);
+    if (!route) return;
+    let added = 0;
+    let skipped = 0;
+    const toAdd = [];
+    route.fieldIds.forEach(fid => {
+      const f = fields.find(x => x.id === fid);
+      if (!f) return;
+      if (works.some(w => w.workDate === workDate && w.fieldId === fid && !w.reported)) {
+        skipped++;
+        return;
+      }
+      toAdd.push(makeWork(f));
+      added++;
+    });
+    if (toAdd.length > 0) setWorksSave([...works, ...toAdd]);
+    flash("コースを投入:" + added + "圃場追加" + (skipped > 0 ? "(" + skipped + "件は既存)" : ""));
+  };
   const moveWork = (id, dir) => {
     const visible = works.filter(w => w.workDate === workDate && !w.reported).map(w => w.id);
     const vi = visible.indexOf(id);
@@ -368,6 +480,7 @@ function App() {
       ...c,
       name,
       form: m.form,
+      use: m.use || c.use,
       ratio: String(m.ratio || "")
     } : {
       ...c,
@@ -376,20 +489,25 @@ function App() {
   };
   const addChem = () => setChems([...chems, newChem()]);
   const removeChem = id => setChems(chems.filter(c => c.id !== id));
-  const selectPlan = id => {
-    if (!id) {
-      setTargetId(null);
-      return;
-    }
-    const w = works.find(x => x.id === Number(id));
-    if (!w) return;
-    setTargetId(w.id);
-    const f = resolveWork(w);
-    if (parseFloat(f.plannedL) > 0) {
-      setMode("direct");
-      setTotalL(String(f.plannedL));
+
+  // 圃場の選択をトグル(複数選択可)。最初の1件選択時は予定薬液量を総量に反映
+  const togglePlan = id => {
+    const nid = Number(id);
+    if (targetIds.includes(nid)) {
+      setTargetIds(targetIds.filter(x => x !== nid));
+    } else {
+      const w = works.find(x => x.id === nid);
+      if (targetIds.length === 0 && w) {
+        const f = resolveWork(w);
+        if (parseFloat(f.plannedL) > 0) {
+          setMode("direct");
+          setTotalL(String(f.plannedL));
+        }
+      }
+      setTargetIds([...targetIds, nid]);
     }
   };
+  const clearPlans = () => setTargetIds([]);
   const upsertChemMaster = list => {
     let next = [...chemMaster];
     list.forEach(c => {
@@ -398,6 +516,7 @@ function App() {
       const item = {
         name: c.name,
         form: c.form,
+        use: c.use || "other",
         ratio: parseFloat(c.ratio) || 0
       };
       if (i >= 0) next[i] = item;else next.push(item);
@@ -408,19 +527,36 @@ function App() {
     const chemsData = calc.filter(c => c.valid).map(c => ({
       name: c.name || "(無名)",
       form: c.form,
+      use: c.use || "other",
       ratio: c.ratio,
       ml: c.ml
     }));
     upsertChemMaster(chemsData);
-    if (targetId && works.some(w => w.id === targetId)) {
-      setWorksSave(works.map(w => w.id === targetId ? {
-        ...w,
-        chems: chemsData,
-        totalL: effTotalL,
-        waterMl,
-        synced: false
-      } : w));
-      setTargetId(null);
+    const valid = targetIds.filter(id => works.some(w => w.id === id));
+    if (valid.length > 0) {
+      // 選んだ複数圃場すべてに同じ調合を紐付け。総量は各圃場の予定薬液量があればそれを優先
+      setWorksSave(works.map(w => {
+        if (!valid.includes(w.id)) return w;
+        const f = resolveWork(w);
+        const per = parseFloat(f.plannedL) > 0 ? parseFloat(f.plannedL) : effTotalL;
+        const perMl = per * 1000;
+        // 各圃場の総量に合わせて薬量・水量を再計算
+        const scaled = chemsData.map(c => ({
+          ...c,
+          ml: parseFloat(c.ratio) > 0 ? perMl / parseFloat(c.ratio) : 0
+        }));
+        const chemMlSum = scaled.reduce((s, c) => s + c.ml, 0);
+        return {
+          ...w,
+          chems: scaled,
+          totalL: per,
+          waterMl: perMl - chemMlSum,
+          synced: false
+        };
+      }));
+      setTargetIds([]);
+      flash(valid.length + "圃場に調合を適用しました。散布後に実績を入力してください");
+      setTab("work");
     } else {
       const name = prompt("圃場名を入力してください(この日のリストに追加されます)", "");
       if (name === null) return;
@@ -442,16 +578,18 @@ function App() {
         waterMl
       };
       setWorksSave([...works, w]);
+      flash("調合を記録しました。散布後に実績を入力してください");
+      setTab("work");
     }
-    flash("調合を記録しました。散布後に実績を入力してください");
-    setTab("work");
   };
   const submitReport = (id, rep) => {
+    const flights = Array.isArray(rep.flights) ? rep.flights.filter(f => f > 0) : [];
     const next = works.map(w => w.id === id ? {
       ...w,
       reported: true,
       reportSynced: false,
       sprayedL: parseFloat(rep.sprayedL) || 0,
+      flights: flights,
       reportAreaA: rep.areaA !== "" ? parseFloat(rep.areaA) || "" : resolveWork(w).areaA || "",
       reportMemo: rep.memo || "",
       reportDate: today()
@@ -522,9 +660,12 @@ function App() {
       sprayedL: w.sprayedL,
       reportDate: w.reportDate,
       reportMemo: w.reportMemo,
+      flights: w.flights || [],
+      flightCount: (w.flights || []).length,
       chems: w.chems.map(c => ({
         ...c,
-        formName: formLabel(c.form)
+        formName: formLabel(c.form),
+        useName: useLabel(c.use)
       }))
     };
   };
@@ -623,6 +764,7 @@ function App() {
       works,
       chemMaster,
       presets,
+      routes,
       savedAt: new Date().toISOString(),
       by: recorder
     });
@@ -653,6 +795,7 @@ function App() {
         if (data.works) setWorksSave(data.works);
         if (data.chemMaster) setChemMasterSave(data.chemMaster);
         if (data.presets) setPresetsSave(data.presets);
+        if (data.routes) setRoutesSave(data.routes);
         flash("☁ 読み込みました(" + (data.by || "?") + " が " + (data.savedAt || "").slice(0, 16).replace("T", " ") + " に保存)");
       } catch {
         flash("データの解釈に失敗しました");
@@ -672,6 +815,7 @@ function App() {
       chems: chems.map(c => ({
         name: c.name,
         form: c.form,
+        use: c.use || "other",
         ratio: c.ratio
       }))
     }, ...presets]);
@@ -693,11 +837,13 @@ function App() {
   } : c));
   const exportCSV = () => {
     const plain = (n, d = 2) => isFinite(n) && n !== "" ? Number(n).toFixed(d).replace(/\.?0+$/, "") : "";
-    const head = "散布日,圃場,作物,面積(a),薬剤数,薬剤内容,総量(L),水量(L),実散布量(L),状態,報告日,備考\n";
+    const head = "散布日,圃場,作物,面積(a),薬剤数,薬剤内容,総量(L),水量(L),実散布量(L),フライト数,フライト内訳,状態,報告日,備考\n";
     const body = works.filter(w => !w.groupedInto).map(w => {
       const f = resolveWork(w);
-      const chemsStr = w.chems.map(c => c.name + "(" + formLabel(c.form) + "・" + c.ratio + "倍・" + Math.round(c.ml) + "mL)").join(" / ");
-      return [w.workDate, f.name, f.crop || "", plain(parseFloat(w.reportAreaA || f.areaA), 1), w.chems.length, chemsStr, plain(w.totalL), plain(w.waterMl / 1000, 3), w.reported ? plain(w.sprayedL) : "", w.reported ? "散布済" : "調合のみ", w.reportDate || "", (w.reportMemo || w.memo || "").replace(/[,\n]/g, " ")].join(",");
+      const chemsStr = w.chems.map(c => c.name + "(" + useLabel(c.use) + "・" + formLabel(c.form) + "・" + c.ratio + "倍・" + Math.round(c.ml) + "mL)").join(" / ");
+      const flights = w.flights || [];
+      const flightStr = flights.length > 1 ? flights.map(fl => plain(fl, 1) + "L").join(" + ") : "";
+      return [w.workDate, f.name, f.crop || "", plain(parseFloat(w.reportAreaA || f.areaA), 1), w.chems.length, chemsStr, plain(w.totalL), plain(w.waterMl / 1000, 3), w.reported ? plain(w.sprayedL) : "", w.reported ? flights.length || (w.reported ? 1 : "") : "", flightStr, w.reported ? "散布済" : "調合のみ", w.reportDate || "", (w.reportMemo || w.memo || "").replace(/[,\n]/g, " ")].join(",");
     }).join("\n");
     const blob = new Blob(["\uFEFF" + head + body], {
       type: "text/csv;charset=utf-8"
@@ -746,8 +892,9 @@ function App() {
     mixOrder,
     savePreset,
     saveRecord,
-    targetId,
-    selectPlan,
+    targetIds,
+    togglePlan,
+    clearPlans,
     planOptions,
     chemMaster,
     resolveWork,
@@ -763,6 +910,8 @@ function App() {
     removeWork,
     moveWork,
     upsertField,
+    routes,
+    applyRoute,
     submitReport,
     submitGroupReport,
     deleteWork,
@@ -778,7 +927,19 @@ function App() {
     testConnection,
     cloudSave,
     cloudLoad
-  }), tab === "chem" && /*#__PURE__*/React.createElement(ChemTab, {
+  }), tab === "preset" && /*#__PURE__*/React.createElement(PresetTab, {
+    fields,
+    upsertField,
+    deleteField,
+    addFieldOnly,
+    routes,
+    saveRouteFromToday,
+    createRoute,
+    deleteRoute,
+    renameRoute,
+    resolveWork,
+    works,
+    workDate,
     chemMaster,
     deleteChemMaster,
     editChemMaster,
@@ -788,7 +949,7 @@ function App() {
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
     className: "no-print"
-  }, [["calc", "🧮", "調合計算"], ["work", "🚁", "作業・記録"], ["chem", "🧪", "薬剤"]].map(t => /*#__PURE__*/React.createElement("button", {
+  }, [["calc", "🧮", "調合計算"], ["work", "🚁", "作業・記録"], ["preset", "📋", "プリセット"]].map(t => /*#__PURE__*/React.createElement("button", {
     key: t[0],
     onClick: () => setTab(t[0]),
     style: {
@@ -813,19 +974,43 @@ function CalcTab(p) {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "薬液の総量"), p.planOptions.length > 0 && /*#__PURE__*/React.createElement("select", {
-    value: p.targetId || "",
-    onChange: e => p.selectPlan(e.target.value),
-    style: S.planSelect
-  }, /*#__PURE__*/React.createElement("option", {
-    value: ""
-  }, "▼ 本日の作業リストから圃場を選ぶ"), p.planOptions.map(w => {
+  }, "薬液の総量"), p.planOptions.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: S.applyBox
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "この調合を適用する圃場(複数選択可)"), p.targetIds.length > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: p.clearPlans,
+    style: S.linkBtn
+  }, "選択解除")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8
+    }
+  }, p.planOptions.map(w => {
     const f = p.resolveWork(w);
-    return /*#__PURE__*/React.createElement("option", {
+    const on = p.targetIds.includes(w.id);
+    return /*#__PURE__*/React.createElement("button", {
       key: w.id,
-      value: w.id
-    }, f.name, f.crop ? "(" + f.crop + ")" : "", f.plannedL ? " — 予定" + f.plannedL + "L" : "");
-  })), /*#__PURE__*/React.createElement("div", {
+      onClick: () => p.togglePlan(w.id),
+      style: {
+        ...S.chip,
+        ...(on ? S.chipOn : {})
+      }
+    }, on ? "✓ " : "", f.name, f.plannedL ? "(" + f.plannedL + "L)" : "");
+  })), p.targetIds.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.derived,
+      marginTop: 10
+    }
+  }, p.targetIds.length, "圃場に適用します(各圃場の予定薬液量で自動計算)")), /*#__PURE__*/React.createElement("div", {
     style: S.segWrap
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => p.setMode("direct"),
@@ -925,15 +1110,30 @@ function CalcTab(p) {
     disabled: p.chems.length <= 1,
     "aria-label": "削除"
   }, "✕")), /*#__PURE__*/React.createElement("div", {
-    style: S.chemBottom
+    style: S.chemSelectRow
   }, /*#__PURE__*/React.createElement("select", {
+    value: c.use || "fungicide",
+    onChange: e => p.update(c.id, "use", e.target.value),
+    style: {
+      ...S.formSelect,
+      flex: 1
+    }
+  }, USES.map(u => /*#__PURE__*/React.createElement("option", {
+    key: u.key,
+    value: u.key
+  }, u.label))), /*#__PURE__*/React.createElement("select", {
     value: c.form,
     onChange: e => p.update(c.id, "form", e.target.value),
-    style: S.formSelect
+    style: {
+      ...S.formSelect,
+      flex: 1
+    }
   }, FORMS.map(f => /*#__PURE__*/React.createElement("option", {
     key: f.key,
     value: f.key
-  }, f.label))), /*#__PURE__*/React.createElement("div", {
+  }, f.label)))), /*#__PURE__*/React.createElement("div", {
+    style: S.chemBottom
+  }, /*#__PURE__*/React.createElement("div", {
     style: S.inline
   }, /*#__PURE__*/React.createElement("input", {
     type: "number",
@@ -1006,7 +1206,7 @@ function CalcTab(p) {
     }
   }), c.name || "(無名)", /*#__PURE__*/React.createElement("span", {
     style: S.tdSub
-  }, formLabel(c.form), "・", fmt(parseFloat(c.ratio)), "倍")), /*#__PURE__*/React.createElement("td", {
+  }, useLabel(c.use), "・", formLabel(c.form), "・", fmt(parseFloat(c.ratio)), "倍")), /*#__PURE__*/React.createElement("td", {
     style: S.tdMl,
     className: "num"
   }, fmt(c.ml), /*#__PURE__*/React.createElement("small", {
@@ -1045,17 +1245,16 @@ function CalcTab(p) {
     style: S.orderStep
   }, p.mixOrder.length + 2), "残りの水を加えて全量にする")), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "※ 一般的な剤型順の目安です。", /*#__PURE__*/React.createElement("strong", null, "混用可否と順序は必ず各薬剤のラベル・メーカー指示を優先"), "してください。")), p.targetId && (() => {
-    const w = p.works.find(x => x.id === p.targetId);
-    const f = w ? p.resolveWork(w) : null;
-    return f ? /*#__PURE__*/React.createElement("div", {
-      style: {
-        ...S.derived,
-        marginTop: 0,
-        marginBottom: 10
-      }
-    }, "保存先:", f.name, " の作業に紐付けます") : null;
-  })(), /*#__PURE__*/React.createElement("div", {
+  }, "※ 一般的な剤型順の目安です。", /*#__PURE__*/React.createElement("strong", null, "混用可否と順序は必ず各薬剤のラベル・メーカー指示を優先"), "してください。")), p.targetIds.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.derived,
+      marginTop: 0,
+      marginBottom: 10
+    }
+  }, "保存先:", p.targetIds.map(id => {
+    const w = p.works.find(x => x.id === id);
+    return w ? p.resolveWork(w).name : null;
+  }).filter(Boolean).join("、")), /*#__PURE__*/React.createElement("div", {
     style: S.btnRow
   }, /*#__PURE__*/React.createElement("button", {
     onClick: p.savePreset,
@@ -1067,7 +1266,7 @@ function CalcTab(p) {
       ...S.primaryBtn,
       opacity: p.ready ? 1 : 0.4
     }
-  }, "📋 記録に保存"))));
+  }, p.targetIds.length > 1 ? "📋 " + p.targetIds.length + "圃場に適用" : "📋 記録に保存"))));
 }
 function TankViz({
   calc,
@@ -1108,7 +1307,7 @@ function WorkTab(p) {
   const [pLiters, setPLiters] = useState("");
   const [query, setQuery] = useState("");
   const [reportingId, setReportingId] = useState(null);
-  const [repSprayed, setRepSprayed] = useState("");
+  const [repFlights, setRepFlights] = useState([""]);
   const [repArea, setRepArea] = useState("");
   const [repMemo, setRepMemo] = useState("");
   const [selected, setSelected] = useState([]);
@@ -1150,17 +1349,25 @@ function WorkTab(p) {
   const openReport = w => {
     const f = p.resolveWork(w);
     setReportingId(w.id);
-    setRepSprayed(String(w.totalL || f.plannedL || ""));
+    // 既定は1フライト。総量が分かればその値を初期表示
+    setRepFlights([String(w.totalL || f.plannedL || "")]);
     setRepArea(f.areaA !== "" && f.areaA != null ? String(f.areaA) : "");
     setRepMemo("");
   };
+  const flightSum = repFlights.reduce((s, v) => s + (parseFloat(v) || 0), 0);
+  const setFlight = (i, v) => setRepFlights(repFlights.map((x, idx) => idx === i ? v : x));
+  const addFlight = () => setRepFlights([...repFlights, ""]);
+  const removeFlight = i => setRepFlights(repFlights.length > 1 ? repFlights.filter((_, idx) => idx !== i) : repFlights);
   const sendReport = () => {
+    const flightsNum = repFlights.map(v => parseFloat(v) || 0);
     p.submitReport(reportingId, {
-      sprayedL: repSprayed,
+      sprayedL: flightSum,
+      flights: flightsNum,
       areaA: repArea,
       memo: repMemo
     });
     setReportingId(null);
+    setRepFlights([""]);
   };
   const toggleSelect = id => setSelected(selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]);
   const openGroupForm = () => {
@@ -1256,7 +1463,37 @@ function WorkTab(p) {
     style: S.totalsUnit
   }, " L")), /*#__PURE__*/React.createElement("div", {
     style: S.totalsLabel
-  }, "合計薬量")))), /*#__PURE__*/React.createElement("section", {
+  }, "合計薬量")))), p.routes.length > 0 && /*#__PURE__*/React.createElement("section", {
+    style: S.card,
+    className: "no-print"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "圃場コースから追加"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("select", {
+    value: "",
+    onChange: e => {
+      if (e.target.value) p.applyRoute(Number(e.target.value));
+    },
+    style: {
+      ...S.planSelect,
+      marginBottom: 0,
+      flex: 1
+    }
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "▼ コースを選んでこの日へ投入"), p.routes.map(r => /*#__PURE__*/React.createElement("option", {
+    key: r.id,
+    value: r.id
+  }, "🚜 ", r.name, "(", r.fieldIds.length, "圃場)")))), /*#__PURE__*/React.createElement("p", {
+    style: {
+      ...S.note,
+      marginTop: 8
+    }
+  }, "コースの作成・編集は「プリセット」タブで行えます。")), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -1516,23 +1753,64 @@ function WorkTab(p) {
       style: S.smallLabel
     }, "散布実績の入力"), /*#__PURE__*/React.createElement("div", {
       style: {
-        ...S.areaGrid,
         marginTop: 8
       }
-    }, /*#__PURE__*/React.createElement("label", {
-      style: S.areaField
     }, /*#__PURE__*/React.createElement("span", {
       style: S.smallLabel
-    }, "実散布量(L)"), /*#__PURE__*/React.createElement("input", {
+    }, "フライトごとの散布量(L)"), repFlights.map((v, i) => /*#__PURE__*/React.createElement("div", {
+      key: i,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        marginTop: 6
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: S.flightNum,
+      className: "num"
+    }, i + 1), /*#__PURE__*/React.createElement("input", {
       type: "number",
       inputMode: "decimal",
       min: "0",
-      value: repSprayed,
-      onChange: e => setRepSprayed(e.target.value),
-      style: S.midInput,
+      value: v,
+      placeholder: "散布量",
+      onChange: e => setFlight(i, e.target.value),
+      style: {
+        ...S.midInput,
+        flex: 1
+      },
       className: "num"
-    })), /*#__PURE__*/React.createElement("label", {
-      style: S.areaField
+    }), /*#__PURE__*/React.createElement("span", {
+      style: S.midUnit
+    }, "L"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => removeFlight(i),
+      disabled: repFlights.length <= 1,
+      style: {
+        ...S.removeBtn,
+        opacity: repFlights.length <= 1 ? 0.3 : 1
+      },
+      "aria-label": "このフライトを削除"
+    }, "✕"))), /*#__PURE__*/React.createElement("button", {
+      onClick: addFlight,
+      style: {
+        ...S.addBtn,
+        marginTop: 8,
+        padding: "11px 0"
+      }
+    }, "＋ フライトを追加(バッテリー交換など)"), /*#__PURE__*/React.createElement("div", {
+      style: S.flightSumBox,
+      className: "num"
+    }, "実散布量 合計 ", /*#__PURE__*/React.createElement("strong", {
+      style: {
+        fontSize: 22
+      }
+    }, fmt(flightSum, 2)), " L", repFlights.length > 1 ? /*#__PURE__*/React.createElement("span", {
+      style: S.tdSub
+    }, "(", repFlights.length, "フライト)") : null)), /*#__PURE__*/React.createElement("label", {
+      style: {
+        ...S.areaField,
+        marginTop: 10
+      }
     }, /*#__PURE__*/React.createElement("span", {
       style: S.smallLabel
     }, "散布面積(a)"), /*#__PURE__*/React.createElement("input", {
@@ -1543,7 +1821,7 @@ function WorkTab(p) {
       onChange: e => setRepArea(e.target.value),
       style: S.midInput,
       className: "num"
-    }))), /*#__PURE__*/React.createElement("input", {
+    })), /*#__PURE__*/React.createElement("input", {
       value: repMemo,
       placeholder: "備考(残液・中断理由など任意)",
       onChange: e => setRepMemo(e.target.value),
@@ -1834,7 +2112,10 @@ function WorkTab(p) {
     }, /*#__PURE__*/React.createElement("div", {
       style: S.recordTotal,
       className: "num"
-    }, "実散布 ", /*#__PURE__*/React.createElement("strong", null, fmt(w.sprayedL, 2), " L"), "(調合 ", fmt(w.totalL, 2), " L ／ 水 ", fmtL(w.waterMl), " L)", w.reportAreaA || f.areaA ? " ／ " + fmt(parseFloat(w.reportAreaA || f.areaA), 1) + " a" : ""), w.chems.map((c, i) => /*#__PURE__*/React.createElement("div", {
+    }, "実散布 ", /*#__PURE__*/React.createElement("strong", null, fmt(w.sprayedL, 2), " L"), "(調合 ", fmt(w.totalL, 2), " L ／ 水 ", fmtL(w.waterMl), " L)", w.reportAreaA || f.areaA ? " ／ " + fmt(parseFloat(w.reportAreaA || f.areaA), 1) + " a" : ""), w.flights && w.flights.length > 1 && /*#__PURE__*/React.createElement("div", {
+      style: S.memoLine,
+      className: "num"
+    }, "🔋 ", w.flights.length, "フライト:", w.flights.map(fl => fmt(fl, 1) + "L").join(" + ")), w.chems.map((c, i) => /*#__PURE__*/React.createElement("div", {
       key: i,
       style: S.recordChem,
       className: "num"
@@ -1857,39 +2138,302 @@ function WorkTab(p) {
 }
 
 // ═══════════════════ 薬剤タブ ═══════════════════
-function ChemTab({
-  chemMaster,
-  deleteChemMaster,
-  editChemMaster,
-  presets,
-  loadPreset,
-  deletePreset
-}) {
-  const [editName, setEditName] = useState(null);
+// ═══════════════════ プリセットタブ(圃場・コース・薬剤) ═══════════════════
+function PresetTab(p) {
+  const [sub, setSub] = useState("field"); // field | route | chem
+  // 圃場フォーム
+  const [fName, setFName] = useState("");
+  const [fCrop, setFCrop] = useState("");
+  const [fArea, setFArea] = useState("");
+  const [fLiters, setFLiters] = useState("");
+  const [editId, setEditId] = useState(null);
+  const [fq, setFq] = useState("");
+  // コース作成
+  const [routeBuildMode, setRouteBuildMode] = useState(false);
+  const [routeName, setRouteName] = useState("");
+  const [routePicks, setRoutePicks] = useState([]);
+  // 薬剤編集
+  const [editChem, setEditChem] = useState(null);
   const [ec, setEc] = useState({
     form: "sc",
+    use: "fungicide",
     ratio: ""
   });
-  const [q, setQ] = useState("");
-  const list = q.trim() ? chemMaster.filter(c => c.name.includes(q.trim())) : chemMaster;
-  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+  const [cq, setCq] = useState("");
+  const fieldList = fq.trim() ? p.fields.filter(f => f.name.includes(fq.trim()) || (f.crop || "").includes(fq.trim())) : p.fields;
+  const chemList = cq.trim() ? p.chemMaster.filter(c => c.name.includes(cq.trim())) : p.chemMaster;
+  const submitField = () => {
+    if (!fName.trim()) return;
+    if (editId) {
+      p.upsertField({
+        name: fName.trim(),
+        crop: fCrop.trim(),
+        areaA: parseFloat(fArea) || "",
+        plannedL: parseFloat(fLiters) || 0
+      }, editId);
+    } else {
+      p.addFieldOnly({
+        name: fName.trim(),
+        crop: fCrop.trim(),
+        areaA: parseFloat(fArea) || "",
+        plannedL: parseFloat(fLiters) || 0
+      });
+    }
+    setFName("");
+    setFCrop("");
+    setFArea("");
+    setFLiters("");
+    setEditId(null);
+  };
+  const startEdit = f => {
+    setEditId(f.id);
+    setFName(f.name);
+    setFCrop(f.crop || "");
+    setFArea(String(f.areaA || ""));
+    setFLiters(String(f.plannedL || ""));
+  };
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: S.subTabWrap
+  }, [["field", "🌾 圃場"], ["route", "🚜 コース"], ["chem", "🧪 薬剤"]].map(t => /*#__PURE__*/React.createElement("button", {
+    key: t[0],
+    onClick: () => setSub(t[0]),
+    style: {
+      ...S.subTab,
+      ...(sub === t[0] ? S.subTabOn : {})
+    }
+  }, t[1]))), sub === "field" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "使用薬剤リスト(調合計算で使うと自動登録)"), chemMaster.length > 3 && /*#__PURE__*/React.createElement("input", {
-    value: q,
-    placeholder: "🔍 薬剤名で検索",
-    onChange: e => setQ(e.target.value),
+  }, editId ? "圃場を編集" : "圃場を登録"), /*#__PURE__*/React.createElement("div", {
+    style: S.areaGrid
+  }, /*#__PURE__*/React.createElement("input", {
+    value: fName,
+    placeholder: "圃場名 ※必須",
+    onChange: e => setFName(e.target.value),
+    style: S.fieldInput
+  }), /*#__PURE__*/React.createElement("input", {
+    value: fCrop,
+    placeholder: "作物名",
+    onChange: e => setFCrop(e.target.value),
+    style: S.fieldInput
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.areaGrid,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "面積(a)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    value: fArea,
+    onChange: e => setFArea(e.target.value),
+    style: S.midInput,
+    className: "num"
+  })), /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "予定薬液量(L)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    value: fLiters,
+    onChange: e => setFLiters(e.target.value),
+    style: S.midInput,
+    className: "num"
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 12
+    }
+  }, editId && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setEditId(null);
+      setFName("");
+      setFCrop("");
+      setFArea("");
+      setFLiters("");
+    },
+    style: S.secondaryBtn
+  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
+    onClick: submitField,
+    disabled: !fName.trim(),
+    style: {
+      ...S.primaryBtn,
+      gridColumn: editId ? "auto" : "1 / -1",
+      opacity: fName.trim() ? 1 : 0.4
+    }
+  }, editId ? "更新" : "＋ 圃場を登録"))), /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "登録済み圃場(", p.fields.length, "件)"), p.fields.length > 4 && /*#__PURE__*/React.createElement("input", {
+    value: fq,
+    placeholder: "🔍 圃場名・作物名で検索",
+    onChange: e => setFq(e.target.value),
     style: {
       ...S.fieldInput,
       marginBottom: 10
     }
-  }), chemMaster.length === 0 && /*#__PURE__*/React.createElement("p", {
+  }), p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "まだ薬剤が登録されていません。", /*#__PURE__*/React.createElement("br", null), "調合計算で「記録に保存」すると、使った薬剤がここに自動で貯まります。"), list.map(c => /*#__PURE__*/React.createElement("div", {
+  }, "まだ圃場が登録されていません。上のフォームから登録してください。"), fieldList.map(f => /*#__PURE__*/React.createElement("div", {
+    key: f.id,
+    style: S.listItem
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.listTitle
+  }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
+    style: S.listSub,
+    className: "num"
+  }, f.areaA ? fmt(parseFloat(f.areaA), 1) + " a" : "面積未定", f.plannedL ? " ／ 予定 " + fmt(parseFloat(f.plannedL), 1) + " L" : "")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => startEdit(f),
+    style: S.smallSecondary
+  }, "編集"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (confirm("圃場「" + f.name + "」を削除しますか？\n(過去の記録は残ります)")) p.deleteField(f.id);
+    },
+    style: S.smallDanger
+  }, "削除"))))), sub === "route" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      flexWrap: "wrap",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "圃場コース(", p.routes.length, "件)"), !routeBuildMode && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setRouteBuildMode(true);
+      setRoutePicks([]);
+      setRouteName("");
+    },
+    style: S.smallPrimary
+  }, "＋ 新規作成")), routeBuildMode ? /*#__PURE__*/React.createElement("div", {
+    style: S.settingsBox
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "コースに入れる圃場を回る順にタップ"), /*#__PURE__*/React.createElement("input", {
+    value: routeName,
+    placeholder: "コース名(例:月曜ルート)",
+    onChange: e => setRouteName(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 8
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      maxHeight: 300,
+      overflowY: "auto"
+    }
+  }, p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: S.memoLine
+  }, "先に「🌾 圃場」タブで圃場を登録してください。"), p.fields.map(f => {
+    const pickIdx = routePicks.indexOf(f.id);
+    return /*#__PURE__*/React.createElement("div", {
+      key: f.id,
+      onClick: () => setRoutePicks(pickIdx >= 0 ? routePicks.filter(x => x !== f.id) : [...routePicks, f.id]),
+      style: {
+        ...S.pickRow,
+        ...(pickIdx >= 0 ? S.pickRowOn : {})
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...S.pickNum,
+        ...(pickIdx >= 0 ? S.pickNumOn : {})
+      }
+    }, pickIdx >= 0 ? pickIdx + 1 : "＋"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1
+      }
+    }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("span", {
+      style: S.tdSub
+    }, f.areaA ? fmt(parseFloat(f.areaA), 1) + "a" : ""));
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRouteBuildMode(false),
+    style: S.secondaryBtn
+  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (routeName.trim() && routePicks.length > 0) {
+        p.createRoute(routeName.trim(), routePicks);
+        setRouteBuildMode(false);
+      }
+    },
+    disabled: !routeName.trim() || routePicks.length === 0,
+    style: {
+      ...S.primaryBtn,
+      opacity: routeName.trim() && routePicks.length > 0 ? 1 : 0.4
+    }
+  }, "コース保存(", routePicks.length, ")"))) : /*#__PURE__*/React.createElement(React.Fragment, null, p.routes.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "まだコースがありません。", /*#__PURE__*/React.createElement("br", null), "「＋ 新規作成」でよく回る圃場をまとめて登録できます。"), p.routes.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    style: {
+      ...S.record,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.recordHead
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.recordField
+  }, "🚜 ", r.name), /*#__PURE__*/React.createElement("div", {
+    style: S.listSub
+  }, r.fieldIds.length, "圃場")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (confirm("コース「" + r.name + "」を削除しますか？")) p.deleteRoute(r.id);
+    },
+    style: {
+      ...S.smallDanger,
+      padding: "6px 12px"
+    }
+  }, "削除")), /*#__PURE__*/React.createElement("div", {
+    style: S.recordBody
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.listSub
+  }, r.fieldIds.map(fid => {
+    const f = p.fields.find(x => x.id === fid);
+    return f ? f.name : "(削除済)";
+  }).join(" → "))))), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "コースの呼び出しは「作業・記録」タブの「圃場コースから追加」で行います。")))), sub === "chem" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "使用薬剤リスト(調合計算で使うと自動登録)"), p.chemMaster.length > 4 && /*#__PURE__*/React.createElement("input", {
+    value: cq,
+    placeholder: "🔍 薬剤名で検索",
+    onChange: e => setCq(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginBottom: 10
+    }
+  }), p.chemMaster.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "まだ薬剤が登録されていません。", /*#__PURE__*/React.createElement("br", null), "調合計算で「記録に保存」すると自動で貯まります。"), chemList.map(c => /*#__PURE__*/React.createElement("div", {
     key: c.name,
     style: S.listItem
-  }, editName === c.name ? /*#__PURE__*/React.createElement("div", {
+  }, editChem === c.name ? /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
       display: "flex",
@@ -1900,6 +2444,16 @@ function ChemTab({
   }, /*#__PURE__*/React.createElement("span", {
     style: S.listTitle
   }, c.name), /*#__PURE__*/React.createElement("select", {
+    value: ec.use,
+    onChange: e => setEc({
+      ...ec,
+      use: e.target.value
+    }),
+    style: S.formSelect
+  }, USES.map(u => /*#__PURE__*/React.createElement("option", {
+    key: u.key,
+    value: u.key
+  }, u.label))), /*#__PURE__*/React.createElement("select", {
     value: ec.form,
     onChange: e => setEc({
       ...ec,
@@ -1922,11 +2476,12 @@ function ChemTab({
     placeholder: "倍率"
   }), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      editChemMaster(c.name, {
+      p.editChemMaster(c.name, {
         form: ec.form,
+        use: ec.use,
         ratio: parseFloat(ec.ratio) || 0
       });
-      setEditName(null);
+      setEditChem(null);
     },
     style: S.smallPrimary
   }, "保存")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
@@ -1939,29 +2494,28 @@ function ChemTab({
   }, c.name), /*#__PURE__*/React.createElement("div", {
     style: S.listSub,
     className: "num"
-  }, formLabel(c.form), " ／ 標準 ", c.ratio, "倍")), /*#__PURE__*/React.createElement("button", {
+  }, useLabel(c.use), " ／ ", formLabel(c.form), " ／ 標準 ", c.ratio, "倍")), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      setEditName(c.name);
+      setEditChem(c.name);
       setEc({
         form: c.form,
+        use: c.use || "other",
         ratio: String(c.ratio)
       });
     },
     style: S.smallSecondary
   }, "編集"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      if (confirm("「" + c.name + "」を削除しますか？")) deleteChemMaster(c.name);
+      if (confirm("「" + c.name + "」を削除しますか？")) p.deleteChemMaster(c.name);
     },
     style: S.smallDanger
-  }, "削除")))), /*#__PURE__*/React.createElement("p", {
-    style: S.note
-  }, "調合計算の薬剤名の入力欄で、ここに登録された名前を選ぶと剤型と倍率が自動で入ります。")), /*#__PURE__*/React.createElement("section", {
+  }, "削除"))))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "プリセット(薬剤の組み合わせ)"), presets.length === 0 && /*#__PURE__*/React.createElement("p", {
+  }, "調合プリセット(薬剤の組み合わせ)"), p.presets.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "まだプリセットがありません。", /*#__PURE__*/React.createElement("br", null), "調合計算の「⭐プリセット保存」で組み合わせを保存できます。"), presets.map(pr => /*#__PURE__*/React.createElement("div", {
+  }, "まだプリセットがありません。", /*#__PURE__*/React.createElement("br", null), "調合計算の「⭐プリセット保存」で保存できます。"), p.presets.map(pr => /*#__PURE__*/React.createElement("div", {
     key: pr.id,
     style: S.listItem
   }, /*#__PURE__*/React.createElement("div", {
@@ -1974,14 +2528,14 @@ function ChemTab({
   }, pr.name), /*#__PURE__*/React.createElement("div", {
     style: S.listSub
   }, pr.chems.map(c => (c.name || "(無名)") + " " + c.ratio + "倍").join(" ／ "))), /*#__PURE__*/React.createElement("button", {
-    onClick: () => loadPreset(pr),
+    onClick: () => p.loadPreset(pr),
     style: S.smallPrimary
   }, "読込"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      if (confirm("「" + pr.name + "」を削除しますか？")) deletePreset(pr.id);
+      if (confirm("「" + pr.name + "」を削除しますか？")) p.deletePreset(pr.id);
     },
     style: S.smallDanger
-  }, "削除")))));
+  }, "削除"))))));
 }
 
 // ═══════════════════ スタイル ═══════════════════
@@ -2151,6 +2705,11 @@ const S = {
     alignItems: "center",
     gap: 8,
     flexWrap: "wrap"
+  },
+  chemSelectRow: {
+    display: "flex",
+    gap: 8,
+    marginBottom: 8
   },
   dot: {
     width: 11,
@@ -2690,6 +3249,108 @@ const S = {
     fontSize: 14.5,
     padding: "5px 0",
     borderTop: "1px dashed #E4D6AC"
+  },
+  pickRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "12px 10px",
+    borderRadius: 9,
+    border: "1.5px solid #E4EAE0",
+    marginBottom: 8,
+    background: "#fff",
+    cursor: "pointer",
+    fontSize: 16
+  },
+  pickRowOn: {
+    border: "2px solid #2E7D4F",
+    background: "#EDF5EE"
+  },
+  pickNum: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    background: "#EDF1EA",
+    color: "#8a978e",
+    fontSize: 15,
+    fontWeight: 800,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0
+  },
+  pickNumOn: {
+    background: "#2E7D4F",
+    color: "#fff"
+  },
+  subTabWrap: {
+    display: "flex",
+    gap: 6,
+    background: "#EDF1EA",
+    borderRadius: 11,
+    padding: 4,
+    marginBottom: 2
+  },
+  subTab: {
+    flex: 1,
+    padding: "12px 0",
+    fontSize: 15,
+    fontWeight: 800,
+    border: "none",
+    background: "transparent",
+    color: "#66756a",
+    borderRadius: 8,
+    cursor: "pointer"
+  },
+  subTabOn: {
+    background: "#fff",
+    color: "#1C2B21",
+    boxShadow: "0 1px 4px rgba(0,0,0,0.12)"
+  },
+  flightNum: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    background: "#3B7EA1",
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: 800,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0
+  },
+  flightSumBox: {
+    marginTop: 10,
+    padding: "10px 14px",
+    background: "#EAF3FA",
+    border: "1.5px solid #BBD6E8",
+    borderRadius: 9,
+    fontSize: 15,
+    fontWeight: 600,
+    color: "#2b5a7a"
+  },
+  applyBox: {
+    padding: "12px 12px 14px",
+    background: "#F7F9F5",
+    border: "1.5px solid #D8E0D2",
+    borderRadius: 10,
+    marginBottom: 14
+  },
+  chip: {
+    padding: "10px 14px",
+    fontSize: 15,
+    fontWeight: 700,
+    color: "#66756a",
+    background: "#fff",
+    border: "1.5px solid #D8E0D2",
+    borderRadius: 20,
+    cursor: "pointer"
+  },
+  chipOn: {
+    color: "#fff",
+    background: "#2E7D4F",
+    border: "1.5px solid #2E7D4F"
   }
 };
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
