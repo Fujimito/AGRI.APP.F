@@ -222,6 +222,7 @@ function App() {
   const [fields, setFields] = useState(() => load("tankmix:fields", []));
   const [works, setWorks] = useState(() => load("tankmix:works", []));
   const [chemMaster, setChemMaster] = useState(() => load("tankmix:chemmaster", []));
+  const [lastMix, setLastMix] = useState(() => load("tankmix:lastmix", null));
   const [presets, setPresets] = useState(() => load("tankmix:presets", []));
   const [routes, setRoutes] = useState(() => load("tankmix:routes", []));
   const [workDate, setWorkDate] = useState(today());
@@ -532,6 +533,17 @@ function App() {
       ml: c.ml
     }));
     upsertChemMaster(chemsData);
+    // 前回調合として保存(「前回と同じ」で呼び出せる)
+    const mixSnap = calc.filter(c => c.valid).map(c => ({
+      name: c.name || "",
+      form: c.form,
+      use: c.use || "other",
+      ratio: c.ratio
+    }));
+    if (mixSnap.length > 0) {
+      setLastMix(mixSnap);
+      save("tankmix:lastmix", mixSnap);
+    }
     const valid = targetIds.filter(id => works.some(w => w.id === id));
     if (valid.length > 0) {
       // 選んだ複数圃場すべてに同じ調合を紐付け。総量は各圃場の予定薬液量があればそれを優先
@@ -669,21 +681,24 @@ function App() {
       }))
     };
   };
-  const post = async body => {
+  const post = async (body, retries = 2) => {
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
     if (!url) return null;
-    try {
-      const res = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "text/plain;charset=utf-8"
-        },
-        body: JSON.stringify(body)
-      });
-      return await res.json();
-    } catch {
-      return null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "text/plain;charset=utf-8"
+          },
+          body: JSON.stringify(body)
+        });
+        const j = await res.json();
+        if (j) return j;
+      } catch (e) {/* リトライへ */}
+      if (attempt < retries) await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
     }
+    return null;
   };
   const syncPending = async () => {
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
@@ -772,7 +787,7 @@ function App() {
       type: "cloudSave",
       team: teamCode.trim(),
       payload
-    });
+    }, 1);
     setSyncing(false);
     flash(j && j.ok ? "☁ 共有データを保存しました" : "保存に失敗しました");
   };
@@ -786,7 +801,7 @@ function App() {
     const j = await post({
       type: "cloudLoad",
       team: teamCode.trim()
-    });
+    }, 1);
     setSyncing(false);
     if (j && j.ok && j.payload) {
       try {
@@ -829,6 +844,17 @@ function App() {
     setTab("calc");
     flash("「" + p.name + "」を読み込みました");
   };
+  const loadLastMix = () => {
+    if (!lastMix || lastMix.length === 0) {
+      flash("前回の調合がありません");
+      return;
+    }
+    setChems(lastMix.map(c => ({
+      ...c,
+      id: uid++
+    })));
+    flash("前回と同じ薬液を読み込みました");
+  };
   const deletePreset = id => setPresetsSave(presets.filter(p => p.id !== id));
   const deleteChemMaster = name => setChemMasterSave(chemMaster.filter(c => c.name !== name));
   const editChemMaster = (name, data) => setChemMasterSave(chemMaster.map(c => c.name === name ? {
@@ -856,16 +882,41 @@ function App() {
     flash("CSVを出力しました");
   };
   const planOptions = works.filter(w => w.workDate === workDate && !w.reported && w.chems.length === 0);
+  const pendingCount = works.filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced)).length;
+
+  // 電波が戻ったら自動で送信を試みる(未送信があるときだけ)
+  useEffect(() => {
+    const onOnline = () => {
+      const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
+      const pend = load("tankmix:works", []).filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced)).length;
+      if (url && pend > 0) syncPending();
+    };
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, []);
   return /*#__PURE__*/React.createElement("div", {
     style: S.page
   }, /*#__PURE__*/React.createElement("header", {
     style: S.header,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: S.eyebrow
   }, "TANK MIX NOTE v8"), /*#__PURE__*/React.createElement("h1", {
     style: S.title
-  }, "薬液調合ノート")), toast && /*#__PURE__*/React.createElement("div", {
+  }, "薬液調合ノート")), pendingCount > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setTab("work");
+      syncPending();
+    },
+    style: S.headerBadge
+  }, syncing ? "送信中…" : "☁ 未送信 " + pendingCount + "件"))), toast && /*#__PURE__*/React.createElement("div", {
     style: S.toast
   }, toast), /*#__PURE__*/React.createElement("main", {
     style: S.main
@@ -898,7 +949,9 @@ function App() {
     planOptions,
     chemMaster,
     resolveWork,
-    works
+    works,
+    lastMix,
+    loadLastMix
   }), tab === "work" && /*#__PURE__*/React.createElement(WorkTab, {
     works,
     fields,
@@ -1082,8 +1135,22 @@ function CalcTab(p) {
   }, fmt(p.effTotalL, 2)), " L"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "薬剤(名前・剤型・希釈倍率)"), /*#__PURE__*/React.createElement("datalist", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      gap: 8,
+      marginBottom: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.cardLabel,
+      marginBottom: 0
+    }
+  }, "薬剤(名前・剤型・希釈倍率)"), p.lastMix && p.lastMix.length > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: p.loadLastMix,
+    style: S.recallBtn
+  }, "↩ 前回と同じ薬液")), /*#__PURE__*/React.createElement("datalist", {
     id: "chemlist"
   }, p.chemMaster.map(m => /*#__PURE__*/React.createElement("option", {
     key: m.name,
@@ -1842,9 +1909,27 @@ function WorkTab(p) {
       style: S.primaryBtn
     }, "実績を保存"))) : /*#__PURE__*/React.createElement("div", {
       style: {
-        display: "flex",
-        gap: 10,
         marginTop: 6
+      }
+    }, (() => {
+      const quick = w.totalL > 0 ? w.totalL : parseFloat(f.plannedL) || 0;
+      return quick > 0 ? /*#__PURE__*/React.createElement("button", {
+        onClick: () => p.submitReport(w.id, {
+          sprayedL: quick,
+          flights: [quick],
+          areaA: "",
+          memo: ""
+        }),
+        style: {
+          ...S.quickBtn,
+          width: "100%",
+          marginBottom: 8
+        }
+      }, "✓ 予定どおり ", fmt(quick, 1), "L で完了(1タップ)") : null;
+    })(), /*#__PURE__*/React.createElement("div", {
+      style: {
+        display: "flex",
+        gap: 10
       }
     }, /*#__PURE__*/React.createElement("button", {
       onClick: () => openReport(w),
@@ -1853,7 +1938,7 @@ function WorkTab(p) {
         flex: 1,
         marginTop: 0
       }
-    }, "🚁 実績を入力"), /*#__PURE__*/React.createElement("button", {
+    }, "🚁 詳しく入力"), /*#__PURE__*/React.createElement("button", {
       onClick: () => {
         if (confirm("「" + f.name + "」をこの日のリストから外しますか？\n(圃場マスタには残ります)")) p.removeWork(w.id);
       },
@@ -1861,7 +1946,7 @@ function WorkTab(p) {
         ...S.smallDanger,
         alignSelf: "stretch"
       }
-    }, "外す")))));
+    }, "外す"))))));
   }), groupMode && selected.length >= 2 && !gFormOpen && /*#__PURE__*/React.createElement("button", {
     onClick: openGroupForm,
     style: {
@@ -3351,6 +3436,41 @@ const S = {
     color: "#fff",
     background: "#2E7D4F",
     border: "1.5px solid #2E7D4F"
+  },
+  recallBtn: {
+    padding: "9px 14px",
+    fontSize: 14,
+    fontWeight: 800,
+    color: "#B78A1F",
+    background: "#FBF7EC",
+    border: "1.5px solid #E4D6AC",
+    borderRadius: 20,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+    flexShrink: 0
+  },
+  headerBadge: {
+    padding: "10px 16px",
+    fontSize: 14,
+    fontWeight: 800,
+    color: "#fff",
+    background: "#C74E36",
+    border: "none",
+    borderRadius: 20,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+    flexShrink: 0,
+    boxShadow: "0 2px 8px rgba(199,78,54,0.3)"
+  },
+  quickBtn: {
+    padding: "15px 0",
+    fontSize: 16.5,
+    fontWeight: 800,
+    color: "#fff",
+    background: "#2E7D4F",
+    border: "none",
+    borderRadius: 10,
+    cursor: "pointer"
   }
 };
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
