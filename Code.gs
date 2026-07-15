@@ -63,10 +63,15 @@ function findRow_(sh, recordId) {
   return 0;
 }
 
-// 薬剤リストを1セル用の文字列にまとめる
+// 薬剤リストを1セル用の文字列にまとめる(用途・剤型・倍率・薬量)
 function chemsText_(chems) {
   return chems.map(function (c) {
-    return (c.name || "(無名)") + "(" + (c.formName || "") + "・" + (c.ratio || "?") + "倍・" + Math.round(Number(c.ml) || 0) + "mL)";
+    var parts = [];
+    if (c.useName) parts.push(c.useName);
+    if (c.formName) parts.push(c.formName);
+    parts.push((c.ratio || "?") + "倍");
+    parts.push(Math.round(Number(c.ml) || 0) + "mL");
+    return (c.name || "(無名)") + "(" + parts.join("・") + ")";
   }).join(" / ");
 }
 
