@@ -193,6 +193,7 @@ function App() {
   const [works, setWorks] = useState(() => load("tankmix:works", []));
   const [chemMaster, setChemMaster] = useState(() => load("tankmix:chemmaster", []));
   const [presets, setPresets] = useState(() => load("tankmix:presets", []));
+  const [routes, setRoutes] = useState(() => load("tankmix:routes", []));
   const [workDate, setWorkDate] = useState(today());
   const [gasUrl, setGasUrlState] = useState(() => localStorage.getItem("tankmix:gasurl") || "");
   const [recorder, setRecorderState] = useState(() => localStorage.getItem("tankmix:recorder") || "");
@@ -230,6 +231,10 @@ function App() {
   const setPresetsSave = next => {
     setPresets(next);
     save("tankmix:presets", next);
+  };
+  const setRoutesSave = next => {
+    setRoutes(next);
+    save("tankmix:routes", next);
   };
   const resolveWork = w => {
     if (w.isGroup) return {
@@ -327,6 +332,65 @@ function App() {
     return w.id;
   };
   const removeWork = id => setWorksSave(works.filter(w => w.id !== id));
+
+  // ══ 圃場コース(ルート・プリセット) ══
+  // 現在の作業リスト(この日ぶん)をコースとして保存
+  const saveRouteFromToday = () => {
+    const day = works.filter(w => w.workDate === workDate && !w.reported);
+    if (day.length === 0) {
+      flash("この日の作業リストが空です");
+      return;
+    }
+    const name = prompt("コース名を入力してください(例:月曜ルート)", "");
+    if (!name) return;
+    const fieldIds = day.map(w => w.fieldId).filter(id => fields.some(f => f.id === id));
+    if (fieldIds.length === 0) {
+      flash("登録できる圃場がありません");
+      return;
+    }
+    setRoutesSave([{
+      id: Date.now(),
+      name: name.trim(),
+      fieldIds
+    }, ...routes]);
+    flash("コース「" + name.trim() + "」を保存しました(" + fieldIds.length + "圃場)");
+  };
+  // 任意の圃場IDリストからコースを作成
+  const createRoute = (name, fieldIds) => {
+    if (!name || fieldIds.length === 0) return;
+    setRoutesSave([{
+      id: Date.now(),
+      name,
+      fieldIds
+    }, ...routes]);
+    flash("コース「" + name + "」を保存しました");
+  };
+  const deleteRoute = id => setRoutesSave(routes.filter(r => r.id !== id));
+  const renameRoute = (id, name) => setRoutesSave(routes.map(r => r.id === id ? {
+    ...r,
+    name
+  } : r));
+
+  // コースを選んだ日の作業リストへ一括投入(順番を保持、重複はスキップ)
+  const applyRoute = routeId => {
+    const route = routes.find(r => r.id === routeId);
+    if (!route) return;
+    let added = 0;
+    let skipped = 0;
+    const toAdd = [];
+    route.fieldIds.forEach(fid => {
+      const f = fields.find(x => x.id === fid);
+      if (!f) return;
+      if (works.some(w => w.workDate === workDate && w.fieldId === fid && !w.reported)) {
+        skipped++;
+        return;
+      }
+      toAdd.push(makeWork(f));
+      added++;
+    });
+    if (toAdd.length > 0) setWorksSave([...works, ...toAdd]);
+    flash("コースを投入:" + added + "圃場追加" + (skipped > 0 ? "(" + skipped + "件は既存)" : ""));
+  };
   const moveWork = (id, dir) => {
     const visible = works.filter(w => w.workDate === workDate && !w.reported).map(w => w.id);
     const vi = visible.indexOf(id);
@@ -623,6 +687,7 @@ function App() {
       works,
       chemMaster,
       presets,
+      routes,
       savedAt: new Date().toISOString(),
       by: recorder
     });
@@ -653,6 +718,7 @@ function App() {
         if (data.works) setWorksSave(data.works);
         if (data.chemMaster) setChemMasterSave(data.chemMaster);
         if (data.presets) setPresetsSave(data.presets);
+        if (data.routes) setRoutesSave(data.routes);
         flash("☁ 読み込みました(" + (data.by || "?") + " が " + (data.savedAt || "").slice(0, 16).replace("T", " ") + " に保存)");
       } catch {
         flash("データの解釈に失敗しました");
@@ -763,6 +829,12 @@ function App() {
     removeWork,
     moveWork,
     upsertField,
+    routes,
+    applyRoute,
+    saveRouteFromToday,
+    deleteRoute,
+    createRoute,
+    renameRoute,
     submitReport,
     submitGroupReport,
     deleteWork,
@@ -1126,6 +1198,10 @@ function WorkTab(p) {
   });
   const [showHistory, setShowHistory] = useState(false);
   const [showSettings, setShowSettings] = useState(() => !p.gasUrl);
+  const [routeOpen, setRouteOpen] = useState(false);
+  const [routeBuildMode, setRouteBuildMode] = useState(false);
+  const [routeName, setRouteName] = useState("");
+  const [routePicks, setRoutePicks] = useState([]);
   const dayList = p.works.filter(w => w.workDate === p.workDate && !w.reported);
   const history = p.works.filter(w => w.reported && !w.groupedInto).sort((a, b) => b.id - a.id);
   const pending = p.works.filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced)).length;
@@ -1257,6 +1333,129 @@ function WorkTab(p) {
   }, " L")), /*#__PURE__*/React.createElement("div", {
     style: S.totalsLabel
   }, "合計薬量")))), /*#__PURE__*/React.createElement("section", {
+    style: S.card,
+    className: "no-print"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      flexWrap: "wrap",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "圃場コース(よく回るルート)"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRouteOpen(!routeOpen),
+    style: S.linkBtn
+  }, routeOpen ? "閉じる" : "コースを管理")), p.routes.length === 0 && !routeOpen && /*#__PURE__*/React.createElement("p", {
+    style: {
+      ...S.memoLine,
+      marginTop: 4
+    }
+  }, "よく回る圃場の組み合わせをコースに登録すると、毎回まとめて呼び出せます。「コースを管理」から作成できます。"), p.routes.map(r => /*#__PURE__*/React.createElement("div", {
+    key: r.id,
+    style: S.listItem
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.listTitle
+  }, "🚜 ", r.name), /*#__PURE__*/React.createElement("div", {
+    style: S.listSub
+  }, r.fieldIds.map(fid => {
+    const f = p.fields.find(x => x.id === fid);
+    return f ? f.name : null;
+  }).filter(Boolean).join(" → "))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.applyRoute(r.id),
+    style: S.smallPrimary
+  }, "この日へ投入"), routeOpen && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (confirm("コース「" + r.name + "」を削除しますか？")) p.deleteRoute(r.id);
+    },
+    style: S.smallDanger
+  }, "削除"))), routeOpen && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12
+    }
+  }, !routeBuildMode ? /*#__PURE__*/React.createElement("div", {
+    style: S.btnRow
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.saveRouteFromToday(),
+    style: S.secondaryBtn
+  }, "今日のリストをコース化"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setRouteBuildMode(true);
+      setRoutePicks([]);
+      setRouteName("");
+    },
+    style: S.primaryBtn
+  }, "圃場を選んで作成")) : /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.settingsBox
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "コースに入れる圃場を順にタップ(番号順に投入されます)"), /*#__PURE__*/React.createElement("input", {
+    value: routeName,
+    placeholder: "コース名(例:月曜ルート)",
+    onChange: e => setRouteName(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 8
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      maxHeight: 260,
+      overflowY: "auto"
+    }
+  }, p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: S.memoLine
+  }, "先に圃場を登録してください。"), p.fields.map(f => {
+    const pickIdx = routePicks.indexOf(f.id);
+    return /*#__PURE__*/React.createElement("div", {
+      key: f.id,
+      onClick: () => setRoutePicks(pickIdx >= 0 ? routePicks.filter(x => x !== f.id) : [...routePicks, f.id]),
+      style: {
+        ...S.pickRow,
+        ...(pickIdx >= 0 ? S.pickRowOn : {})
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...S.pickNum,
+        ...(pickIdx >= 0 ? S.pickNumOn : {})
+      }
+    }, pickIdx >= 0 ? pickIdx + 1 : "＋"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1
+      }
+    }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("span", {
+      style: S.tdSub
+    }, f.areaA ? fmt(parseFloat(f.areaA), 1) + "a" : ""));
+  })), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRouteBuildMode(false),
+    style: S.secondaryBtn
+  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (routeName.trim() && routePicks.length > 0) {
+        p.createRoute(routeName.trim(), routePicks);
+        setRouteBuildMode(false);
+      }
+    },
+    disabled: !routeName.trim() || routePicks.length === 0,
+    style: {
+      ...S.primaryBtn,
+      opacity: routeName.trim() && routePicks.length > 0 ? 1 : 0.4
+    }
+  }, "コース保存(", routePicks.length, ")"))))), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -2690,6 +2889,39 @@ const S = {
     fontSize: 14.5,
     padding: "5px 0",
     borderTop: "1px dashed #E4D6AC"
+  },
+  pickRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "12px 10px",
+    borderRadius: 9,
+    border: "1.5px solid #E4EAE0",
+    marginBottom: 8,
+    background: "#fff",
+    cursor: "pointer",
+    fontSize: 16
+  },
+  pickRowOn: {
+    border: "2px solid #2E7D4F",
+    background: "#EDF5EE"
+  },
+  pickNum: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    background: "#EDF1EA",
+    color: "#8a978e",
+    fontSize: 15,
+    fontWeight: 800,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0
+  },
+  pickNumOn: {
+    background: "#2E7D4F",
+    color: "#fff"
   }
 };
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
