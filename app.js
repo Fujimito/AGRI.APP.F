@@ -13,6 +13,7 @@ const {
 //  ・チームコードによる端末間データ共有
 // ═══════════════════════════════════════════════════════
 
+const APP_VERSION = "v8.8";
 const SWATCHES = ["#C74E36", "#B78A1F", "#6A5ACD", "#2E7D4F", "#A34D7C", "#3B7EA1", "#7A6A4F", "#4F7A6A"];
 const FORMS = [{
   key: "wp",
@@ -951,21 +952,30 @@ function App() {
   }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      alignItems: "center",
+      alignItems: "flex-start",
       justifyContent: "space-between",
       gap: 10
     }
   }, /*#__PURE__*/React.createElement("div", null, /*#__PURE__*/React.createElement("div", {
     style: S.eyebrow
-  }, "TANK MIX NOTE v8"), /*#__PURE__*/React.createElement("h1", {
+  }, "TANK MIX NOTE"), /*#__PURE__*/React.createElement("h1", {
     style: S.title
-  }, "農薬散布防除記録")), pendingCount > 0 && /*#__PURE__*/React.createElement("button", {
+  }, "農薬散布防除記録")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "flex-end",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.versionTag
+  }, APP_VERSION), pendingCount > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setTab("work");
       syncPending();
     },
     style: S.headerBadge
-  }, syncing ? "送信中…" : "☁ 未送信 " + pendingCount + "件"))), toast && /*#__PURE__*/React.createElement("div", {
+  }, syncing ? "送信中…" : "☁ 未送信 " + pendingCount + "件")))), toast && /*#__PURE__*/React.createElement("div", {
     style: S.toast
   }, toast), /*#__PURE__*/React.createElement("main", {
     style: S.main
@@ -3575,6 +3585,16 @@ const S = {
     fontSize: 13.5,
     color: "#7a621f",
     fontWeight: 600
+  },
+  versionTag: {
+    fontSize: 12.5,
+    fontWeight: 800,
+    color: "#66756a",
+    background: "#EDF1EA",
+    border: "1.5px solid #D8E0D2",
+    borderRadius: 20,
+    padding: "5px 12px",
+    whiteSpace: "nowrap"
   }
 };
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
