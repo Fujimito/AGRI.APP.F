@@ -910,7 +910,7 @@ function App() {
     style: S.eyebrow
   }, "TANK MIX NOTE v8"), /*#__PURE__*/React.createElement("h1", {
     style: S.title
-  }, "薬液調合ノート")), pendingCount > 0 && /*#__PURE__*/React.createElement("button", {
+  }, "農薬散布防除記録")), pendingCount > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setTab("work");
       syncPending();
