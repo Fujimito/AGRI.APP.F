@@ -1,6 +1,6 @@
 // 薬液調合ノート — Service Worker(完全オフライン対応)
 // 更新を配布するときは CACHE_VERSION の数字を上げてください
-const CACHE_VERSION = "tankmix-v8.10";
+const CACHE_VERSION = "tankmix-v8.12";
 
 const ASSETS = [
   "./",
@@ -8,6 +8,8 @@ const ASSETS = [
   "./app.js",
   "./react.production.min.js",
   "./react-dom.production.min.js",
+  "./leaflet.js",
+  "./leaflet.css",
   "./manifest.json",
   "./icon-192.png",
   "./icon-512.png",

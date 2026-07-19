@@ -22,12 +22,19 @@
     body { background: #fff; }
     .print-only { display: block !important; }
   }
+  .field-label { background: rgba(46,125,79,0.85); color:#fff; border:none; font-weight:700; font-size:12px; padding:2px 6px; box-shadow:none; }
+  .field-label::before { display:none; }
+  .pt-label { background:transparent; border:none; color:#fff; font-weight:800; box-shadow:none; text-shadow:0 1px 2px rgba(0,0,0,0.8); }
+  .pt-label::before { display:none; }
+  .leaflet-container { font: inherit; }
 </style>
+<link rel="stylesheet" href="./leaflet.css" />
 </head>
 <body>
 <div id="root"></div>
 <script src="./react.production.min.js"></script>
 <script src="./react-dom.production.min.js"></script>
+<script src="./leaflet.js"></script>
 <script src="./app.js"></script>
 <script>
   // Service Worker登録(オフライン対応)
