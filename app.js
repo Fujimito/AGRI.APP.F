@@ -13,7 +13,7 @@ const {
 //  ・チームコードによる端末間データ共有
 // ═══════════════════════════════════════════════════════
 
-const APP_VERSION = "v8.8";
+const APP_VERSION = "v8.9";
 const SWATCHES = ["#C74E36", "#B78A1F", "#6A5ACD", "#2E7D4F", "#A34D7C", "#3B7EA1", "#7A6A4F", "#4F7A6A"];
 const FORMS = [{
   key: "wp",
@@ -919,7 +919,7 @@ function App() {
       const chemsStr = w.chems.map(c => c.name + "(" + useLabel(c.use) + "・" + formLabel(c.form) + "・" + c.ratio + "倍・" + Math.round(c.ml) + "mL)").join(" / ");
       const flights = w.flights || [];
       const flightStr = flights.length > 1 ? flights.map(fl => plain(fl, 1) + "L").join(" + ") : "";
-      return [w.workDate, f.name, f.crop || "", plain(parseFloat(w.reportAreaA || f.areaA), 1), w.chems.length, chemsStr, plain(w.totalL), plain(w.waterMl / 1000, 3), w.reported ? plain(w.sprayedL) : "", w.reported ? flights.length || (w.reported ? 1 : "") : "", flightStr, w.reported ? "散布済" : "調合のみ", w.reportDate || "", (w.reportMemo || w.memo || "").replace(/[,\n]/g, " ")].join(",");
+      return [w.workDate, f.name, f.crop || "", plain(parseFloat(w.reportAreaA || f.areaA), 2), w.chems.length, chemsStr, plain(w.totalL), plain(w.waterMl / 1000, 3), w.reported ? plain(w.sprayedL) : "", w.reported ? flights.length || (w.reported ? 1 : "") : "", flightStr, w.reported ? "散布済" : "調合のみ", w.reportDate || "", (w.reportMemo || w.memo || "").replace(/[,\n]/g, " ")].join(",");
     }).join("\n");
     const blob = new Blob(["\uFEFF" + head + body], {
       type: "text/csv;charset=utf-8"
@@ -1579,7 +1579,7 @@ function WorkTab(p) {
     style: S.totalsItem
   }, /*#__PURE__*/React.createElement("div", {
     style: S.totalsNum
-  }, fmt(sumArea, 1), /*#__PURE__*/React.createElement("small", {
+  }, fmt(sumArea, 2), /*#__PURE__*/React.createElement("small", {
     style: S.totalsUnit
   }, " a")), /*#__PURE__*/React.createElement("div", {
     style: S.totalsLabel
@@ -1587,7 +1587,7 @@ function WorkTab(p) {
     style: S.totalsItem
   }, /*#__PURE__*/React.createElement("div", {
     style: S.totalsNum
-  }, fmt(sumLiters, 1), /*#__PURE__*/React.createElement("small", {
+  }, fmt(sumLiters, 2), /*#__PURE__*/React.createElement("small", {
     style: S.totalsUnit
   }, " L")), /*#__PURE__*/React.createElement("div", {
     style: S.totalsLabel
@@ -1691,7 +1691,7 @@ function WorkTab(p) {
     }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
       style: S.listSub,
       className: "num"
-    }, f.areaA ? fmt(parseFloat(f.areaA), 1) + " a" : "面積未定", f.plannedL ? " ／ 予定 " + fmt(parseFloat(f.plannedL), 1) + " L" : "")), ord > 0 ? /*#__PURE__*/React.createElement("span", {
+    }, f.areaA ? fmt(parseFloat(f.areaA), 2) + " a" : "面積未定", f.plannedL ? " ／ 予定 " + fmt(parseFloat(f.plannedL), 2) + " L" : "")), ord > 0 ? /*#__PURE__*/React.createElement("span", {
       style: S.orderBadge,
       className: "num"
     }, "この日の ", ord, "番目") : /*#__PURE__*/React.createElement("button", {
@@ -1812,7 +1812,7 @@ function WorkTab(p) {
     }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
       style: S.listSub,
       className: "num"
-    }, f.areaA ? fmt(parseFloat(f.areaA), 1) + " a" : "面積未定", f.plannedL ? " ／ 予定 " + fmt(parseFloat(f.plannedL), 1) + " L" : ""))), !groupMode && /*#__PURE__*/React.createElement("div", {
+    }, f.areaA ? fmt(parseFloat(f.areaA), 2) + " a" : "面積未定", f.plannedL ? " ／ 予定 " + fmt(parseFloat(f.plannedL), 2) + " L" : ""))), !groupMode && /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 6,
@@ -2298,7 +2298,7 @@ function WorkTab(p) {
     }, /*#__PURE__*/React.createElement("div", {
       style: S.recordTotal,
       className: "num"
-    }, "実散布 ", /*#__PURE__*/React.createElement("strong", null, fmt(w.sprayedL, 2), " L"), "(調合 ", fmt(w.totalL, 2), " L ／ 水 ", fmtL(w.waterMl), " L)", w.reportAreaA || f.areaA ? " ／ " + fmt(parseFloat(w.reportAreaA || f.areaA), 1) + " a" : ""), w.flights && w.flights.length > 1 && /*#__PURE__*/React.createElement("div", {
+    }, "実散布 ", /*#__PURE__*/React.createElement("strong", null, fmt(w.sprayedL, 2), " L"), "(調合 ", fmt(w.totalL, 2), " L ／ 水 ", fmtL(w.waterMl), " L)", w.reportAreaA || f.areaA ? " ／ " + fmt(parseFloat(w.reportAreaA || f.areaA), 2) + " a" : ""), w.flights && w.flights.length > 1 && /*#__PURE__*/React.createElement("div", {
       style: S.memoLine,
       className: "num"
     }, "🔋 ", w.flights.length, "フライト:", w.flights.map(fl => fmt(fl, 1) + "L").join(" + ")), w.chems.map((c, i) => /*#__PURE__*/React.createElement("div", {
@@ -2479,7 +2479,7 @@ function PresetTab(p) {
   }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
     style: S.listSub,
     className: "num"
-  }, f.areaA ? fmt(parseFloat(f.areaA), 1) + " a" : "面積未定", f.plannedL ? " ／ 予定 " + fmt(parseFloat(f.plannedL), 1) + " L" : "")), /*#__PURE__*/React.createElement("button", {
+  }, f.areaA ? fmt(parseFloat(f.areaA), 2) + " a" : "面積未定", f.plannedL ? " ／ 予定 " + fmt(parseFloat(f.plannedL), 2) + " L" : "")), /*#__PURE__*/React.createElement("button", {
     onClick: () => startEdit(f),
     style: S.smallSecondary
   }, "編集"), /*#__PURE__*/React.createElement("button", {
@@ -2546,7 +2546,7 @@ function PresetTab(p) {
       }
     }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("span", {
       style: S.tdSub
-    }, f.areaA ? fmt(parseFloat(f.areaA), 1) + "a" : ""));
+    }, f.areaA ? fmt(parseFloat(f.areaA), 2) + "a" : ""));
   })), /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.btnRow,
