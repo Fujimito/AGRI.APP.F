@@ -13,7 +13,7 @@ const {
 //  ・チームコードによる端末間データ共有
 // ═══════════════════════════════════════════════════════
 
-const APP_VERSION = "v8.12";
+const APP_VERSION = "v8.14";
 const SWATCHES = ["#C74E36", "#B78A1F", "#6A5ACD", "#2E7D4F", "#A34D7C", "#3B7EA1", "#7A6A4F", "#4F7A6A"];
 const FORMS = [{
   key: "wp",
@@ -724,6 +724,28 @@ function App() {
     next[j] = tmp;
     setWorksSave(next);
   };
+  // ドラッグ&ドロップ:この日の可視リスト内で、fromの圃場をtoの位置へ移動
+  const reorderWork = (fromId, toId) => {
+    if (fromId === toId) return;
+    const dayW = works.filter(w => w.workDate === workDate && !w.reported);
+    const fromIdx = dayW.findIndex(w => w.id === fromId);
+    const toIdx = dayW.findIndex(w => w.id === toId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const reordered = [...dayW];
+    const [moved] = reordered.splice(fromIdx, 1);
+    reordered.splice(toIdx, 0, moved);
+    // この日の作業を新しい順序で、他の日の作業はそのまま再構成
+    const others = works.filter(w => !(w.workDate === workDate && !w.reported));
+    // 元の並びで「この日の可視作業」があった位置に、並べ替え後の列を差し込む
+    const result = [];
+    let ri = 0;
+    works.forEach(w => {
+      if (w.workDate === workDate && !w.reported) {
+        result.push(reordered[ri++]);
+      } else result.push(w);
+    });
+    setWorksSave(result);
+  };
   const effTotalL = mode === "direct" ? parseFloat(totalL) || 0 : (parseFloat(areaA) || 0) / 10 * (parseFloat(ratePer10a) || 0);
   const totalMl = effTotalL * 1000;
   const calc = chems.map((c, i) => {
@@ -1238,6 +1260,7 @@ function App() {
     addNewFieldAndWork,
     removeWork,
     moveWork,
+    reorderWork,
     upsertField,
     routes,
     applyRoute,
@@ -1663,11 +1686,53 @@ function WorkTab(p) {
   const [ratePerDay, setRatePerDay] = useState("");
   const [chemApplyOpen, setChemApplyOpen] = useState(false);
   const [chemTargetId, setChemTargetId] = useState(null); // 個別適用の対象圃場(null=全圃場)
-
+  const [dragId, setDragId] = useState(null); // ドラッグ中の圃場ID
+  const [dragOverId, setDragOverId] = useState(null); // ドロップ先候補
+  const dragIdRef = useRef(null);
   const dayList = p.works.filter(w => w.workDate === p.workDate && !w.reported);
   const history = p.works.filter(w => w.reported && !w.groupedInto).sort((a, b) => b.id - a.id);
   const pendingWorks = p.works.filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced));
   const pending = pendingWorks.length;
+
+  // ドラッグ&ドロップ並べ替え(タッチ・マウス両対応)
+  const onHandleDown = (e, id) => {
+    e.preventDefault();
+    setDragId(id);
+    dragIdRef.current = id;
+    setDragOverId(id);
+    const move = ev => {
+      const pt = ev.touches ? ev.touches[0] : ev;
+      const el = document.elementFromPoint(pt.clientX, pt.clientY);
+      const row = el && el.closest ? el.closest("[data-work-id]") : null;
+      if (row) {
+        const overId = Number(row.getAttribute("data-work-id"));
+        if (overId) setDragOverId(overId);
+      }
+    };
+    const up = ev => {
+      const pt = ev.changedTouches ? ev.changedTouches[0] : ev;
+      const el = document.elementFromPoint(pt.clientX, pt.clientY);
+      const row = el && el.closest ? el.closest("[data-work-id]") : null;
+      const fromId = dragIdRef.current;
+      if (row) {
+        const toId = Number(row.getAttribute("data-work-id"));
+        if (toId && fromId && toId !== fromId) p.reorderWork(fromId, toId);
+      }
+      setDragId(null);
+      dragIdRef.current = null;
+      setDragOverId(null);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("touchmove", move);
+      window.removeEventListener("touchend", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("touchmove", move, {
+      passive: false
+    });
+    window.addEventListener("touchend", up);
+  };
   const sumArea = dayList.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
   const sumLiters = dayList.reduce((s, w) => {
     const f = p.resolveWork(w);
@@ -2064,15 +2129,29 @@ function WorkTab(p) {
     style: groupMode ? S.smallPrimary : S.smallSecondary
   }, groupMode ? "まとめ選択を終了" : "🔗 まとめ散布")), dayList.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "この日の作業はまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "検索または新規登録から圃場を追加してください。"), dayList.map((w, idx) => {
+  }, "この日の作業はまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "検索または新規登録から圃場を追加してください。"), dayList.length > 1 && !groupMode && /*#__PURE__*/React.createElement("p", {
+    style: {
+      ...S.note,
+      marginTop: 0,
+      marginBottom: 10
+    }
+  }, "⣿ または番号を長押ししてドラッグすると、散布する順番を入れ替えられます。"), dayList.map((w, idx) => {
     const f = p.resolveWork(w);
     const master = p.fields.find(x => x.id === w.fieldId);
     const isEditing = editingFieldId !== null && master && master.id === editingFieldId;
     return /*#__PURE__*/React.createElement("div", {
       key: w.id,
+      "data-work-id": w.id,
       style: {
         ...S.record,
-        ...(groupMode && selected.includes(w.id) ? S.recordSelected : {})
+        ...(groupMode && selected.includes(w.id) ? S.recordSelected : {}),
+        ...(dragId === w.id ? {
+          opacity: 0.4
+        } : {}),
+        ...(dragOverId === w.id && dragId !== w.id ? {
+          outline: "2.5px solid #2E7D4F",
+          outlineOffset: -2
+        } : {})
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: S.recordHead
@@ -2091,8 +2170,15 @@ function WorkTab(p) {
         ...(selected.includes(w.id) ? S.checkBtnOn : {})
       }
     }, selected.includes(w.id) ? "✓" : "") : /*#__PURE__*/React.createElement("span", {
-      style: S.orderNum,
-      className: "num"
+      onPointerDown: e => onHandleDown(e, w.id),
+      onTouchStart: e => onHandleDown(e, w.id),
+      style: {
+        ...S.orderNum,
+        cursor: "grab",
+        touchAction: "none"
+      },
+      className: "num",
+      title: "ドラッグで並べ替え"
     }, idx + 1), /*#__PURE__*/React.createElement("div", {
       style: {
         minWidth: 0,
@@ -2100,10 +2186,24 @@ function WorkTab(p) {
       }
     }, /*#__PURE__*/React.createElement("div", {
       style: S.recordField
-    }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
-      style: S.listSub,
+    }, f.name), /*#__PURE__*/React.createElement("div", {
+      style: S.workMeta,
       className: "num"
-    }, f.areaA ? dispArea(f.areaA, p.areaUnitKey) + " " + areaSuffix(p.areaUnitKey) : "面積未定", f.plannedL ? " ／ 予定 " + dispVol(f.plannedL, p.volUnitKey) + " " + volSuffix(p.volUnitKey) : ""))), !groupMode && /*#__PURE__*/React.createElement("div", {
+    }, f.areaA ? /*#__PURE__*/React.createElement("span", null, dispArea(f.areaA, p.areaUnitKey), /*#__PURE__*/React.createElement("span", {
+      style: S.workMetaUnit
+    }, areaSuffix(p.areaUnitKey))) : /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: "#a08b5a"
+      }
+    }, "面積未定"), f.plannedL ? /*#__PURE__*/React.createElement("span", {
+      style: S.workMetaSep
+    }, "／ 予定 ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: "#2b5a7a"
+      }
+    }, dispVol(f.plannedL, p.volUnitKey), /*#__PURE__*/React.createElement("span", {
+      style: S.workMetaUnit
+    }, volSuffix(p.volUnitKey)))) : null))), !groupMode && /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         flexDirection: "column",
@@ -2123,23 +2223,13 @@ function WorkTab(p) {
       onClick: () => startEditField(w),
       style: S.orderBtn,
       "aria-label": "編集"
-    }, "✎"), /*#__PURE__*/React.createElement("button", {
-      onClick: () => p.moveWork(w.id, -1),
-      disabled: idx === 0,
-      style: {
-        ...S.orderBtn,
-        opacity: idx === 0 ? 0.3 : 1
-      },
-      "aria-label": "上へ"
-    }, "▲"), /*#__PURE__*/React.createElement("button", {
-      onClick: () => p.moveWork(w.id, 1),
-      disabled: idx === dayList.length - 1,
-      style: {
-        ...S.orderBtn,
-        opacity: idx === dayList.length - 1 ? 0.3 : 1
-      },
-      "aria-label": "下へ"
-    }, "▼")))), /*#__PURE__*/React.createElement("div", {
+    }, "✎"), /*#__PURE__*/React.createElement("span", {
+      onPointerDown: e => onHandleDown(e, w.id),
+      onTouchStart: e => onHandleDown(e, w.id),
+      style: S.dragHandle,
+      title: "ドラッグで並べ替え",
+      "aria-label": "並べ替え"
+    }, "⣿")))), /*#__PURE__*/React.createElement("div", {
       style: S.recordBody
     }, isEditing && /*#__PURE__*/React.createElement("div", {
       style: S.reportForm
@@ -2308,27 +2398,9 @@ function WorkTab(p) {
       style: S.primaryBtn
     }, "実績を保存"))) : /*#__PURE__*/React.createElement("div", {
       style: {
-        marginTop: 6
-      }
-    }, (() => {
-      const quick = w.totalL > 0 ? w.totalL : parseFloat(f.plannedL) || 0;
-      return quick > 0 ? /*#__PURE__*/React.createElement("button", {
-        onClick: () => p.submitReport(w.id, {
-          sprayedL: quick,
-          flights: [quick],
-          areaA: "",
-          memo: ""
-        }),
-        style: {
-          ...S.quickBtn,
-          width: "100%",
-          marginBottom: 8
-        }
-      }, "✓ 予定どおり ", fmt(quick, 1), "L で完了(1タップ)") : null;
-    })(), /*#__PURE__*/React.createElement("div", {
-      style: {
         display: "flex",
-        gap: 10
+        gap: 10,
+        marginTop: 6
       }
     }, /*#__PURE__*/React.createElement("button", {
       onClick: () => openReport(w),
@@ -2337,7 +2409,7 @@ function WorkTab(p) {
         flex: 1,
         marginTop: 0
       }
-    }, "🚁 詳しく入力"), /*#__PURE__*/React.createElement("button", {
+    }, "🚁 実績入力"), /*#__PURE__*/React.createElement("button", {
       onClick: () => {
         if (confirm("「" + f.name + "」をこの日のリストから外しますか？\n(圃場マスタには残ります)")) p.removeWork(w.id);
       },
@@ -2345,7 +2417,7 @@ function WorkTab(p) {
         ...S.smallDanger,
         alignSelf: "stretch"
       }
-    }, "外す"))))));
+    }, "外す")))));
   }), groupMode && selected.length >= 2 && !gFormOpen && /*#__PURE__*/React.createElement("button", {
     onClick: openGroupForm,
     style: {
@@ -3096,9 +3168,11 @@ function MapTab(p) {
   const [newName, setNewName] = React.useState("");
   const [newCrop, setNewCrop] = React.useState("");
   const [gpsOn, setGpsOn] = React.useState(false);
+  const [zoom, setZoom] = React.useState(15);
   const drawingRef = React.useRef(false);
   const drawPtsRef = React.useRef([]);
   const drawArea = polygonAreaA(drawPts);
+  const LABEL_MIN_ZOOM = 17; // これ以上に拡大したときだけラベル表示
 
   // 地図の初期化(1回だけ)
   React.useEffect(() => {
@@ -3106,22 +3180,25 @@ function MapTab(p) {
     const L = window.L;
     // 初期表示:登録済み圃場があればその中心、なければ日本の中心付近
     let center = [35.0, 137.0];
-    let zoom = 5;
+    let z = 5;
     const withPoly = p.fields.filter(f => f.center);
     if (withPoly.length > 0) {
       center = withPoly[0].center;
-      zoom = 15;
+      z = 17;
     }
     const map = L.map(containerRef.current, {
       zoomControl: true,
-      attributionControl: true
-    }).setView(center, zoom);
-    // 国土地理院 航空写真タイル(無料・キー不要)
+      attributionControl: true,
+      maxZoom: 21
+    }).setView(center, z);
+    // 国土地理院 航空写真タイル(無料・キー不要)。maxNativeZoom超はオーバーズームで拡大
     L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg", {
       attribution: "地理院タイル",
-      maxZoom: 18
+      maxZoom: 21,
+      maxNativeZoom: 18
     }).addTo(map);
     mapRef.current = map;
+    setZoom(map.getZoom());
     layersRef.current.fields = L.layerGroup().addTo(map);
     layersRef.current.draw = L.layerGroup().addTo(map);
     layersRef.current.gps = L.layerGroup().addTo(map);
@@ -3132,6 +3209,7 @@ function MapTab(p) {
       drawPtsRef.current = next;
       setDrawPts(next);
     });
+    map.on("zoomend", () => setZoom(map.getZoom()));
     setReady(true);
     setTimeout(() => map.invalidateSize(), 200);
     return () => {
@@ -3146,6 +3224,7 @@ function MapTab(p) {
     const L = window.L;
     const grp = layersRef.current.fields;
     grp.clearLayers();
+    const showLabel = zoom >= LABEL_MIN_ZOOM;
     p.fields.forEach(f => {
       if (!f.polygon || f.polygon.length < 3) return;
       const poly = L.polygon(f.polygon, {
@@ -3154,17 +3233,18 @@ function MapTab(p) {
         fillColor: "#7ED957",
         fillOpacity: 0.35
       }).addTo(grp);
-      const c = f.center || polygonCenter(f.polygon);
-      poly.bindTooltip(f.name + (f.crop ? " / " + f.crop : "") + " / " + fmt(polygonAreaA(f.polygon), 2) + " a", {
-        permanent: true,
-        direction: "center",
-        className: "field-label"
-      });
+      if (showLabel) {
+        poly.bindTooltip(f.name + (f.crop ? " / " + f.crop : "") + " / " + fmt(polygonAreaA(f.polygon), 2) + " a", {
+          permanent: true,
+          direction: "center",
+          className: "field-label"
+        });
+      }
       poly.on("click", () => {
         p.onPickField && p.onPickField(f);
       });
     });
-  }, [ready, p.fields]);
+  }, [ready, p.fields, zoom]);
 
   // 作図中ポリゴンの再描画
   React.useEffect(() => {
@@ -3173,17 +3253,23 @@ function MapTab(p) {
     const grp = layersRef.current.draw;
     grp.clearLayers();
     if (drawPts.length > 0) {
+      // 頂点(ドラッグで移動可能)
       drawPts.forEach((pt, i) => {
-        L.circleMarker(pt, {
-          radius: 6,
-          color: "#fff",
-          weight: 2,
-          fillColor: "#C74E36",
-          fillOpacity: 1
-        }).addTo(grp).bindTooltip(String(i + 1), {
-          permanent: true,
-          direction: "top",
-          className: "pt-label"
+        const icon = L.divIcon({
+          className: "vtx-icon",
+          html: '<div class="vtx">' + (i + 1) + '</div>',
+          iconSize: [26, 26],
+          iconAnchor: [13, 13]
+        });
+        const m = L.marker(pt, {
+          icon,
+          draggable: true
+        }).addTo(grp);
+        m.on("drag", e => {
+          const ll = e.target.getLatLng();
+          const next = drawPtsRef.current.map((q, qi) => qi === i ? [ll.lat, ll.lng] : q);
+          drawPtsRef.current = next;
+          setDrawPts(next);
         });
       });
       if (drawPts.length >= 2) L.polyline([...drawPts, ...(drawPts.length >= 3 ? [drawPts[0]] : [])], {
@@ -3317,7 +3403,7 @@ function MapTab(p) {
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
-  }, "地図をタップして圃場の角を順に囲んでください(3点以上)"), /*#__PURE__*/React.createElement("div", {
+  }, "地図をタップして圃場の角を順に囲んでください(3点以上)。打った点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "できます。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
     className: "num"
   }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawArea, 2)), " a"), /*#__PURE__*/React.createElement("div", {
@@ -4018,8 +4104,8 @@ const S = {
     fontWeight: 800
   },
   recordField: {
-    fontSize: 16.5,
-    fontWeight: 600,
+    fontSize: 18,
+    fontWeight: 800,
     color: "#2E7D4F",
     wordBreak: "keep-all",
     overflowWrap: "anywhere",
@@ -4153,9 +4239,9 @@ const S = {
     flexShrink: 0
   },
   orderBtn: {
-    width: 44,
-    height: 44,
-    fontSize: 17,
+    width: 40,
+    height: 40,
+    fontSize: 16,
     fontWeight: 800,
     color: "#1C2B21",
     background: "#EDF1EA",
@@ -4526,7 +4612,8 @@ const S = {
   },
   mapBox: {
     width: "100%",
-    height: 380,
+    height: "70vh",
+    minHeight: 420,
     borderRadius: 12,
     overflow: "hidden",
     border: "1.5px solid #D8E0D2",
@@ -4566,6 +4653,39 @@ const S = {
     border: "1.5px solid #D8E0D2",
     borderRadius: 10,
     cursor: "pointer"
+  },
+  workMeta: {
+    fontSize: 16,
+    fontWeight: 800,
+    color: "#3a4a40",
+    marginTop: 4,
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "baseline",
+    gap: 6
+  },
+  workMetaUnit: {
+    fontSize: 12.5,
+    fontWeight: 700,
+    marginLeft: 1
+  },
+  workMetaSep: {
+    color: "#66756a",
+    fontWeight: 700
+  },
+  dragHandle: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    width: 40,
+    height: 40,
+    fontSize: 22,
+    color: "#8a978e",
+    cursor: "grab",
+    touchAction: "none",
+    userSelect: "none",
+    borderRadius: 8,
+    background: "#EDF1EA"
   }
 };
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));
