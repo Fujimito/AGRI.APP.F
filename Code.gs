@@ -63,6 +63,28 @@ function findRow_(sh, recordId) {
   return 0;
 }
 
+// チーム共有データ用のシート(チームコード / データ / 保存日時 / 保存者)
+function getShareSheet_() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName("_共有データ");
+  if (!sh) {
+    sh = ss.insertSheet("_共有データ");
+    sh.appendRow(["チームコード", "データ", "保存日時", "保存者"]);
+    sh.getRange(1, 1, 1, 4).setFontWeight("bold").setBackground("#EAF3FA");
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+// チームコードの行番号を返す(なければ0)
+function findShareRow_(sh, team) {
+  if (sh.getLastRow() < 2) return 0;
+  const teams = sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues().flat();
+  for (let i = 0; i < teams.length; i++) {
+    if (String(teams[i]) === String(team)) return i + 2;
+  }
+  return 0;
+}
+
 // 薬剤リストを1セル用の文字列にまとめる(用途・剤型・倍率・薬量)
 function chemsText_(chems) {
   return chems.map(function (c) {
@@ -107,15 +129,28 @@ function doPost(e) {
     const type = data.type || "record";
 
     // ── チーム共有:圃場・薬剤・作業リストのまとめ保存/読込 ──
-    // スプレッドシートとは別に、スクリプトのプロパティに保存する
+    // 専用シート「_共有データ」に保存(PropertiesServiceの9KB上限を回避)
     if (type === "cloudSave") {
       if (!data.team) return json_({ ok: false, error: "team required" });
-      PropertiesService.getScriptProperties().setProperty("share:" + data.team, data.payload || "");
-      return json_({ ok: true, saved: true });
+      const sh = getShareSheet_();
+      const row = findShareRow_(sh, data.team);
+      const payload = data.payload || "";
+      const when = new Date();
+      if (row > 0) {
+        sh.getRange(row, 2).setValue(payload);
+        sh.getRange(row, 3).setValue(when);
+        sh.getRange(row, 4).setValue(data.by || "");
+      } else {
+        sh.appendRow([data.team, payload, when, data.by || ""]);
+      }
+      return json_({ ok: true, saved: true, size: payload.length });
     }
     if (type === "cloudLoad") {
       if (!data.team) return json_({ ok: false, error: "team required" });
-      const payload = PropertiesService.getScriptProperties().getProperty("share:" + data.team);
+      const sh = getShareSheet_();
+      const row = findShareRow_(sh, data.team);
+      if (row <= 0) return json_({ ok: true, payload: null });
+      const payload = sh.getRange(row, 2).getValue();
       return json_({ ok: true, payload: payload || null });
     }
 
