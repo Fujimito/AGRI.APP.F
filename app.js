@@ -13,7 +13,18 @@ const {
 //  ・チームコードによる端末間データ共有
 // ═══════════════════════════════════════════════════════
 
-const APP_VERSION = "v8.14";
+const APP_VERSION = "v8.20";
+// 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
+// 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
+function escapeHtml(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, ch => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  })[ch]);
+}
 const SWATCHES = ["#C74E36", "#B78A1F", "#6A5ACD", "#2E7D4F", "#A34D7C", "#3B7EA1", "#7A6A4F", "#4F7A6A"];
 const FORMS = [{
   key: "wp",
@@ -338,6 +349,26 @@ function App() {
   });
   const [areaUnitKey, setAreaUnitKeyState] = useState(() => localStorage.getItem("tankmix:areaunit") || "a");
   const [volUnitKey, setVolUnitKeyState] = useState(() => localStorage.getItem("tankmix:volunit") || "L");
+  const [mapEngine, setMapEngineState] = useState(() => localStorage.getItem("tankmix:mapengine") || "leaflet");
+  const [gmapKey, setGmapKeyState] = useState(() => localStorage.getItem("tankmix:gmapkey") || "");
+  const [gmapKeyInput, setGmapKeyInput] = useState(() => localStorage.getItem("tankmix:gmapkey") || "");
+  const setMapEngine = v => {
+    setMapEngineState(v);
+    localStorage.setItem("tankmix:mapengine", v);
+  };
+  const saveGmapKey = v => {
+    const trimmed = (v || "").trim();
+    setGmapKeyState(trimmed);
+    setGmapKeyInput(trimmed);
+    localStorage.setItem("tankmix:gmapkey", trimmed);
+    flash(trimmed ? "APIキーを保存しました" : "APIキーを削除しました");
+  };
+  // 端末のtankmix:データをすべて消去(端末譲渡・売却前などに使用)
+  const eraseAllData = () => {
+    if (!confirm("この端末に保存されているデータ(圃場・作業記録・APIキーなど)をすべて消去します。\n送信済みの記録はスプレッドシート側に残ります。\nこの操作は取り消せません。よろしいですか？")) return;
+    Object.keys(localStorage).filter(k => k.startsWith("tankmix:")).forEach(k => localStorage.removeItem(k));
+    if (typeof location !== "undefined" && location.reload) location.reload();
+  };
   const setAreaUnitKey = v => {
     setAreaUnitKeyState(v);
     localStorage.setItem("tankmix:areaunit", v);
@@ -1171,6 +1202,33 @@ function App() {
     flash("CSVを出力しました");
   };
   const planOptions = works.filter(w => w.workDate === workDate && !w.reported && w.chems.length === 0);
+
+  // 農薬使用回数警告(同圃場×同農薬の使用回数をカウント、デフォルト上限3回)
+  const CHEM_LIMIT_DEFAULT = 3;
+  const chemWarnings = React.useMemo(() => {
+    const counts = {};
+    works.filter(w => w.reported).forEach(w => {
+      const f = resolveWork(w);
+      (w.chems || []).forEach(c => {
+        const key = f.name + "||" + c.name;
+        counts[key] = (counts[key] || 0) + 1;
+      });
+    });
+    const warnings = [];
+    Object.entries(counts).forEach(([key, count]) => {
+      const limit = CHEM_LIMIT_DEFAULT;
+      if (count >= limit - 1) {
+        const [fieldName, chemName] = key.split("||");
+        warnings.push({
+          fieldName,
+          chemName,
+          count,
+          limit
+        });
+      }
+    });
+    return warnings.sort((a, b) => b.count - a.count);
+  }, [works]);
   const pendingCount = works.filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced)).length;
 
   // 電波が戻ったら自動で送信を試みる(未送信があるときだけ)
@@ -1214,10 +1272,32 @@ function App() {
       syncPending();
     },
     style: S.headerBadge
-  }, syncing ? "送信中…" : "☁ 未送信 " + pendingCount + "件")))), toast && /*#__PURE__*/React.createElement("div", {
+  }, syncing ? "送信中…" : "☁ 未送信 " + pendingCount + "件")))), chemWarnings.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: S.warnBand,
+    className: "no-print"
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.warnIcon
+  }, "⚠"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, chemWarnings.slice(0, 2).map((w, i) => /*#__PURE__*/React.createElement("span", {
+    key: i,
+    style: {
+      marginRight: 12,
+      fontSize: 13,
+      fontWeight: 700
+    }
+  }, w.fieldName, " × ", w.chemName, "：", w.count, "回", w.count >= w.limit ? " 🚫超過" : " (上限" + w.limit + "回)")), chemWarnings.length > 2 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: "#8a2f1c"
+    }
+  }, "他", chemWarnings.length - 2, "件"))), toast && /*#__PURE__*/React.createElement("div", {
     style: S.toast
   }, toast), /*#__PURE__*/React.createElement("main", {
-    style: S.main
+    style: tab === "map" ? S.mainFull : S.main
   }, tab === "calc" && /*#__PURE__*/React.createElement(CalcTab, {
     mode,
     setMode,
@@ -1241,10 +1321,6 @@ function App() {
     mixOrder,
     savePreset,
     saveRecord,
-    targetIds,
-    togglePlan,
-    clearPlans,
-    planOptions,
     chemMaster,
     resolveWork,
     works,
@@ -1306,12 +1382,15 @@ function App() {
     deleteCrop,
     areaUnitKey,
     volUnitKey
-  }), tab === "map" && /*#__PURE__*/React.createElement(MapTab, {
+  }), tab === "map" && /*#__PURE__*/React.createElement(MapTabRouter, {
     fields,
     addFieldWithPolygon,
     crops,
     addCrop,
-    flash
+    flash,
+    mapEngine,
+    gmapKey,
+    setTab
   }), tab === "settings" && /*#__PURE__*/React.createElement(SettingsTab, {
     areaUnitKey,
     setAreaUnitKey,
@@ -1329,7 +1408,14 @@ function App() {
     syncing,
     crops,
     addCrop,
-    deleteCrop
+    deleteCrop,
+    mapEngine,
+    setMapEngine,
+    gmapKey,
+    gmapKeyInput,
+    setGmapKeyInput,
+    saveGmapKey,
+    eraseAllData
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
     className: "no-print"
@@ -1348,7 +1434,8 @@ function App() {
     style: {
       fontSize: 11.5,
       fontWeight: 700
-    }
+    },
+    className: "tab-label"
   }, t[2])))));
 }
 
@@ -1358,7 +1445,7 @@ function CalcTab(p) {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "薬液の総量"), /*#__PURE__*/React.createElement("div", {
+  }, "薬液の調合計算"), /*#__PURE__*/React.createElement("div", {
     style: S.segWrap
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => p.setMode("direct"),
@@ -1660,10 +1747,6 @@ function TankViz({
 
 // ═══════════════════ 作業・記録タブ ═══════════════════
 function WorkTab(p) {
-  const [pField, setPField] = useState("");
-  const [pCrop, setPCrop] = useState("");
-  const [pArea, setPArea] = useState("");
-  const [pLiters, setPLiters] = useState("");
   const [query, setQuery] = useState("");
   const [reportingId, setReportingId] = useState(null);
   const [repFlights, setRepFlights] = useState([""]);
@@ -1689,7 +1772,10 @@ function WorkTab(p) {
   const [dragId, setDragId] = useState(null); // ドラッグ中の圃場ID
   const [dragOverId, setDragOverId] = useState(null); // ドロップ先候補
   const dragIdRef = useRef(null);
-  const dayList = p.works.filter(w => w.workDate === p.workDate && !w.reported);
+  // 実績入力済みでも当日リストからは消さず、そのまま表示・編集できるようにする
+  const dayList = p.works.filter(w => w.workDate === p.workDate);
+  // 薬剤の一括適用・投下量計算など「未実施の圃場」だけを対象にすべき操作用
+  const pendingDayList = dayList.filter(w => !w.reported);
   const history = p.works.filter(w => w.reported && !w.groupedInto).sort((a, b) => b.id - a.id);
   const pendingWorks = p.works.filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced));
   const pending = pendingWorks.length;
@@ -1733,29 +1819,16 @@ function WorkTab(p) {
     });
     window.addEventListener("touchend", up);
   };
-  const sumArea = dayList.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
-  const sumLiters = dayList.reduce((s, w) => {
+  const sumArea = pendingDayList.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
+  const sumLiters = pendingDayList.reduce((s, w) => {
     const f = p.resolveWork(w);
     return s + (w.totalL > 0 ? w.totalL : parseFloat(f.plannedL) || 0);
   }, 0);
-  const add = () => {
-    if (!pField.trim()) return;
-    p.addNewFieldAndWork({
-      name: pField.trim(),
-      crop: pCrop.trim(),
-      areaA: parseFloat(pArea) || "",
-      plannedL: parseFloat(pLiters) || 0
-    });
-    setPField("");
-    setPCrop("");
-    setPArea("");
-    setPLiters("");
-  };
   const openReport = w => {
     const f = p.resolveWork(w);
     setReportingId(w.id);
-    // 既定は1フライト。総量が分かればその値を初期表示
-    setRepFlights([String(w.totalL || f.plannedL || "")]);
+    // 実績値は自動入力せず空欄から始める(誤入力・誤タップ防止)
+    setRepFlights([""]);
     setRepArea(f.areaA !== "" && f.areaA != null ? String(f.areaA) : "");
     setRepMemo("");
   };
@@ -1850,9 +1923,9 @@ function WorkTab(p) {
     style: S.totalsItem
   }, /*#__PURE__*/React.createElement("div", {
     style: S.totalsNum
-  }, dayList.length), /*#__PURE__*/React.createElement("div", {
+  }, pendingDayList.length), /*#__PURE__*/React.createElement("div", {
     style: S.totalsLabel
-  }, "圃場")), /*#__PURE__*/React.createElement("div", {
+  }, "残り圃場")), /*#__PURE__*/React.createElement("div", {
     style: S.totalsItem
   }, /*#__PURE__*/React.createElement("div", {
     style: S.totalsNum
@@ -1948,7 +2021,7 @@ function WorkTab(p) {
     }
   }, /*#__PURE__*/React.createElement("option", {
     value: "all"
-  }, "🚁 この日の全圃場(", dayList.length, "件)にまとめて適用"), dayList.map(w => {
+  }, "🚁 この日の全圃場(", pendingDayList.length, "件)にまとめて適用"), pendingDayList.map(w => {
     const f = p.resolveWork(w);
     return /*#__PURE__*/React.createElement("option", {
       key: w.id,
@@ -2056,61 +2129,6 @@ function WorkTab(p) {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "新しい圃場を登録してこの日のリストへ"), /*#__PURE__*/React.createElement("div", {
-    style: S.areaGrid
-  }, /*#__PURE__*/React.createElement("input", {
-    value: pField,
-    placeholder: "圃場名 ※必須",
-    onChange: e => setPField(e.target.value),
-    style: S.fieldInput
-  }), /*#__PURE__*/React.createElement("input", {
-    value: pCrop,
-    placeholder: "作物名",
-    onChange: e => setPCrop(e.target.value),
-    style: S.fieldInput
-  })), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.areaGrid,
-      marginTop: 10
-    }
-  }, /*#__PURE__*/React.createElement("label", {
-    style: S.areaField
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "面積(a)"), /*#__PURE__*/React.createElement("input", {
-    type: "number",
-    inputMode: "decimal",
-    min: "0",
-    value: pArea,
-    onChange: e => setPArea(e.target.value),
-    style: S.midInput,
-    className: "num"
-  })), /*#__PURE__*/React.createElement("label", {
-    style: S.areaField
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "予定薬液量(L)"), /*#__PURE__*/React.createElement("input", {
-    type: "number",
-    inputMode: "decimal",
-    min: "0",
-    value: pLiters,
-    onChange: e => setPLiters(e.target.value),
-    style: S.midInput,
-    className: "num"
-  }))), /*#__PURE__*/React.createElement("button", {
-    onClick: add,
-    disabled: !pField.trim(),
-    style: {
-      ...S.primaryBtn,
-      width: "100%",
-      marginTop: 12,
-      opacity: pField.trim() ? 1 : 0.4
-    }
-  }, "＋ 登録してこの日のリストに追加")), /*#__PURE__*/React.createElement("section", {
-    style: S.card,
-    className: "no-print"
-  }, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
@@ -2129,7 +2147,7 @@ function WorkTab(p) {
     style: groupMode ? S.smallPrimary : S.smallSecondary
   }, groupMode ? "まとめ選択を終了" : "🔗 まとめ散布")), dayList.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "この日の作業はまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "検索または新規登録から圃場を追加してください。"), dayList.length > 1 && !groupMode && /*#__PURE__*/React.createElement("p", {
+  }, "この日の作業はまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "上の「圃場を検索」で追加するか、プリセットタブで圃場を登録してください。"), dayList.length > 1 && !groupMode && /*#__PURE__*/React.createElement("p", {
     style: {
       ...S.note,
       marginTop: 0,
@@ -2145,6 +2163,7 @@ function WorkTab(p) {
       style: {
         ...S.record,
         ...(groupMode && selected.includes(w.id) ? S.recordSelected : {}),
+        ...(!groupMode && w.reported && w.synced && w.reportSynced ? S.recordSent : {}),
         ...(dragId === w.id ? {
           opacity: 0.4
         } : {}),
@@ -2163,7 +2182,13 @@ function WorkTab(p) {
         minWidth: 0,
         flex: 1
       }
-    }, groupMode ? /*#__PURE__*/React.createElement("button", {
+    }, groupMode ? w.reported ? /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...S.checkBtn,
+        opacity: 0.3
+      },
+      title: "実績入力済みのためまとめ選択の対象外です"
+    }, "済") : /*#__PURE__*/React.createElement("button", {
       onClick: () => toggleSelect(w.id),
       style: {
         ...S.checkBtn,
@@ -2212,8 +2237,8 @@ function WorkTab(p) {
         flexShrink: 0
       }
     }, /*#__PURE__*/React.createElement("span", {
-      style: w.chems.length > 0 ? S.badgeOk : S.badgePlan
-    }, w.chems.length > 0 ? "調合済" : "計画"), /*#__PURE__*/React.createElement("div", {
+      style: w.reported ? w.synced && w.reportSynced ? S.badgeOk : S.badgePending : w.chems.length > 0 ? S.badgeOk : S.badgePlan
+    }, w.reported ? w.synced && w.reportSynced ? "✓送信済" : "実績入力済(未送信)" : w.chems.length > 0 ? "調合済" : "計画"), /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 6,
@@ -2409,7 +2434,7 @@ function WorkTab(p) {
         flex: 1,
         marginTop: 0
       }
-    }, "🚁 実績入力"), /*#__PURE__*/React.createElement("button", {
+    }, w.reported ? "✎ 実績を修正" : "🚁 実績入力"), !w.reported && /*#__PURE__*/React.createElement("button", {
       onClick: () => {
         if (confirm("「" + f.name + "」をこの日のリストから外しますか？\n(圃場マスタには残ります)")) p.removeWork(w.id);
       },
@@ -3154,25 +3179,553 @@ function PresetTab(p) {
 
 // ═══════════════════ 設定タブ ═══════════════════
 // ═══════════════════ MAPタブ(圃場を地図で管理) ═══════════════════
-function MapTab(p) {
-  const mapRef = React.useRef(null); // Leaflet map インスタンス
-  const containerRef = React.useRef(null); // 地図DOM
+// Google Maps JavaScript APIを動的に読み込む(1回だけ)
+let __gmapsLoadPromise = null;
+function loadGoogleMaps(apiKey) {
+  if (window.google && window.google.maps) return Promise.resolve();
+  if (__gmapsLoadPromise) return __gmapsLoadPromise;
+  __gmapsLoadPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(apiKey) + "&libraries=geometry&loading=async";
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => {
+      __gmapsLoadPromise = null;
+      reject(new Error("load failed"));
+    };
+    document.head.appendChild(script);
+  });
+  return __gmapsLoadPromise;
+}
+
+// ═══════════════════ 地図タブ ルーター(Leaflet/Google切替) ═══════════════════
+function MapTabRouter(p) {
+  if (p.mapEngine === "google") {
+    if (!p.gmapKey) {
+      return /*#__PURE__*/React.createElement("section", {
+        style: S.card,
+        className: "no-print"
+      }, /*#__PURE__*/React.createElement("div", {
+        style: S.cardLabel
+      }, "圃場マップ"), /*#__PURE__*/React.createElement("p", {
+        style: S.empty
+      }, "Google マップを使うにはAPIキーの設定が必要です。", /*#__PURE__*/React.createElement("br", null), "設定タブで「Google Maps APIキー」を入力してください。"), /*#__PURE__*/React.createElement("button", {
+        onClick: () => p.setTab("settings"),
+        style: {
+          ...S.primaryBtn,
+          width: "100%",
+          marginTop: 10
+        }
+      }, "⚙ 設定タブへ"));
+    }
+    return /*#__PURE__*/React.createElement(GoogleMapTab, p);
+  }
+  return /*#__PURE__*/React.createElement(LeafletMapTab, p);
+}
+
+// ═══════════════════ Googleマップ版 圃場マップタブ ═══════════════════
+function GoogleMapTab(p) {
+  const mapRef = React.useRef(null);
+  const containerRef = React.useRef(null);
+  const fieldOverlaysRef = React.useRef([]); // 登録済み圃場のPolygon+Label
+  const drawOverlaysRef = React.useRef([]); // 作図中の頂点マーカー・線
+  const gpsMarkerRef = React.useRef(null);
+  const [status, setStatus] = React.useState("loading"); // loading | ready | error
+  const [ready, setReady] = React.useState(false);
+  const [drawing, setDrawing] = React.useState(false);
+  const [drawPts, setDrawPts] = React.useState([]);
+  const [newName, setNewName] = React.useState("");
+  const [newCrop, setNewCrop] = React.useState("");
+  const [gpsOn, setGpsOn] = React.useState(false);
+  const [mapType, setMapType] = React.useState("hybrid"); // hybrid=衛星+地名, roadmap=地図のみ
+  const drawingRef = React.useRef(false);
+  const drawPtsRef = React.useRef([]);
+  const LABEL_MIN_ZOOM = 17;
+  const [zoom, setZoom] = React.useState(15);
+  const drawArea = polygonAreaA(drawPts);
+
+  // Google Maps APIを読み込んで地図を初期化
+  React.useEffect(() => {
+    let cancelled = false;
+    loadGoogleMaps(p.gmapKey).then(() => {
+      if (cancelled || !containerRef.current || mapRef.current) return;
+      const g = window.google.maps;
+      let center = {
+        lat: 35.0,
+        lng: 137.0
+      };
+      let z = 5;
+      const withPoly = p.fields.filter(f => f.center);
+      if (withPoly.length > 0) {
+        center = {
+          lat: withPoly[0].center[0],
+          lng: withPoly[0].center[1]
+        };
+        z = 17;
+      }
+      const map = new g.Map(containerRef.current, {
+        center,
+        zoom: z,
+        mapTypeId: "hybrid",
+        mapTypeControl: false,
+        streetViewControl: false,
+        fullscreenControl: false,
+        zoomControl: true,
+        maxZoom: 21
+      });
+      mapRef.current = map;
+      map.addListener("click", e => {
+        if (!drawingRef.current) return;
+        const next = [...drawPtsRef.current, [e.latLng.lat(), e.latLng.lng()]];
+        drawPtsRef.current = next;
+        setDrawPts(next);
+      });
+      map.addListener("zoom_changed", () => setZoom(map.getZoom()));
+      setZoom(map.getZoom());
+      setStatus("ready");
+      setReady(true);
+    }).catch(() => {
+      if (!cancelled) setStatus("error");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 地図タイプ切替
+  React.useEffect(() => {
+    if (mapRef.current) mapRef.current.setMapTypeId(mapType);
+  }, [mapType]);
+
+  // 登録済み圃場ポリゴンを再描画
+  React.useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    const g = window.google.maps;
+    fieldOverlaysRef.current.forEach(o => {
+      o.setMap && o.setMap(null);
+    });
+    fieldOverlaysRef.current = [];
+    const showLabel = zoom >= LABEL_MIN_ZOOM;
+    p.fields.forEach(f => {
+      if (!f.polygon || f.polygon.length < 3) return;
+      const path = f.polygon.map(pt => ({
+        lat: pt[0],
+        lng: pt[1]
+      }));
+      const poly = new g.Polygon({
+        paths: path,
+        strokeColor: "#2E7D4F",
+        strokeWeight: 2,
+        fillColor: "#7ED957",
+        fillOpacity: 0.35,
+        map: mapRef.current,
+        clickable: true
+      });
+      poly.addListener("click", () => {
+        p.onPickField && p.onPickField(f);
+      });
+      fieldOverlaysRef.current.push(poly);
+      if (showLabel) {
+        const c = f.center || polygonCenter(f.polygon);
+        const label = new g.Marker({
+          position: {
+            lat: c[0],
+            lng: c[1]
+          },
+          map: mapRef.current,
+          icon: {
+            path: 0,
+            scale: 0
+          },
+          // 透明アイコン(ラベルだけ表示)
+          label: {
+            text: f.name + (f.crop ? "/" + f.crop : "") + " " + fmt(polygonAreaA(f.polygon), 2) + "a",
+            color: "#fff",
+            fontSize: "12px",
+            fontWeight: "700",
+            className: "gm-field-label"
+          }
+        });
+        fieldOverlaysRef.current.push(label);
+      }
+    });
+  }, [ready, p.fields, zoom]);
+
+  // 作図中の頂点・線を再描画
+  React.useEffect(() => {
+    if (!ready || !mapRef.current) return;
+    const g = window.google.maps;
+    drawOverlaysRef.current.forEach(o => {
+      o.setMap && o.setMap(null);
+    });
+    drawOverlaysRef.current = [];
+    if (drawPts.length > 0) {
+      drawPts.forEach((pt, i) => {
+        const marker = new g.Marker({
+          position: {
+            lat: pt[0],
+            lng: pt[1]
+          },
+          map: mapRef.current,
+          draggable: true,
+          label: {
+            text: String(i + 1),
+            color: "#fff",
+            fontWeight: "800",
+            fontSize: "13px"
+          },
+          icon: {
+            path: g.SymbolPath.CIRCLE,
+            scale: 13,
+            fillColor: "#C74E36",
+            fillOpacity: 1,
+            strokeColor: "#fff",
+            strokeWeight: 2.5
+          }
+        });
+        marker.addListener("drag", () => {
+          const ll = marker.getPosition();
+          const next = drawPtsRef.current.map((q, qi) => qi === i ? [ll.lat(), ll.lng()] : q);
+          drawPtsRef.current = next;
+          setDrawPts(next);
+        });
+        drawOverlaysRef.current.push(marker);
+      });
+      if (drawPts.length >= 2) {
+        const path = drawPts.map(pt => ({
+          lat: pt[0],
+          lng: pt[1]
+        }));
+        if (drawPts.length >= 3) path.push({
+          lat: drawPts[0][0],
+          lng: drawPts[0][1]
+        });
+        const line = new g.Polyline({
+          path,
+          strokeColor: "#C74E36",
+          strokeWeight: 2,
+          strokeOpacity: 0.9,
+          map: mapRef.current,
+          icons: [{
+            icon: {
+              path: "M 0,-1 0,1",
+              strokeOpacity: 1,
+              scale: 3
+            },
+            offset: "0",
+            repeat: "10px"
+          }]
+        });
+        drawOverlaysRef.current.push(line);
+      }
+      if (drawPts.length >= 3) {
+        const fillPath = drawPts.map(pt => ({
+          lat: pt[0],
+          lng: pt[1]
+        }));
+        const fillPoly = new g.Polygon({
+          paths: fillPath,
+          strokeOpacity: 0,
+          fillColor: "#C74E36",
+          fillOpacity: 0.15,
+          map: mapRef.current,
+          clickable: false
+        });
+        drawOverlaysRef.current.push(fillPoly);
+      }
+    }
+  }, [ready, drawPts]);
+  const startDraw = () => {
+    setDrawing(true);
+    drawingRef.current = true;
+    setDrawPts([]);
+    drawPtsRef.current = [];
+  };
+  const cancelDraw = () => {
+    setDrawing(false);
+    drawingRef.current = false;
+    setDrawPts([]);
+    drawPtsRef.current = [];
+    setNewName("");
+    setNewCrop("");
+  };
+  const undoPt = () => {
+    const next = drawPtsRef.current.slice(0, -1);
+    drawPtsRef.current = next;
+    setDrawPts(next);
+  };
+  const saveDraw = () => {
+    if (drawPts.length < 3 || !newName.trim()) return;
+    const center = polygonCenter(drawPts);
+    const areaA = Math.round(polygonAreaA(drawPts) * 100) / 100;
+    p.addFieldWithPolygon({
+      name: newName.trim(),
+      crop: newCrop.trim(),
+      areaA,
+      polygon: drawPts,
+      center
+    });
+    if (newCrop.trim()) p.addCrop(newCrop.trim());
+    cancelDraw();
+  };
+  const toggleGps = () => {
+    if (!mapRef.current || !window.google) return;
+    if (gpsOn) {
+      if (gpsMarkerRef.current) gpsMarkerRef.current.setMap(null);
+      setGpsOn(false);
+      return;
+    }
+    if (!navigator.geolocation) {
+      p.flash && p.flash("この端末は位置情報に対応していません");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(pos => {
+      const g = window.google.maps;
+      const ll = {
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude
+      };
+      if (gpsMarkerRef.current) gpsMarkerRef.current.setMap(null);
+      gpsMarkerRef.current = new g.Marker({
+        position: ll,
+        map: mapRef.current,
+        label: {
+          text: "現在地",
+          color: "#fff",
+          fontWeight: "700"
+        },
+        icon: {
+          path: g.SymbolPath.CIRCLE,
+          scale: 10,
+          fillColor: "#3B7EA1",
+          fillOpacity: 1,
+          strokeColor: "#fff",
+          strokeWeight: 3
+        }
+      });
+      mapRef.current.setCenter(ll);
+      mapRef.current.setZoom(16);
+      setGpsOn(true);
+    }, () => {
+      p.flash && p.flash("位置情報を取得できませんでした(権限を確認してください)");
+    }, {
+      enableHighAccuracy: true,
+      timeout: 10000
+    });
+  };
+  const polyFields = p.fields.filter(f => f.polygon && f.polygon.length >= 3);
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+    style: {
+      ...S.card,
+      padding: "10px 10px 12px"
+    },
+    className: "no-print"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.cardLabel,
+      marginBottom: 0
+    }
+  }, "圃場マップ(Google)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: toggleGps,
+    style: {
+      ...S.smallSecondary,
+      ...(gpsOn ? {
+        background: "#EAF3FA",
+        borderColor: "#3B7EA1",
+        color: "#2b5a7a"
+      } : {})
+    }
+  }, "📍 現在地"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setMapType(mapType === "hybrid" ? "roadmap" : "hybrid"),
+    style: {
+      ...S.smallSecondary,
+      ...(mapType === "roadmap" ? {
+        background: "#FBF7EC",
+        borderColor: "#E4D6AC",
+        color: "#8a621f"
+      } : {})
+    }
+  }, mapType === "hybrid" ? "🗺 地図表示" : "📷 衛星写真"), !drawing ? /*#__PURE__*/React.createElement("button", {
+    onClick: startDraw,
+    style: S.smallPrimary
+  }, "✏ 圃場を囲む") : /*#__PURE__*/React.createElement("button", {
+    onClick: cancelDraw,
+    style: S.smallDanger
+  }, "やめる"))), status === "loading" && /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "Google マップを読み込んでいます…"), status === "error" && /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "Google マップを読み込めませんでした。APIキーやインターネット接続を確認してください。"), /*#__PURE__*/React.createElement("div", {
+    ref: containerRef,
+    style: S.mapBox,
+    "data-map-box": ""
+  }), drawing && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.settingsBox,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "地図をタップして圃場の角を順に囲んでください(3点以上)。打った点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "できます。"), /*#__PURE__*/React.createElement("div", {
+    style: S.drawInfo,
+    className: "num"
+  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawArea, 2)), " a"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 8,
+      gridTemplateColumns: "1fr 1fr"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: undoPt,
+    disabled: drawPts.length === 0,
+    style: {
+      ...S.secondaryBtn,
+      opacity: drawPts.length ? 1 : 0.4
+    }
+  }, "↩ 1点戻す"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setDrawPts([]);
+      drawPtsRef.current = [];
+    },
+    disabled: drawPts.length === 0,
+    style: {
+      ...S.secondaryBtn,
+      opacity: drawPts.length ? 1 : 0.4
+    }
+  }, "全消し")), /*#__PURE__*/React.createElement("input", {
+    value: newName,
+    placeholder: "圃場名 ※必須",
+    onChange: e => setNewName(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 10
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: newCrop,
+    placeholder: "作物名(任意)",
+    list: "croplist-gmap",
+    onChange: e => setNewCrop(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 8
+    }
+  }), /*#__PURE__*/React.createElement("datalist", {
+    id: "croplist-gmap"
+  }, p.crops.map(c => /*#__PURE__*/React.createElement("option", {
+    key: c,
+    value: c
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: saveDraw,
+    disabled: drawPts.length < 3 || !newName.trim(),
+    style: {
+      ...S.primaryBtn,
+      width: "100%",
+      marginTop: 10,
+      opacity: drawPts.length >= 3 && newName.trim() ? 1 : 0.4
+    }
+  }, "この圃場を登録(", fmt(drawArea, 2), " a)"))), /*#__PURE__*/React.createElement("section", {
+    style: S.card,
+    className: "no-print"
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "地図に登録された圃場(", polyFields.length, "件)"), polyFields.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "まだ地図上の圃場がありません。", /*#__PURE__*/React.createElement("br", null), "「✏ 圃場を囲む」で登録できます。"), polyFields.map(f => /*#__PURE__*/React.createElement("div", {
+    key: f.id,
+    style: S.listItem
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.listTitle
+  }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
+    style: S.listSub,
+    className: "num"
+  }, fmt(polygonAreaA(f.polygon), 2), " a")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (mapRef.current && f.center) {
+        mapRef.current.setCenter({
+          lat: f.center[0],
+          lng: f.center[1]
+        });
+        mapRef.current.setZoom(17);
+      }
+    },
+    style: S.smallSecondary
+  }, "地図で見る"), /*#__PURE__*/React.createElement("a", {
+    href: naviUrl(f.center || polygonCenter(f.polygon)),
+    target: "_blank",
+    rel: "noopener noreferrer",
+    style: S.naviBtn
+  }, "🚗 ナビ")))));
+}
+
+function LeafletMapTab(p) {
+  const mapRef = React.useRef(null);
+  const containerRef = React.useRef(null);
   const layersRef = React.useRef({
     fields: null,
     draw: null,
     gps: null
   });
+  const tileLayerRef = React.useRef(null); // 現在のタイルレイヤー
   const [ready, setReady] = React.useState(false);
   const [drawing, setDrawing] = React.useState(false);
-  const [drawPts, setDrawPts] = React.useState([]); // 作図中の頂点[[lat,lng]]
+  const [drawPts, setDrawPts] = React.useState([]);
   const [newName, setNewName] = React.useState("");
   const [newCrop, setNewCrop] = React.useState("");
   const [gpsOn, setGpsOn] = React.useState(false);
   const [zoom, setZoom] = React.useState(15);
+  const [tileMode, setTileMode] = React.useState("photo"); // "photo" | "map"
   const drawingRef = React.useRef(false);
   const drawPtsRef = React.useRef([]);
   const drawArea = polygonAreaA(drawPts);
-  const LABEL_MIN_ZOOM = 17; // これ以上に拡大したときだけラベル表示
+  const LABEL_MIN_ZOOM = 17;
+
+  // タイル定義
+  const TILES = {
+    photo: {
+      url: "https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg",
+      attr: "地理院タイル",
+      maxNative: 18
+    },
+    map: {
+      url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+      attr: "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors",
+      maxNative: 19
+    }
+  };
+
+  // タイルレイヤーの切り替え
+  const toggleTileMode = () => {
+    const next = tileMode === "photo" ? "map" : "photo";
+    setTileMode(next);
+    if (!mapRef.current || !window.L) return;
+    const L = window.L;
+    if (tileLayerRef.current) mapRef.current.removeLayer(tileLayerRef.current);
+    const t = TILES[next];
+    tileLayerRef.current = L.tileLayer(t.url, {
+      attribution: t.attr,
+      maxZoom: 21,
+      maxNativeZoom: t.maxNative
+    }).addTo(mapRef.current);
+  };
 
   // 地図の初期化(1回だけ)
   React.useEffect(() => {
@@ -3191,11 +3744,11 @@ function MapTab(p) {
       attributionControl: true,
       maxZoom: 21
     }).setView(center, z);
-    // 国土地理院 航空写真タイル(無料・キー不要)。maxNativeZoom超はオーバーズームで拡大
-    L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg", {
-      attribution: "地理院タイル",
+    // 国土地理院 航空写真タイル(初期)
+    tileLayerRef.current = L.tileLayer(TILES.photo.url, {
+      attribution: TILES.photo.attr,
       maxZoom: 21,
-      maxNativeZoom: 18
+      maxNativeZoom: TILES.photo.maxNative
     }).addTo(map);
     mapRef.current = map;
     setZoom(map.getZoom());
@@ -3234,7 +3787,8 @@ function MapTab(p) {
         fillOpacity: 0.35
       }).addTo(grp);
       if (showLabel) {
-        poly.bindTooltip(f.name + (f.crop ? " / " + f.crop : "") + " / " + fmt(polygonAreaA(f.polygon), 2) + " a", {
+        const labelText = escapeHtml(f.name) + (f.crop ? " / " + escapeHtml(f.crop) : "") + " / " + fmt(polygonAreaA(f.polygon), 2) + " a";
+        poly.bindTooltip(labelText, {
           permanent: true,
           direction: "center",
           className: "field-label"
@@ -3357,7 +3911,10 @@ function MapTab(p) {
   };
   const polyFields = p.fields.filter(f => f.polygon && f.polygon.length >= 3);
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
-    style: S.card,
+    style: {
+      ...S.card,
+      padding: "10px 10px 12px"
+    },
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -3366,10 +3923,13 @@ function MapTab(p) {
       justifyContent: "space-between",
       flexWrap: "wrap",
       gap: 8,
-      marginBottom: 10
+      marginBottom: 8
     }
   }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
+    style: {
+      ...S.cardLabel,
+      marginBottom: 0
+    }
   }, "圃場マップ"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -3385,17 +3945,28 @@ function MapTab(p) {
         color: "#2b5a7a"
       } : {})
     }
-  }, "📍 現在地"), !drawing ? /*#__PURE__*/React.createElement("button", {
+  }, "📍 現在地"), /*#__PURE__*/React.createElement("button", {
+    onClick: toggleTileMode,
+    style: {
+      ...S.smallSecondary,
+      ...(tileMode === "map" ? {
+        background: "#FBF7EC",
+        borderColor: "#E4D6AC",
+        color: "#8a621f"
+      } : {})
+    }
+  }, tileMode === "photo" ? "🗺 地図表示" : "📷 衛星写真"), !drawing ? /*#__PURE__*/React.createElement("button", {
     onClick: startDraw,
     style: S.smallPrimary
   }, "✏ 圃場を囲む") : /*#__PURE__*/React.createElement("button", {
     onClick: cancelDraw,
     style: S.smallDanger
-  }, "作図をやめる"))), !window.L && /*#__PURE__*/React.createElement("p", {
+  }, "やめる"))), !window.L && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "地図ライブラリを読み込めませんでした。オンラインで開き直してください。"), /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
-    style: S.mapBox
+    style: S.mapBox,
+    "data-map-box": ""
   }), drawing && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.settingsBox,
@@ -3642,7 +4213,249 @@ function SettingsTab(p) {
     }
   }, "☁↓ 共有→端末へ読込")), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "同じチームコードの端末どうしで、圃場・薬剤・作業リストを共有できます(後から保存した内容で上書き)。共有がうまくいかない場合は、GASを最新のCode.gsに更新して再デプロイしてください。")));
+  }, "同じチームコードの端末どうしで、圃場・薬剤・作業リストを共有できます(後から保存した内容で上書き)。共有がうまくいかない場合は、GASを最新のCode.gsに更新して再デプロイしてください。")), /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "地図タブの設定"), /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "既定の地図エンジン"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.segWrap,
+      marginTop: 6,
+      marginBottom: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.setMapEngine("leaflet"),
+    style: {
+      ...S.seg,
+      ...(p.mapEngine === "leaflet" ? S.segOn : {})
+    }
+  }, "無料地図(Leaflet)"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.setMapEngine("google"),
+    style: {
+      ...S.seg,
+      ...(p.mapEngine === "google" ? S.segOn : {})
+    }
+  }, "Google マップ")), /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "Google Maps APIキー"), /*#__PURE__*/React.createElement("input", {
+    value: p.gmapKeyInput,
+    onChange: e => p.setGmapKeyInput(e.target.value),
+    placeholder: "AIzaSy...",
+    style: {
+      ...S.fieldInput,
+      marginTop: 6,
+      fontFamily: "monospace",
+      fontSize: 14
+    },
+    autoCapitalize: "off",
+    autoCorrect: "off",
+    autoComplete: "off",
+    spellCheck: false
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.saveGmapKey(p.gmapKeyInput),
+    style: {
+      ...S.smallSecondary,
+      marginTop: 10
+    }
+  }, "💾 APIキーを保存"), p.gmapKey && /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...S.smallLabel,
+      marginLeft: 10,
+      color: "#2E7D4F"
+    }
+  }, "✓ 保存済み"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "Google マップに切り替えると、地図タブで衛星写真と道路・地名を同時に表示できます。APIキーはこの端末の中にだけ保存され、ソースコード(GitHub)には一切含まれません。ただし地図を読み込むたびにGoogleのサーバーへは送信されるため、Google Cloud Consoleでドメイン制限(HTTPリファラー制限)を必ず設定してください。")), /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "データ管理"), /*#__PURE__*/React.createElement("button", {
+    onClick: p.eraseAllData,
+    style: {
+      ...S.smallDanger,
+      width: "100%",
+      padding: "13px 0"
+    }
+  }, "🗑 この端末のデータをすべて消去"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "圃場・作業記録・APIキーなど、この端末に保存されているすべてのデータを削除します。端末を手放す・譲渡する前に実行してください。送信済みの記録はスプレッドシート側に残ります。この操作は取り消せません。")), /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "使い方ガイド"), [{
+    title: "🧮 調合タブ(起動画面)",
+    desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。「⭐プリセットに保存」で薬液の組み合わせを登録でき、次回から作業タブの「薬剤を圃場に適用」で呼び出せます。「↩ この薬液を控える」で前回薬液として記憶します。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます(この回数はアプリに記録された散布実績を通算した簡易的な目安で、作期での自動リセットは行われません)。"
+  }, {
+    title: "🚁 作業・記録タブ",
+    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場はプリセットタブで登録したマスタを「圃場を検索」で探して「＋この日へ」で追加します。「圃場コースから追加」でよく回るルートをまとめて一括投入できます。「本日の散布投下量(L/10a)」を入れると未実施の圃場の予定薬液量を面積に応じて一括計算できます。「薬剤を圃場に適用」でプリセットや前回薬液を未実施の圃場に適用でき、各圃場の予定薬液量で薬量を自動計算します。圃場は左の番号または右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(実施済みの圃場は並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンで散布量・フライト数を空欄から記録します。実績を入力しても圃場は一覧に残ったまま編集でき、「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。"
+  }, {
+    title: "🗺 地図タブ",
+    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
+  }, {
+    title: "📋 プリセットタブ",
+    desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。登録した圃場は作業タブで「検索→＋この日へ」で追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。🧪薬剤プリセットは調合タブで「⭐プリセットに保存」するとここに蓄積されます。"
+  }, {
+    title: "⚙ 設定タブ",
+    desc: "面積(a/ha/反/町)と薬量(L/mL/kg/g)の表示単位を切り替えられます。データは常にa・Lで保存され、表示だけ変換されます。作物マスタの管理もここで行います。送信先URL(GASのウェブアプリURL)は一度設定すれば保存されます。GASを再デプロイするときは「デプロイを管理→編集→新しいバージョン」を使うとURLが変わりません。チームコードを使って複数端末間でデータを共有できます。このガイドとバージョン履歴もここで確認できます。"
+  }, {
+    title: "📡 送信とバックアップ",
+    desc: "作業タブの「☁ 全データを送信」でGoogleスプレッドシートに記録が送られます。圏外でも記録は端末に保存され、電波が戻ると自動で再送されます。送信中に「中止」を押すと途中で止められ、どの圃場から再開するか選べます。設定タブの「☁↑ 端末→共有へ保存」「☁↓ 共有→端末へ読込」でチームコードを使った複数端末間のデータ共有ができます。"
+  }].map((item, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      marginBottom: 14,
+      borderLeft: "3px solid #2E7D4F",
+      paddingLeft: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 15,
+      fontWeight: 800,
+      color: "#1C2B21",
+      marginBottom: 4
+    }
+  }, item.title), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13.5,
+      color: "#4a5a50",
+      lineHeight: 1.7
+    }
+  }, item.desc)))), /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "バージョン履歴"), [{
+    ver: "v8.20",
+    date: "2026-07",
+    isNew: true,
+    notes: ["🚁 実績入力しても作業タブから消えず、そのまま一覧に残って編集できるように変更", "送信が完了した圃場だけ色が変わり「✓送信済」と表示(未送信は「実績入力済(未送信)」)", "実績入力(散布量)の初期値を空欄に変更(誤った数値の入力保存を防止)", "作業タブの圃場名・作物名・面積の編集ボタンが実績入力済みの圃場でも使えるように", "🔒 地図ラベル(圃場名・作物名)の表示方法を修正し、記号を含む名前でも安全に表示されるように", "APIキーの説明文を修正(Google読み込み時に送信される点を明記)", "APIキー入力欄でブラウザの自動入力候補が出ないように変更", "農薬使用回数警告に「簡易的な目安・作期リセットなし」の注記を追加"]
+  }, {
+    ver: "v8.19",
+    date: "2026-07",
+    isNew: false,
+    notes: ["🌐 Google マップに対応(設定タブでLeaflet/Googleを切替可能)", "Google版でも圃場を囲む・頂点ドラッグ・面積計算・ナビが利用可能", "衛星写真+道路名を同時表示(hybridモード)", "APIキーは設定タブで入力し、この端末にのみ保存(ソースコードに含めない設計)", "設定タブに「この端末のデータを消去」ボタンを追加(端末譲渡・売却前に利用)"]
+  }, {
+    ver: "v8.18",
+    date: "2026-07",
+    isNew: false,
+    notes: ["🏠 ホームタブを廃止し調合タブに戻す", "⚠ 農薬警告をヘッダー直下の帯に統合(全タブで常時表示)", "地図タブをPC・デスクトップでフルワイド表示に対応", "使い方ガイドをv8.18の構成に完全更新"]
+  }, {
+    ver: "v8.17",
+    date: "2026-07",
+    isNew: false,
+    notes: ["バージョン履歴を折りたたみ式に(タップで開閉)", "最新バージョンに「New」バッジを追加"]
+  }, {
+    ver: "v8.16",
+    date: "2026-07",
+    isNew: false,
+    notes: ["農薬使用回数警告機能追加(上限3回)", "圃場登録をプリセットタブに一本化"]
+  }, {
+    ver: "v8.15",
+    date: "2026-07",
+    isNew: false,
+    notes: ["設定タブに使い方ガイド・バージョン履歴を追加", "地図タブのレスポンシブ改善・OSM切替追加"]
+  }, {
+    ver: "v8.14",
+    date: "2026-07",
+    isNew: false,
+    notes: ["作業リストをシンプルに整理(実績入力に変更)", "圃場名を大きく太く・作物名を非表示に"]
+  }, {
+    ver: "v8.13",
+    date: "2026-07",
+    isNew: false,
+    notes: ["地図を大きく・最大ズームアップ・頂点ドラッグ調整", "作業リストの並べ替えをドラッグ&ドロップに"]
+  }, {
+    ver: "v8.12",
+    date: "2026-07",
+    isNew: false,
+    notes: ["作業タブに薬剤適用(全圃場一括/個別/プリセット)を新設"]
+  }, {
+    ver: "v8.11",
+    date: "2026-07",
+    isNew: false,
+    notes: ["🗺 地図タブ新設(衛星写真・圃場登録・ナビ・GPS)"]
+  }, {
+    ver: "v8.10",
+    date: "2026-07",
+    isNew: false,
+    notes: ["⚙ 設定タブ追加、送信中止・再開、共有シート方式"]
+  }, {
+    ver: "v8.9",
+    date: "2026-07",
+    isNew: false,
+    notes: ["10aあたり投下量から予定薬液量を一括計算"]
+  }, {
+    ver: "v8.8",
+    date: "2026-07",
+    isNew: false,
+    notes: ["前回と同じ薬液・未送信バッジ・自動リトライ"]
+  }].map(v => {
+    const [open, setOpen] = useState(v.isNew);
+    return /*#__PURE__*/React.createElement("div", {
+      key: v.ver,
+      style: {
+        marginBottom: 6,
+        border: "1px solid #E4EAE0",
+        borderRadius: 10,
+        overflow: "hidden"
+      }
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => setOpen(!open),
+      style: {
+        width: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "11px 14px",
+        background: open ? "#EDF5EE" : "#fff",
+        border: "none",
+        cursor: "pointer",
+        textAlign: "left"
+      }
+    }, v.isNew && /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 11,
+        fontWeight: 800,
+        color: "#fff",
+        background: "#C74E36",
+        borderRadius: 6,
+        padding: "2px 7px",
+        flexShrink: 0
+      }
+    }, "New"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...S.versionTag,
+        fontSize: 13,
+        flexShrink: 0
+      }
+    }, v.ver), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 12.5,
+        color: "#8a978e",
+        flex: 1
+      }
+    }, v.date), /*#__PURE__*/React.createElement("span", {
+      style: {
+        fontSize: 16,
+        color: "#8a978e",
+        marginLeft: "auto"
+      }
+    }, open ? "▲" : "▼")), open && /*#__PURE__*/React.createElement("ul", {
+      style: {
+        paddingLeft: 20,
+        margin: "4px 0 10px"
+      }
+    }, v.notes.map((n, i) => /*#__PURE__*/React.createElement("li", {
+      key: i,
+      style: {
+        fontSize: 13,
+        color: "#4a5a50",
+        lineHeight: 1.8
+      }
+    }, n))));
+  })));
 }
 
 // ═══════════════════ スタイル ═══════════════════
@@ -3674,6 +4487,15 @@ const S = {
   main: {
     maxWidth: 640,
     margin: "0 auto",
+    padding: "10px 12px 0",
+    display: "flex",
+    flexDirection: "column",
+    gap: 12
+  },
+  mainFull: {
+    width: "100%",
+    maxWidth: "100%",
+    margin: "0",
     padding: "10px 12px 0",
     display: "flex",
     flexDirection: "column",
@@ -4090,6 +4912,10 @@ const S = {
     border: "2.5px solid #B78A1F",
     background: "#FFFDF5"
   },
+  recordSent: {
+    border: "1.5px solid #BFE1CC",
+    background: "#F6FBF7"
+  },
   recordHead: {
     display: "flex",
     alignItems: "center",
@@ -4487,6 +5313,22 @@ const S = {
     flexShrink: 0,
     boxShadow: "0 2px 8px rgba(199,78,54,0.3)"
   },
+  warnBand: {
+    background: "#FBF0EE",
+    borderBottom: "1.5px solid #E8C4BB",
+    padding: "8px 16px",
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    maxWidth: 640,
+    margin: "0 auto",
+    width: "100%"
+  },
+  warnIcon: {
+    fontSize: 16,
+    flexShrink: 0,
+    color: "#C74E36"
+  },
   quickBtn: {
     padding: "15px 0",
     fontSize: 16.5,
@@ -4612,8 +5454,9 @@ const S = {
   },
   mapBox: {
     width: "100%",
-    height: "70vh",
-    minHeight: 420,
+    height: "calc(100dvh - 220px)",
+    minHeight: 280,
+    maxHeight: "80dvh",
     borderRadius: 12,
     overflow: "hidden",
     border: "1.5px solid #D8E0D2",
@@ -4686,6 +5529,65 @@ const S = {
     userSelect: "none",
     borderRadius: 8,
     background: "#EDF1EA"
+  },
+  homeCard: {
+    background: "linear-gradient(135deg, #1C2B21 0%, #2E7D4F 100%)",
+    borderRadius: 16,
+    padding: "20px 18px",
+    color: "#fff"
+  },
+  homeDate: {
+    fontSize: 13,
+    fontWeight: 700,
+    color: "rgba(255,255,255,0.7)",
+    marginBottom: 2
+  },
+  homeTitle: {
+    fontSize: 20,
+    fontWeight: 800,
+    color: "#fff"
+  },
+  homeSummaryRow: {
+    display: "flex",
+    gap: 10,
+    marginTop: 14
+  },
+  homeStat: {
+    flex: 1,
+    background: "rgba(255,255,255,0.12)",
+    borderRadius: 12,
+    padding: "12px 8px",
+    textAlign: "center"
+  },
+  homeNum: {
+    display: "block",
+    fontSize: 32,
+    fontWeight: 800,
+    color: "#fff",
+    lineHeight: 1
+  },
+  homeLabel: {
+    display: "block",
+    fontSize: 11.5,
+    color: "rgba(255,255,255,0.75)",
+    marginTop: 4,
+    fontWeight: 700
+  },
+  homeBadge: {
+    padding: "8px 14px",
+    fontSize: 13,
+    fontWeight: 800,
+    color: "#fff",
+    background: "#C74E36",
+    border: "none",
+    borderRadius: 20,
+    cursor: "pointer"
+  },
+  homeQuickCard: {
+    background: "#EDF5EE",
+    borderRadius: 14,
+    padding: "16px 16px 18px",
+    border: "1.5px solid #2E7D4F"
   }
 };
 ReactDOM.createRoot(document.getElementById("root")).render(/*#__PURE__*/React.createElement(App, null));

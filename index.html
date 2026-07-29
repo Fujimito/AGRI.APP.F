@@ -13,10 +13,21 @@
 <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
 <style>
   * { box-sizing: border-box; margin: 0; }
-  body { background: #F0F3EC; }
+  html, body { height: 100%; }
+  body { background: #F0F3EC; overflow-x: hidden; }
   .num { font-variant-numeric: tabular-nums; }
   input:focus-visible, button:focus-visible, select:focus-visible { outline: 3px solid #2E7D4F; outline-offset: 1px; }
   button { touch-action: manipulation; }
+  /* スマホ向けリセット */
+  input, select, textarea { font-size: 16px; } /* iOS自動ズーム防止 */
+  @media (min-width: 768px) {
+    /* タブレット・PC：地図を縦幅いっぱいに拡大 */
+    [data-map-box] { height: calc(100dvh - 180px) !important; max-height: none !important; }
+  }
+  @media (min-width: 1024px) {
+    /* デスクトップ：さらに大きく */
+    [data-map-box] { height: calc(100dvh - 160px) !important; }
+  }
   @media print {
     .no-print, nav { display: none !important; }
     body { background: #fff; }
