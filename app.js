@@ -2178,7 +2178,7 @@ function WorkTab(p) {
       marginTop: 0,
       marginBottom: 10
     }
-  }, "⣿ または番号を長押ししてドラッグすると、散布する順番を入れ替えられます。"), dayList.map((w, idx) => {
+  }, "右の⣿マークを長押ししてドラッグすると、散布する順番を入れ替えられます。"), dayList.map((w, idx) => {
     const f = p.resolveWork(w);
     const master = p.fields.find(x => x.id === w.fieldId);
     const isEditing = editingFieldId !== null && master && master.id === editingFieldId;
@@ -2221,15 +2221,8 @@ function WorkTab(p) {
         ...(selected.includes(w.id) ? S.checkBtnOn : {})
       }
     }, selected.includes(w.id) ? "✓" : "") : /*#__PURE__*/React.createElement("span", {
-      onPointerDown: e => onHandleDown(e, w.id),
-      onTouchStart: e => onHandleDown(e, w.id),
-      style: {
-        ...S.orderNum,
-        cursor: "grab",
-        touchAction: "none"
-      },
-      className: "num",
-      title: "ドラッグで並べ替え"
+      style: S.orderNum,
+      className: "num"
     }, idx + 1), /*#__PURE__*/React.createElement("div", {
       style: {
         minWidth: 0,
@@ -4063,13 +4056,45 @@ function LeafletMapTab(p) {
     style: S.naviBtn
   }, "🚗 ナビ")))));
 }
+
+// 設定タブの各カードで使う、開閉できる見出し(タップで展開/折りたたみ)
+function collapsibleHead(title, isOpen, onClick) {
+  return /*#__PURE__*/React.createElement("button", {
+    onClick: onClick,
+    style: {
+      width: "100%",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      background: "transparent",
+      border: "none",
+      padding: 0,
+      marginBottom: isOpen ? 12 : 0,
+      cursor: "pointer",
+      textAlign: "left"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.cardLabel
+  }, title), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 14,
+      color: "#8a978e",
+      flexShrink: 0,
+      marginLeft: 8
+    }
+  }, isOpen ? "▲" : "▼"));
+}
 function SettingsTab(p) {
   const [newCrop, setNewCrop] = useState("");
+  const [openSec, setOpenSec] = useState({});
+  const toggleSec = key => setOpenSec(s => ({
+    ...s,
+    [key]: !s[key]
+  }));
+  const [openVer, setOpenVer] = useState({});
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "表示単位"), /*#__PURE__*/React.createElement("label", {
+  }, collapsibleHead("表示単位", openSec.unit, () => toggleSec("unit")), openSec.unit && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
     style: {
       ...S.areaField,
       marginBottom: 14
@@ -4096,11 +4121,9 @@ function SettingsTab(p) {
     value: u.key
   }, u.label)))), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "入力は面積=a、薬量=Lで行い、表示だけこの単位に変換されます。1反=10a、1町=100a、1ha=100a。")), /*#__PURE__*/React.createElement("section", {
+  }, "入力は面積=a、薬量=Lで行い、表示だけこの単位に変換されます。1反=10a、1町=100a、1ha=100a。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "作物マスタ(圃場登録時に選べる作物)"), /*#__PURE__*/React.createElement("div", {
+  }, collapsibleHead("作物マスタ(圃場登録時に選べる作物)", openSec.crop, () => toggleSec("crop")), openSec.crop && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -4144,11 +4167,9 @@ function SettingsTab(p) {
     onClick: () => p.deleteCrop(c),
     style: S.cropChipX,
     "aria-label": "削除"
-  }, "✕"))))), /*#__PURE__*/React.createElement("section", {
+  }, "✕")))))), /*#__PURE__*/React.createElement("section", {
     style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "送信・共有設定"), /*#__PURE__*/React.createElement("label", {
+  }, collapsibleHead("送信・共有設定", openSec.send, () => toggleSec("send")), openSec.send && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
     style: S.areaField
   }, /*#__PURE__*/React.createElement("span", {
     style: S.smallLabel
@@ -4211,11 +4232,9 @@ function SettingsTab(p) {
     }
   }, "☁↓ 共有→端末へ読込")), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "同じチームコードの端末どうしで、圃場・薬剤・作業リストを共有できます(後から保存した内容で上書き)。共有がうまくいかない場合は、GASを最新のCode.gsに更新して再デプロイしてください。")), /*#__PURE__*/React.createElement("section", {
+  }, "同じチームコードの端末どうしで、圃場・薬剤・作業リストを共有できます(後から保存した内容で上書き)。共有がうまくいかない場合は、GASを最新のCode.gsに更新して再デプロイしてください。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "地図タブの設定"), /*#__PURE__*/React.createElement("div", {
+  }, collapsibleHead("地図タブの設定", openSec.map, () => toggleSec("map")), openSec.map && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
   }, "既定の地図エンジン"), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -4265,11 +4284,9 @@ function SettingsTab(p) {
     }
   }, "✓ 保存済み"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "Google マップに切り替えると、地図タブで衛星写真と道路・地名を同時に表示できます。APIキーはこの端末の中にだけ保存され、ソースコード(GitHub)には一切含まれません。ただし地図を読み込むたびにGoogleのサーバーへは送信されるため、Google Cloud Consoleでドメイン制限(HTTPリファラー制限)を必ず設定してください。")), /*#__PURE__*/React.createElement("section", {
+  }, "Google マップに切り替えると、地図タブで衛星写真と道路・地名を同時に表示できます。APIキーはこの端末の中にだけ保存され、ソースコード(GitHub)には一切含まれません。ただし地図を読み込むたびにGoogleのサーバーへは送信されるため、Google Cloud Consoleでドメイン制限(HTTPリファラー制限)を必ず設定してください。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "データ管理"), /*#__PURE__*/React.createElement("button", {
+  }, collapsibleHead("データ管理", openSec.data, () => toggleSec("data")), openSec.data && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
     onClick: p.eraseAllData,
     style: {
       ...S.smallDanger,
@@ -4278,16 +4295,14 @@ function SettingsTab(p) {
     }
   }, "🗑 この端末のデータをすべて消去"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "圃場・作業記録・APIキーなど、この端末に保存されているすべてのデータを削除します。端末を手放す・譲渡する前に実行してください。送信済みの記録はスプレッドシート側に残ります。この操作は取り消せません。誤タップ防止のため、確認ダイアログのあとに「消去」と入力する画面が出ます。")), /*#__PURE__*/React.createElement("section", {
+  }, "圃場・作業記録・APIキーなど、この端末に保存されているすべてのデータを削除します。端末を手放す・譲渡する前に実行してください。送信済みの記録はスプレッドシート側に残ります。この操作は取り消せません。誤タップ防止のため、確認ダイアログのあとに「消去」と入力する画面が出ます。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "使い方ガイド"), [{
+  }, collapsibleHead("使い方ガイド", openSec.guide, () => toggleSec("guide")), openSec.guide && [{
     title: "🧮 調合タブ(起動画面)",
     desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。「⭐プリセットに保存」で薬液の組み合わせを登録でき、次回から作業タブの「薬剤を圃場に適用」で呼び出せます。「↩ この薬液を控える」で前回薬液として記憶します。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます(この回数はアプリに記録された散布実績を通算した簡易的な目安で、作期での自動リセットは行われません)。"
   }, {
     title: "🚁 作業・記録タブ",
-    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場はプリセットタブで登録したマスタを「圃場を検索」で探して「＋この日へ」で追加します。「圃場コースから追加」でよく回るルートをまとめて一括投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「薬剤を圃場に適用」でプリセットや前回薬液を未実施の圃場に適用でき、各圃場の予定薬液量で薬量を自動計算します。圃場は左の番号または右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(実施済みの圃場は並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンで散布量・フライト数を空欄から記録します。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」でいつでも入力し直せます。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
+    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場はプリセットタブで登録したマスタを「圃場を検索」で探して「＋この日へ」で追加します。「圃場コースから追加」でよく回るルートをまとめて一括投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「薬剤を圃場に適用」でプリセットや前回薬液を未実施の圃場に適用でき、各圃場の予定薬液量で薬量を自動計算します。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンで散布量・フライト数を空欄から記録します。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」でいつでも入力し直せます。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 地図タブ",
     desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
@@ -4322,13 +4337,11 @@ function SettingsTab(p) {
     }
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "バージョン履歴"), [{
+  }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
     ver: "v8.20",
     date: "2026-07",
     isNew: true,
-    notes: ["🚁 実績入力しても作業タブから消えず、そのまま一覧に残って編集できるように変更", "実績値(散布量・面積・備考)をその場に表示。「✎ 実績を修正」を押すと入力済みの値を復元して編集可能に", "送信が完了した圃場だけ色が変わり「✓送信済」と表示(未送信は「実績入力済(未送信)」)", "実績入力(散布量)の初期値を空欄に変更(誤った数値の入力保存を防止)", "作業タブの圃場名・作物名・面積の編集ボタンが実績入力済みの圃場でも使えるように", "予定薬液量を圃場マスタから廃止。「本日の投下量」入力で計算した当日限りの値のみを使用し、日をまたいだ古い値の誤使用を防止", "投下量が未入力の圃場があるとき、作業タブに常時注意バナーを表示", "プリセットの圃場マスタ・作業タブの✎編集から「予定薬液量」欄を削除(面積のみ)", "作業タブ下部の「記録」は一覧表示をやめ、CSV出力・印刷のみに整理", "🔒 地図ラベル(圃場名・作物名)の表示方法を修正し、記号を含む名前でも安全に表示されるように", "APIキーの説明文を修正(Google読み込み時に送信される点を明記)", "APIキー入力欄でブラウザの自動入力候補が出ないように変更", "農薬使用回数警告に「簡易的な目安・作期リセットなし」の注記を追加", "「この端末のデータをすべて消去」に誤タップ防止の二段階確認(「消去」と入力)を追加", "作業リストのドラッグ並べ替えで、つかんでいる圃場名がその場に浮かんで見えるように改善"]
+    notes: ["🚁 実績入力しても作業タブから消えず、そのまま一覧に残って編集できるように変更", "実績値(散布量・面積・備考)をその場に表示。「✎ 実績を修正」を押すと入力済みの値を復元して編集可能に", "送信が完了した圃場だけ色が変わり「✓送信済」と表示(未送信は「実績入力済(未送信)」)", "実績入力(散布量)の初期値を空欄に変更(誤った数値の入力保存を防止)", "作業タブの圃場名・作物名・面積の編集ボタンが実績入力済みの圃場でも使えるように", "予定薬液量を圃場マスタから廃止。「本日の投下量」入力で計算した当日限りの値のみを使用し、日をまたいだ古い値の誤使用を防止", "投下量が未入力の圃場があるとき、作業タブに常時注意バナーを表示", "プリセットの圃場マスタ・作業タブの✎編集から「予定薬液量」欄を削除(面積のみ)", "作業タブ下部の「記録」は一覧表示をやめ、CSV出力・印刷のみに整理", "🔒 地図ラベル(圃場名・作物名)の表示方法を修正し、記号を含む名前でも安全に表示されるように", "APIキーの説明文を修正(Google読み込み時に送信される点を明記)", "APIキー入力欄でブラウザの自動入力候補が出ないように変更", "農薬使用回数警告に「簡易的な目安・作期リセットなし」の注記を追加", "「この端末のデータをすべて消去」に誤タップ防止の二段階確認(「消去」と入力)を追加", "作業リストのドラッグ並べ替えで、つかんでいる圃場名がその場に浮かんで見えるように改善", "並べ替えは右の⣿マークのみで行うように変更し、左の番号に触れて誤って動いてしまわないように修正", "設定タブの各項目をバージョン履歴と同じように開閉式にし、タップするまで折りたたまれているように変更"]
   }, {
     ver: "v8.19",
     date: "2026-07",
@@ -4390,7 +4403,7 @@ function SettingsTab(p) {
     isNew: false,
     notes: ["前回と同じ薬液・未送信バッジ・自動リトライ"]
   }].map(v => {
-    const [open, setOpen] = useState(v.isNew);
+    const open = openVer[v.ver] != null ? openVer[v.ver] : v.isNew;
     return /*#__PURE__*/React.createElement("div", {
       key: v.ver,
       style: {
@@ -4400,7 +4413,10 @@ function SettingsTab(p) {
         overflow: "hidden"
       }
     }, /*#__PURE__*/React.createElement("button", {
-      onClick: () => setOpen(!open),
+      onClick: () => setOpenVer(s => ({
+        ...s,
+        [v.ver]: !open
+      })),
       style: {
         width: "100%",
         display: "flex",
