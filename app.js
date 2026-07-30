@@ -13,7 +13,7 @@ const {
 //  ・チームコードによる端末間データ共有
 // ═══════════════════════════════════════════════════════
 
-const APP_VERSION = "v8.20";
+const APP_VERSION = "v8.21";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -371,6 +371,26 @@ function App() {
     setGmapKeyInput(trimmed);
     localStorage.setItem("tankmix:gmapkey", trimmed);
     flash(trimmed ? "APIキーを保存しました" : "APIキーを削除しました");
+  };
+  // アプリを最新版に強制更新する。キャッシュとService Workerを破棄して読み直すため、
+  // 「更新したのにスマホだけ古い画面のまま」という状態を確実に解消できる。
+  // localStorage(圃場・作業記録・設定)には一切触らないのでデータは残る。
+  const forceUpdate = async () => {
+    if (!confirm("アプリを最新版に更新します。\n保存されているデータ(圃場・作業記録・設定)は消えません。\n\n電波のある場所で実行してください。よろしいですか？")) return;
+    flash("最新版を確認しています…");
+    try {
+      if (typeof caches !== "undefined") {
+        const keys = await caches.keys();
+        await Promise.all(keys.map(k => caches.delete(k)));
+      }
+      if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map(r => r.unregister()));
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    if (typeof location !== "undefined" && location.reload) location.reload();
   };
   // 端末のtankmix:データをすべて消去(端末譲渡・売却前などに使用)。
   // 誤タップで即実行されないよう、確認ダイアログに加えて「消去」と入力させる二段階の確認にしている
@@ -1412,7 +1432,8 @@ function App() {
     gmapKeyInput,
     setGmapKeyInput,
     saveGmapKey,
-    eraseAllData
+    eraseAllData,
+    forceUpdate
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
     className: "no-print"
@@ -4751,6 +4772,19 @@ function SettingsTab(p) {
     style: S.note
   }, "Google マップに切り替えると、地図タブで衛星写真と道路・地名を同時に表示できます。APIキーはこの端末の中にだけ保存され、ソースコード(GitHub)には一切含まれません。ただし地図を読み込むたびにGoogleのサーバーへは送信されるため、Google Cloud Consoleでドメイン制限(HTTPリファラー制限)を必ず設定してください。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
+  }, collapsibleHead("アプリの更新", openSec.update, () => toggleSec("update")), openSec.update && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: S.updateNow
+  }, "この端末のバージョン ", /*#__PURE__*/React.createElement("strong", null, APP_VERSION)), /*#__PURE__*/React.createElement("button", {
+    onClick: p.forceUpdate,
+    style: {
+      ...S.primaryBtn,
+      width: "100%",
+      marginTop: 12
+    }
+  }, "🔄 最新版に更新する"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "通常は自動で最新版に切り替わりますが、スマホでいつまでも画面が変わらないときはこのボタンを押してください。保存されているデータ(圃場・作業記録・設定・APIキー)は消えません。電波のある場所で実行してください。押すと画面が再読み込みされます。"))), /*#__PURE__*/React.createElement("section", {
+    style: S.card
   }, collapsibleHead("データ管理", openSec.data, () => toggleSec("data")), openSec.data && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
     onClick: p.eraseAllData,
     style: {
@@ -4803,9 +4837,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.20",
+    ver: "v8.21",
     date: "2026-07",
     isNew: true,
+    notes: ["🔄 更新が自動で反映されるように修正(これまではスマホで2回開き直すか、アプリを完全終了しないと切り替わらなかった)", "ホーム画面アプリを前面に戻したときにも新しいバージョンを確認するように", "設定タブに「アプリの更新」を新設。「🔄 最新版に更新する」ボタンで確実に切り替えられます(保存データは消えません)", "🐞 デプロイ直後に更新すると、古いファイルをキャッシュに取り込んでしまう不具合を修正"]
+  }, {
+    ver: "v8.20",
+    date: "2026-07",
+    isNew: false,
     notes: ["🚁 実績入力しても作業タブから消えず、そのまま一覧に残って編集できるように変更", "実績値(散布量・面積・備考)をその場に表示。「✎ 実績を修正」を押すと入力済みの値を復元して編集可能に", "送信が完了した圃場だけ色が変わり「✓送信済」と表示(未送信は「実績入力済(未送信)」)", "実績入力(散布量)の初期値を空欄に変更(誤った数値の入力保存を防止)", "作業タブの圃場名・作物名・面積の編集ボタンが実績入力済みの圃場でも使えるように", "予定薬液量を圃場マスタから廃止。「本日の投下量」入力で計算した当日限りの値のみを使用し、日をまたいだ古い値の誤使用を防止", "投下量が未入力の圃場があるとき、作業タブに常時注意バナーを表示", "プリセットの圃場マスタ・作業タブの✎編集から「予定薬液量」欄を削除(面積のみ)", "作業タブ下部の「記録」は一覧表示をやめ、CSV出力・印刷のみに整理", "🔒 地図ラベル(圃場名・作物名)の表示方法を修正し、記号を含む名前でも安全に表示されるように", "APIキーの説明文を修正(Google読み込み時に送信される点を明記)", "APIキー入力欄でブラウザの自動入力候補が出ないように変更", "農薬使用回数警告に「簡易的な目安・作期リセットなし」の注記を追加", "「この端末のデータをすべて消去」に誤タップ防止の二段階確認(「消去」と入力)を追加", "作業リストのドラッグ並べ替えで、つかんでいる圃場名がその場に浮かんで見えるように改善", "並べ替えは右の⣿マークのみで行うように変更し、左の番号に触れて誤って動いてしまわないように修正", "設定タブの各項目をバージョン履歴と同じように開閉式にし、タップするまで折りたたまれているように変更", "🌾 プリセットの圃場「編集」をポップアップ化。画面上部まで戻らずその場で編集できるように変更", "圃場名・面積の変更が、作業タブに入っている同じ圃場にも同時に反映されるように", "🐞 コース一括投入などで作業・圃場のIDが重複し、別の圃場を書き換えてしまう不具合を修正(25圃場で約26%発生)", "使われていない処理(旧並べ替え・旧圃場追加・未使用フラグ)を整理", "🚁 作業タブの実績入力・実績修正をポップアップ化(その場で開くので画面を動かさずに入力できる)", "作業タブの✎圃場編集もポップアップ化", "🗑 作業リストに「選択して削除」を追加。チェックした圃場だけ外す・この日をすべて外すが可能に", "まとめ散布と選択削除は同時に動かないようにし、モードを切り替えると選択がリセットされるように", "🗺 地図タブで下のタブバーが地図に隠れる不具合を修正", "実績入力を散布量のみに簡素化。散布面積は圃場の登録面積が自動で記録されるように(面積の修正は✎から)", "まとめ散布にあった、入力しても記録に反映されない面積欄を削除", "🧪 薬剤を1つずつプリセット登録できるように(薬剤名・種類・剤型・希釈倍率)", "調合タブの📋ボタンから、登録した薬剤を種類・倍率ごとそのまま呼び出せるように(呼び出し後に倍率だけ変更も可能)", "🚜 コースの編集画面を「コースの順番」と「追加できる圃場」に分割。⣿ドラッグで順番の入れ替え、「外す」で除外ができるように", "コース編集に圃場の検索を追加。圃場数が多くても探しやすく", "🐞 コース編集をキャンセルした後に新規作成すると既存コースを上書きしてしまう恐れがあった箇所を修正"]
   }, {
     ver: "v8.19",
@@ -5680,6 +5719,15 @@ const S = {
   },
   checkBtnOn: {
     background: "#B78A1F"
+  },
+  updateNow: {
+    fontSize: 14.5,
+    fontWeight: 700,
+    color: "#33443a",
+    padding: "10px 12px",
+    background: "#EDF5EE",
+    border: "1.5px solid #BFE1CC",
+    borderRadius: 9
   },
   routeRow: {
     display: "flex",
