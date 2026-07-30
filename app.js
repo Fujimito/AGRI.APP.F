@@ -263,6 +263,16 @@ const save = (key, value) => {
   }
 };
 
+// 一意なID発行。Date.now()+乱数だと、コース投入のように同じミリ秒で
+// 複数まとめて作るときIDが衝突し、別の圃場を書き換えてしまう事故が起きるため、
+// 必ず前回より大きい値を返すカウンタ方式にしている。
+let __lastId = 0;
+const newId = () => {
+  const t = Date.now();
+  __lastId = t > __lastId ? t : __lastId + 1;
+  return __lastId;
+};
+
 // v7以前のデータ移行(records → fields + works)
 const migrate = () => {
   if (localStorage.getItem("tankmix:works") || !localStorage.getItem("tankmix:records")) return;
@@ -274,11 +284,10 @@ const migrate = () => {
       let f = fields.find(x => x.name === r.field);
       if (!f) {
         f = {
-          id: Date.now() + Math.floor(Math.random() * 100000),
+          id: newId(),
           name: r.field || "(未入力)",
           crop: r.crop || "",
-          areaA: r.areaA || "",
-          plannedL: r.plannedL || 0
+          areaA: r.areaA || ""
         };
         fields.push(f);
       }
@@ -289,9 +298,9 @@ const migrate = () => {
         snapshot: {
           name: f.name,
           crop: f.crop,
-          areaA: f.areaA,
-          plannedL: f.plannedL
+          areaA: f.areaA
         },
+        plannedL: 0,
         chems: r.chems || [],
         totalL: r.totalL || 0,
         waterMl: r.waterMl || 0,
@@ -430,19 +439,14 @@ function App() {
     setCropsSave([...crops, n]);
   };
   const deleteCrop = name => setCropsSave(crops.filter(c => c !== name));
+  // 作業行の表示用の圃場情報。マスタが残っていればマスタを優先し(名前・面積の変更が
+  // 作業タブへ即反映される)、マスタが消えている場合だけ登録時のスナップショットを使う。
   const resolveWork = w => {
-    if (w.isGroup) return {
-      name: w.fieldName,
-      crop: "",
-      areaA: w.areaA,
-      plannedL: 0
-    };
     const f = fields.find(x => x.id === w.fieldId);
     return f || w.snapshot || {
       name: "(不明)",
       crop: "",
-      areaA: "",
-      plannedL: 0
+      areaA: ""
     };
   };
   const upsertField = (data, id) => {
@@ -451,7 +455,9 @@ function App() {
         ...f,
         ...data
       } : f));
-      setWorksSave(works.map(w => w.fieldId === id && !w.reported ? {
+      // スナップショットも全作業(実績入力済みを含む)を追従させる。
+      // マスタを消したときに古い名前へ戻ってしまうのを防ぐため。
+      setWorksSave(works.map(w => w.fieldId === id ? {
         ...w,
         snapshot: {
           ...w.snapshot,
@@ -462,7 +468,7 @@ function App() {
       return id;
     }
     const f = {
-      id: Date.now() + Math.floor(Math.random() * 1000),
+      id: newId(),
       name: data.name,
       crop: data.crop || "",
       areaA: data.areaA
@@ -480,7 +486,7 @@ function App() {
       return;
     }
     setFieldsSave([...fields, {
-      id: Date.now() + Math.floor(Math.random() * 1000),
+      id: newId(),
       name: data.name,
       crop: data.crop || "",
       areaA: data.areaA
@@ -490,7 +496,7 @@ function App() {
   // 地図で囲んだ圃場(ポリゴン・中心座標つき)を登録
   const addFieldWithPolygon = data => {
     setFieldsSave([...fields, {
-      id: Date.now() + Math.floor(Math.random() * 1000),
+      id: newId(),
       name: data.name,
       crop: data.crop || "",
       areaA: data.areaA,
@@ -500,7 +506,7 @@ function App() {
     flash("圃場「" + data.name + "」を地図に登録しました(" + fmt(data.areaA, 2) + "a)");
   };
   const makeWork = f => ({
-    id: Date.now() + Math.floor(Math.random() * 1000),
+    id: newId(),
     workDate,
     fieldId: f.id,
     snapshot: {
@@ -532,29 +538,15 @@ function App() {
     setWorksSave([...works, makeWork(f)]);
     flash("「" + f.name + "」を" + dateLabel(workDate) + "のリストに追加しました");
   };
-  const addNewFieldAndWork = data => {
-    let f = fields.find(x => x.name === data.name);
-    if (!f) {
-      f = {
-        id: Date.now() + Math.floor(Math.random() * 1000),
-        name: data.name,
-        crop: data.crop || "",
-        areaA: data.areaA,
-        plannedL: data.plannedL
-      };
-      setFieldsSave([...fields, f]);
-    } else {
-      flash("同名の圃場がマスタにあるため、そちらを使います");
-    }
-    if (works.some(w => w.workDate === workDate && w.fieldId === f.id && !w.reported)) {
-      flash("この圃場は既にこの日のリストにあります");
-      return null;
-    }
-    const w = makeWork(f);
-    setWorksSave([...works, w]);
-    return w.id;
-  };
   const removeWork = id => setWorksSave(works.filter(w => w.id !== id));
+  // 複数の作業をまとめて外す(選択削除・一括削除用)。
+  // 1件ずつremoveWorkを呼ぶと古いworksを元に上書きし合って1件しか消えないため、必ずまとめて処理する。
+  const removeWorks = ids => {
+    const set = new Set(ids);
+    if (set.size === 0) return;
+    setWorksSave(works.filter(w => !set.has(w.id)));
+    flash(set.size + "件をこの日のリストから外しました");
+  };
 
   // ══ 圃場コース(ルート・プリセット) ══
   // 現在の作業リスト(この日ぶん)をコースとして保存
@@ -728,20 +720,6 @@ function App() {
     }));
     flash(updated + "圃場の予定薬液量を計算しました" + (noArea > 0 ? "(面積未入力 " + noArea + "件は対象外)" : ""));
   };
-  const moveWork = (id, dir) => {
-    const visible = works.filter(w => w.workDate === workDate && !w.reported).map(w => w.id);
-    const vi = visible.indexOf(id);
-    const vj = vi + dir;
-    if (vi < 0 || vj < 0 || vj >= visible.length) return;
-    const otherId = visible[vj];
-    const i = works.findIndex(w => w.id === id);
-    const j = works.findIndex(w => w.id === otherId);
-    const next = [...works];
-    const tmp = next[i];
-    next[i] = next[j];
-    next[j] = tmp;
-    setWorksSave(next);
-  };
   // ドラッグ&ドロップ:この日の可視リスト内で、fromの圃場をtoの位置へ移動
   const reorderWork = (fromId, toId) => {
     if (fromId === toId) return;
@@ -752,8 +730,6 @@ function App() {
     const reordered = [...dayW];
     const [moved] = reordered.splice(fromIdx, 1);
     reordered.splice(toIdx, 0, moved);
-    // この日の作業を新しい順序で、他の日の作業はそのまま再構成
-    const others = works.filter(w => !(w.workDate === workDate && !w.reported));
     // 元の並びで「この日の可視作業」があった位置に、並べ替え後の列を差し込む
     const result = [];
     let ri = 0;
@@ -866,7 +842,8 @@ function App() {
       reportSynced: false,
       sprayedL: parseFloat(rep.sprayedL) || 0,
       flights: flights,
-      reportAreaA: rep.areaA !== "" ? parseFloat(rep.areaA) || "" : resolveWork(w).areaA || "",
+      // 散布面積は圃場マスタの面積をそのまま記録する(実績入力では面積を入力させない)
+      reportAreaA: parseFloat(resolveWork(w).areaA) || "",
       reportMemo: rep.memo || "",
       reportDate: today()
     } : w);
@@ -972,7 +949,7 @@ function App() {
     setSyncing(true);
     let current = load("tankmix:works", []);
     // 送信対象(未送信のもの)
-    const pendingList = current.filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced));
+    const pendingList = current.filter(w => !w.synced || w.reported && !w.reportSynced);
     // 開始圃場が指定されていれば、その位置から
     let startIdx = 0;
     if (startFromId) {
@@ -1170,7 +1147,7 @@ function App() {
   const exportCSV = () => {
     const plain = (n, d = 2) => isFinite(n) && n !== "" ? Number(n).toFixed(d).replace(/\.?0+$/, "") : "";
     const head = "散布日,圃場,作物,面積(a),薬剤数,薬剤内容,総量(L),水量(L),実散布量(L),フライト数,フライト内訳,状態,報告日,備考\n";
-    const body = works.filter(w => !w.groupedInto).map(w => {
+    const body = works.map(w => {
       const f = resolveWork(w);
       const chemsStr = w.chems.map(c => c.name + "(" + useLabel(c.use) + "・" + formLabel(c.form) + "・" + c.ratio + "倍・" + Math.round(c.ml) + "mL)").join(" / ");
       const flights = w.flights || [];
@@ -1215,13 +1192,13 @@ function App() {
     });
     return warnings.sort((a, b) => b.count - a.count);
   }, [works]);
-  const pendingCount = works.filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced)).length;
+  const pendingCount = works.filter(w => !w.synced || w.reported && !w.reportSynced).length;
 
   // 電波が戻ったら自動で送信を試みる(未送信があるときだけ)
   useEffect(() => {
     const onOnline = () => {
       const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
-      const pend = load("tankmix:works", []).filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced)).length;
+      const pend = load("tankmix:works", []).filter(w => !w.synced || w.reported && !w.reportSynced).length;
       if (url && pend > 0) syncPending();
     };
     window.addEventListener("online", onOnline);
@@ -1319,9 +1296,8 @@ function App() {
     setWorkDate,
     resolveWork,
     addWork,
-    addNewFieldAndWork,
     removeWork,
-    moveWork,
+    removeWorks,
     reorderWork,
     upsertField,
     routes,
@@ -1341,6 +1317,8 @@ function App() {
     lastMix,
     applyChemsToWork,
     applyChemsToAll,
+    crops,
+    addCrop,
     areaUnitKey,
     volUnitKey
   }), tab === "preset" && /*#__PURE__*/React.createElement(PresetTab, {
@@ -1736,14 +1714,22 @@ function WorkTab(p) {
   const [query, setQuery] = useState("");
   const [reportingId, setReportingId] = useState(null);
   const [repFlights, setRepFlights] = useState([""]);
-  const [repArea, setRepArea] = useState("");
   const [repMemo, setRepMemo] = useState("");
   const [selected, setSelected] = useState([]);
-  const [groupMode, setGroupMode] = useState(false);
+  // 選択モードは1つだけ:"none"=通常 / "group"=まとめ散布 / "delete"=選択削除。
+  // 1つの状態にまとめることで、2つの選択モードが同時に動いて取り違える事故を防いでいる。
+  const [selMode, setSelMode] = useState("none");
+  const groupMode = selMode === "group";
+  const deleteMode = selMode === "delete";
   const [gSprayed, setGSprayed] = useState("");
-  const [gArea, setGArea] = useState("");
   const [gMemo, setGMemo] = useState("");
   const [gFormOpen, setGFormOpen] = useState(false);
+  // モード切替時は必ず選択をリセットする(前のモードの選択が残らないように)
+  const switchMode = m => {
+    setSelMode(prev => prev === m ? "none" : m);
+    setSelected([]);
+    setGFormOpen(false);
+  };
   const [editingFieldId, setEditingFieldId] = useState(null);
   const [ef, setEf] = useState({
     name: "",
@@ -1763,8 +1749,8 @@ function WorkTab(p) {
   const pendingDayList = dayList.filter(w => !w.reported);
   // 本日の投下量(L/10a)がまだ計算されていない圃場がある場合は警告バナーを出す
   const needsRateWarning = pendingDayList.some(w => !(parseFloat(w.plannedL) > 0));
-  const history = p.works.filter(w => w.reported && !w.groupedInto).sort((a, b) => b.id - a.id);
-  const pendingWorks = p.works.filter(w => !w.groupedInto && (!w.synced || w.reported && !w.reportSynced));
+  const history = p.works.filter(w => w.reported).sort((a, b) => b.id - a.id);
+  const pendingWorks = p.works.filter(w => !w.synced || w.reported && !w.reportSynced);
   const pending = pendingWorks.length;
 
   // ドラッグ&ドロップ並べ替え(タッチ・マウス両対応)
@@ -1825,12 +1811,10 @@ function WorkTab(p) {
       // 修正:すでに保存されている実績値を復元してその場で編集する
       const flights = Array.isArray(w.flights) && w.flights.length > 0 ? w.flights.map(v => String(v)) : [String(w.sprayedL || "")];
       setRepFlights(flights);
-      setRepArea(w.reportAreaA !== "" && w.reportAreaA != null ? String(w.reportAreaA) : f.areaA !== "" && f.areaA != null ? String(f.areaA) : "");
       setRepMemo(w.reportMemo || "");
     } else {
       // 初回入力は自動入力せず空欄から始める(誤入力・誤タップ防止)
       setRepFlights([""]);
-      setRepArea(f.areaA !== "" && f.areaA != null ? String(f.areaA) : "");
       setRepMemo("");
     }
   };
@@ -1843,7 +1827,6 @@ function WorkTab(p) {
     p.submitReport(reportingId, {
       sprayedL: flightSum,
       flights: flightsNum,
-      areaA: repArea,
       memo: repMemo
     });
     setReportingId(null);
@@ -1853,19 +1836,34 @@ function WorkTab(p) {
   const openGroupForm = () => {
     const members = p.works.filter(w => selected.includes(w.id));
     setGSprayed(String(members.reduce((s, w) => s + (w.totalL || 0), 0) || ""));
-    setGArea(String(members.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0) || ""));
     setGMemo("");
     setGFormOpen(true);
   };
   const sendGroup = () => {
     p.submitGroupReport(selected, {
       sprayedL: gSprayed,
-      areaA: gArea,
       memo: gMemo
     });
     setSelected([]);
-    setGroupMode(false);
+    setSelMode("none");
     setGFormOpen(false);
+  };
+  // 選択削除:チェックした圃場をこの日のリストから外す
+  const deleteSelected = () => {
+    const names = p.works.filter(w => selected.includes(w.id)).map(w => p.resolveWork(w).name);
+    if (names.length === 0) return;
+    if (!confirm(names.length + "件の圃場をこの日のリストから外します。\n" + names.join("、") + "\n\n(圃場マスタには残ります。実績を入力済みの記録も消えます)\nよろしいですか？")) return;
+    p.removeWorks(selected);
+    setSelected([]);
+    setSelMode("none");
+  };
+  // 一括削除:この日のリストを丸ごと空にする
+  const deleteAllToday = () => {
+    if (dayList.length === 0) return;
+    if (!confirm(dateLabel(p.workDate) + "の作業リスト" + dayList.length + "件をすべて外します。\n\n(圃場マスタには残ります。実績を入力済みの記録も消えます)\nこの操作は取り消せません。よろしいですか？")) return;
+    p.removeWorks(dayList.map(w => w.id));
+    setSelected([]);
+    setSelMode("none");
   };
   const startEditField = w => {
     const f = p.resolveWork(w);
@@ -1879,9 +1877,12 @@ function WorkTab(p) {
     });
   };
   const saveEditField = () => {
+    if (!ef.name.trim()) return;
+    const cropName = ef.crop.trim();
+    if (cropName && p.addCrop) p.addCrop(cropName); // 入力された作物をマスタに自動登録
     p.upsertField({
-      name: ef.name.trim() || "(未入力)",
-      crop: ef.crop.trim(),
+      name: ef.name.trim(),
+      crop: cropName,
       areaA: parseFloat(ef.areaA) || ""
     }, editingFieldId);
     setEditingFieldId(null);
@@ -1892,14 +1893,39 @@ function WorkTab(p) {
     return idx >= 0 ? idx + 1 : 0;
   };
   const draggingWork = dragId != null ? dayList.find(w => w.id === dragId) : null;
-  return /*#__PURE__*/React.createElement(React.Fragment, null, draggingWork && dragPos && /*#__PURE__*/React.createElement("div", {
+  // ポップアップ用:編集中の圃場・実績入力中の作業(元データが消えていたら閉じた扱い)
+  const editingField = editingFieldId != null ? p.fields.find(f => f.id === editingFieldId) : null;
+  const reportingWork = reportingId != null ? p.works.find(w => w.id === reportingId) : null;
+  return /*#__PURE__*/React.createElement(React.Fragment, null, editingField && /*#__PURE__*/React.createElement(FieldEditModal, {
+    field: editingField,
+    mf: ef,
+    setMf: setEf,
+    crops: p.crops,
+    onCancel: () => setEditingFieldId(null),
+    onSave: saveEditField
+  }), reportingWork && /*#__PURE__*/React.createElement(ReportModal, {
+    fieldName: p.resolveWork(reportingWork).name,
+    isFix: !!reportingWork.reported,
+    flights: repFlights,
+    setFlight: setFlight,
+    addFlight: addFlight,
+    removeFlight: removeFlight,
+    areaLabel: (() => {
+      const a = p.resolveWork(reportingWork).areaA;
+      return a !== "" && a != null ? dispArea(a, p.areaUnitKey) + " " + areaSuffix(p.areaUnitKey) : "未設定";
+    })(),
+    memo: repMemo,
+    setMemo: setRepMemo,
+    onCancel: () => setReportingId(null),
+    onSave: sendReport
+  }), draggingWork && dragPos && /*#__PURE__*/React.createElement("div", {
     className: "no-print",
     style: {
       position: "fixed",
       left: dragPos.x,
       top: dragPos.y - 46,
       transform: "translateX(-50%)",
-      zIndex: 999,
+      zIndex: 900,
       pointerEvents: "none",
       background: "#1C2B21",
       color: "#fff",
@@ -2163,14 +2189,58 @@ function WorkTab(p) {
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, dateLabel(p.workDate), "の作業リスト(", dayList.length, "件)"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setGroupMode(!groupMode);
-      setSelected([]);
-      setGFormOpen(false);
-    },
+  }, dateLabel(p.workDate), "の作業リスト(", dayList.length, "件)"), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => switchMode("group"),
     style: groupMode ? S.smallPrimary : S.smallSecondary
-  }, groupMode ? "まとめ選択を終了" : "🔗 まとめ散布")), dayList.length === 0 && /*#__PURE__*/React.createElement("p", {
+  }, groupMode ? "まとめ選択を終了" : "🔗 まとめ散布"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => switchMode("delete"),
+    style: deleteMode ? S.smallDangerOn : S.smallSecondary
+  }, deleteMode ? "削除選択を終了" : "🗑 選択して削除"))), deleteMode && /*#__PURE__*/React.createElement("div", {
+    style: S.delBar
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13.5,
+      fontWeight: 700,
+      color: "#8a2f1c",
+      flex: 1,
+      minWidth: 120
+    }
+  }, "外したい圃場をタップで選択(", selected.length, "件)"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSelected(selected.length === dayList.length ? [] : dayList.map(w => w.id)),
+    style: S.smallSecondary
+  }, selected.length === dayList.length ? "選択を解除" : "すべて選択")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: deleteSelected,
+    disabled: selected.length === 0,
+    style: {
+      ...S.smallDanger,
+      padding: "13px 0",
+      opacity: selected.length === 0 ? 0.4 : 1
+    }
+  }, "🗑 選択した", selected.length, "件を外す"), /*#__PURE__*/React.createElement("button", {
+    onClick: deleteAllToday,
+    style: {
+      ...S.smallDanger,
+      padding: "13px 0"
+    }
+  }, "🗑 この日をすべて外す"))), dayList.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "この日の作業はまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "上の「圃場を検索」で追加するか、プリセットタブで圃場を登録してください。"), dayList.length > 1 && !groupMode && /*#__PURE__*/React.createElement("p", {
     style: {
@@ -2181,14 +2251,14 @@ function WorkTab(p) {
   }, "右の⣿マークを長押ししてドラッグすると、散布する順番を入れ替えられます。"), dayList.map((w, idx) => {
     const f = p.resolveWork(w);
     const master = p.fields.find(x => x.id === w.fieldId);
-    const isEditing = editingFieldId !== null && master && master.id === editingFieldId;
     return /*#__PURE__*/React.createElement("div", {
       key: w.id,
       "data-work-id": w.id,
       style: {
         ...S.record,
         ...(groupMode && selected.includes(w.id) ? S.recordSelected : {}),
-        ...(!groupMode && w.reported && w.synced && w.reportSynced ? S.recordSent : {}),
+        ...(deleteMode && selected.includes(w.id) ? S.recordDeleting : {}),
+        ...(selMode === "none" && w.reported && w.synced && w.reportSynced ? S.recordSent : {}),
         ...(dragId === w.id ? {
           opacity: 0.35,
           border: "2px dashed #B9C3B4"
@@ -2208,7 +2278,14 @@ function WorkTab(p) {
         minWidth: 0,
         flex: 1
       }
-    }, groupMode ? w.reported ? /*#__PURE__*/React.createElement("span", {
+    }, deleteMode ? /*#__PURE__*/React.createElement("button", {
+      onClick: () => toggleSelect(w.id),
+      style: {
+        ...S.checkBtn,
+        ...(selected.includes(w.id) ? S.checkBtnDanger : {})
+      },
+      "aria-label": "削除する圃場として選択"
+    }, selected.includes(w.id) ? "✓" : "") : groupMode ? w.reported ? /*#__PURE__*/React.createElement("span", {
       style: {
         ...S.checkBtn,
         opacity: 0.3
@@ -2247,7 +2324,7 @@ function WorkTab(p) {
       }
     }, dispVol(w.plannedL, p.volUnitKey), /*#__PURE__*/React.createElement("span", {
       style: S.workMetaUnit
-    }, volSuffix(p.volUnitKey)))) : null))), !groupMode && /*#__PURE__*/React.createElement("div", {
+    }, volSuffix(p.volUnitKey)))) : null))), selMode === "none" && /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         flexDirection: "column",
@@ -2275,161 +2352,15 @@ function WorkTab(p) {
       "aria-label": "並べ替え"
     }, "⣿")))), /*#__PURE__*/React.createElement("div", {
       style: S.recordBody
-    }, isEditing && /*#__PURE__*/React.createElement("div", {
-      style: S.reportForm
-    }, /*#__PURE__*/React.createElement("div", {
-      style: S.smallLabel
-    }, "圃場情報の編集(マスタに反映されます)"), /*#__PURE__*/React.createElement("div", {
-      style: {
-        ...S.areaGrid,
-        marginTop: 8
-      }
-    }, /*#__PURE__*/React.createElement("input", {
-      value: ef.name,
-      placeholder: "圃場名",
-      onChange: e => setEf({
-        ...ef,
-        name: e.target.value
-      }),
-      style: S.fieldInput
-    }), /*#__PURE__*/React.createElement("input", {
-      value: ef.crop,
-      placeholder: "作物名",
-      onChange: e => setEf({
-        ...ef,
-        crop: e.target.value
-      }),
-      style: S.fieldInput
-    })), /*#__PURE__*/React.createElement("label", {
-      style: {
-        ...S.areaField,
-        marginTop: 10
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: S.smallLabel
-    }, "面積(a)"), /*#__PURE__*/React.createElement("input", {
-      type: "number",
-      inputMode: "decimal",
-      value: ef.areaA,
-      onChange: e => setEf({
-        ...ef,
-        areaA: e.target.value
-      }),
-      style: S.midInput,
-      className: "num"
-    })), /*#__PURE__*/React.createElement("div", {
-      style: {
-        ...S.btnRow,
-        marginTop: 12
-      }
-    }, /*#__PURE__*/React.createElement("button", {
-      onClick: () => setEditingFieldId(null),
-      style: S.secondaryBtn
-    }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
-      onClick: saveEditField,
-      style: S.primaryBtn
-    }, "保存"))), w.chems.length > 0 && /*#__PURE__*/React.createElement("div", {
+    }, w.chems.length > 0 && /*#__PURE__*/React.createElement("div", {
       style: S.recordTotal,
       className: "num"
-    }, "🧪 総量 ", /*#__PURE__*/React.createElement("strong", null, fmt(w.totalL, 2), " L"), "(薬剤", w.chems.length, "種):", w.chems.map(c => c.name + " " + c.ratio + "倍").join(" ／ ")), w.reported && !isEditing && reportingId !== w.id && /*#__PURE__*/React.createElement("div", {
+    }, "🧪 総量 ", /*#__PURE__*/React.createElement("strong", null, fmt(w.totalL, 2), " L"), "(薬剤", w.chems.length, "種):", w.chems.map(c => c.name + " " + c.ratio + "倍").join(" ／ ")), w.reported && /*#__PURE__*/React.createElement("div", {
       style: S.recordTotal,
       className: "num"
     }, "🚁 実散布 ", /*#__PURE__*/React.createElement("strong", null, dispVol(w.sprayedL, p.volUnitKey), " ", volSuffix(p.volUnitKey)), w.reportAreaA ? " ／ " + dispArea(w.reportAreaA, p.areaUnitKey) + " " + areaSuffix(p.areaUnitKey) : "", w.flights && w.flights.length > 1 ? " ／ " + w.flights.length + "フライト" : "", (w.reportMemo || w.memo) && /*#__PURE__*/React.createElement("div", {
       style: S.memoLine
-    }, "備考:", w.reportMemo || w.memo)), !groupMode && !isEditing && (reportingId === w.id ? /*#__PURE__*/React.createElement("div", {
-      style: S.reportForm
-    }, /*#__PURE__*/React.createElement("div", {
-      style: S.smallLabel
-    }, "散布実績の入力"), /*#__PURE__*/React.createElement("div", {
-      style: {
-        marginTop: 8
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: S.smallLabel
-    }, "フライトごとの散布量(L)"), repFlights.map((v, i) => /*#__PURE__*/React.createElement("div", {
-      key: i,
-      style: {
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        marginTop: 6
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: S.flightNum,
-      className: "num"
-    }, i + 1), /*#__PURE__*/React.createElement("input", {
-      type: "number",
-      inputMode: "decimal",
-      min: "0",
-      value: v,
-      placeholder: "散布量",
-      onChange: e => setFlight(i, e.target.value),
-      style: {
-        ...S.midInput,
-        flex: 1
-      },
-      className: "num"
-    }), /*#__PURE__*/React.createElement("span", {
-      style: S.midUnit
-    }, "L"), /*#__PURE__*/React.createElement("button", {
-      onClick: () => removeFlight(i),
-      disabled: repFlights.length <= 1,
-      style: {
-        ...S.removeBtn,
-        opacity: repFlights.length <= 1 ? 0.3 : 1
-      },
-      "aria-label": "このフライトを削除"
-    }, "✕"))), /*#__PURE__*/React.createElement("button", {
-      onClick: addFlight,
-      style: {
-        ...S.addBtn,
-        marginTop: 8,
-        padding: "11px 0"
-      }
-    }, "＋ フライトを追加(バッテリー交換など)"), /*#__PURE__*/React.createElement("div", {
-      style: S.flightSumBox,
-      className: "num"
-    }, "実散布量 合計 ", /*#__PURE__*/React.createElement("strong", {
-      style: {
-        fontSize: 22
-      }
-    }, fmt(flightSum, 2)), " L", repFlights.length > 1 ? /*#__PURE__*/React.createElement("span", {
-      style: S.tdSub
-    }, "(", repFlights.length, "フライト)") : null)), /*#__PURE__*/React.createElement("label", {
-      style: {
-        ...S.areaField,
-        marginTop: 10
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: S.smallLabel
-    }, "散布面積(a)"), /*#__PURE__*/React.createElement("input", {
-      type: "number",
-      inputMode: "decimal",
-      min: "0",
-      value: repArea,
-      onChange: e => setRepArea(e.target.value),
-      style: S.midInput,
-      className: "num"
-    })), /*#__PURE__*/React.createElement("input", {
-      value: repMemo,
-      placeholder: "備考(残液・中断理由など任意)",
-      onChange: e => setRepMemo(e.target.value),
-      style: {
-        ...S.fieldInput,
-        marginTop: 10
-      }
-    }), /*#__PURE__*/React.createElement("div", {
-      style: {
-        ...S.btnRow,
-        marginTop: 12
-      }
-    }, /*#__PURE__*/React.createElement("button", {
-      onClick: () => setReportingId(null),
-      style: S.secondaryBtn
-    }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
-      onClick: sendReport,
-      style: S.primaryBtn
-    }, "実績を保存"))) : /*#__PURE__*/React.createElement("div", {
+    }, "備考:", w.reportMemo || w.memo)), selMode === "none" && /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 10,
@@ -2442,15 +2373,15 @@ function WorkTab(p) {
         flex: 1,
         marginTop: 0
       }
-    }, w.reported ? "✎ 実績を修正" : "🚁 実績入力"), !w.reported && /*#__PURE__*/React.createElement("button", {
+    }, w.reported ? "✎ 実績を修正" : "🚁 実績入力"), /*#__PURE__*/React.createElement("button", {
       onClick: () => {
-        if (confirm("「" + f.name + "」をこの日のリストから外しますか？\n(圃場マスタには残ります)")) p.removeWork(w.id);
+        if (confirm("「" + f.name + "」をこの日のリストから外しますか？\n" + (w.reported ? "入力済みの実績も消えます。\n" : "") + "(圃場マスタには残ります)")) p.removeWork(w.id);
       },
       style: {
         ...S.smallDanger,
         alignSelf: "stretch"
       }
-    }, "外す")))));
+    }, "外す"))));
   }), groupMode && selected.length >= 2 && !gFormOpen && /*#__PURE__*/React.createElement("button", {
     onClick: openGroupForm,
     style: {
@@ -2705,16 +2636,212 @@ function WorkTab(p) {
   }))));
 }
 
+// ═══════════════════ 散布実績の入力ポップアップ ═══════════════════
+// 一覧のその場で開くので、入力欄を探して画面を動かす必要がない。
+function ReportModal(p) {
+  const sum = p.flights.reduce((s, v) => s + (parseFloat(v) || 0), 0);
+  return /*#__PURE__*/React.createElement("div", {
+    style: S.modalOverlay,
+    className: "no-print",
+    onClick: p.onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.modalBox,
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, p.isFix ? "散布実績の修正" : "散布実績の入力"), /*#__PURE__*/React.createElement("div", {
+    style: S.recordField
+  }, p.fieldName), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "フライトごとの散布量(L)"), p.flights.map((v, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      marginTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.flightNum,
+    className: "num"
+  }, i + 1), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    value: v,
+    placeholder: "散布量",
+    onChange: e => p.setFlight(i, e.target.value),
+    style: {
+      ...S.midInput,
+      flex: 1
+    },
+    className: "num",
+    autoFocus: i === 0
+  }), /*#__PURE__*/React.createElement("span", {
+    style: S.midUnit
+  }, "L"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.removeFlight(i),
+    disabled: p.flights.length <= 1,
+    style: {
+      ...S.removeBtn,
+      opacity: p.flights.length <= 1 ? 0.3 : 1
+    },
+    "aria-label": "このフライトを削除"
+  }, "✕"))), /*#__PURE__*/React.createElement("button", {
+    onClick: p.addFlight,
+    style: {
+      ...S.addBtn,
+      marginTop: 8,
+      padding: "11px 0"
+    }
+  }, "＋ フライトを追加(バッテリー交換など)"), /*#__PURE__*/React.createElement("div", {
+    style: S.flightSumBox,
+    className: "num"
+  }, "実散布量 合計 ", /*#__PURE__*/React.createElement("strong", {
+    style: {
+      fontSize: 22
+    }
+  }, fmt(sum, 2)), " L", p.flights.length > 1 ? /*#__PURE__*/React.createElement("span", {
+    style: S.tdSub
+  }, "(", p.flights.length, "フライト)") : null)), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "散布面積は圃場に登録された面積(", p.areaLabel, ")がそのまま記録されます。面積を直すときは一覧の✎から編集してください。"), /*#__PURE__*/React.createElement("input", {
+    value: p.memo,
+    placeholder: "備考(残液・中断理由など任意)",
+    onChange: e => p.setMemo(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 10
+    }
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: p.onCancel,
+    style: S.secondaryBtn
+  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
+    onClick: p.onSave,
+    style: S.primaryBtn
+  }, "実績を保存"))));
+}
+
+// ═══════════════════ 圃場の編集ポップアップ ═══════════════════
+// 一覧のその場で開くので、編集のたびに画面上部まで戻る必要がない。
+// 保存すると圃場マスタが更新され、作業タブの表示にも同時に反映される。
+function FieldEditModal(p) {
+  const set = (k, v) => p.setMf({
+    ...p.mf,
+    [k]: v
+  });
+  const crops = p.crops || [];
+  const canSave = p.mf.name.trim().length > 0;
+  return /*#__PURE__*/React.createElement("div", {
+    style: S.modalOverlay,
+    className: "no-print",
+    onClick: p.onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.modalBox,
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "圃場を編集"), /*#__PURE__*/React.createElement("datalist", {
+    id: "croplist-edit"
+  }, crops.map(c => /*#__PURE__*/React.createElement("option", {
+    key: c,
+    value: c
+  }))), /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "圃場名 ※必須"), /*#__PURE__*/React.createElement("input", {
+    value: p.mf.name,
+    placeholder: "圃場名",
+    onChange: e => set("name", e.target.value),
+    style: S.fieldInput,
+    autoFocus: true
+  })), /*#__PURE__*/React.createElement("label", {
+    style: {
+      ...S.areaField,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "作物名"), /*#__PURE__*/React.createElement("input", {
+    value: p.mf.crop,
+    placeholder: "作物名(入力or選択)",
+    list: "croplist-edit",
+    onChange: e => set("crop", e.target.value),
+    style: S.fieldInput
+  })), crops.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 6,
+      marginTop: 8
+    }
+  }, crops.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c,
+    onClick: () => set("crop", c),
+    style: {
+      ...S.cropPickChip,
+      ...(p.mf.crop === c ? S.cropPickChipOn : {})
+    }
+  }, c))), /*#__PURE__*/React.createElement("label", {
+    style: {
+      ...S.areaField,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "面積(a)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    value: p.mf.areaA,
+    onChange: e => set("areaA", e.target.value),
+    style: S.midInput,
+    className: "num"
+  })), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "保存すると、作業タブに入っているこの圃場の名前・面積も同時に更新されます。"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 14
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: p.onCancel,
+    style: S.secondaryBtn
+  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
+    onClick: p.onSave,
+    disabled: !canSave,
+    style: {
+      ...S.primaryBtn,
+      opacity: canSave ? 1 : 0.4
+    }
+  }, "保存"))));
+}
+
 // ═══════════════════ 薬剤タブ ═══════════════════
 // ═══════════════════ プリセットタブ(圃場・コース・薬剤) ═══════════════════
 function PresetTab(p) {
   const [sub, setSub] = useState("field"); // field | route | chem
-  // 圃場フォーム
+  // 圃場フォーム(新規登録用。編集は下のポップアップで行う)
   const [fName, setFName] = useState("");
   const [fCrop, setFCrop] = useState("");
   const [fArea, setFArea] = useState("");
-  const [editId, setEditId] = useState(null);
   const [fq, setFq] = useState("");
+  // 圃場編集ポップアップ(編集対象のID。nullなら閉じている)
+  const [editId, setEditId] = useState(null);
+  const [mf, setMf] = useState({
+    name: "",
+    crop: "",
+    areaA: ""
+  });
   // コース作成・編集
   const [routeBuildMode, setRouteBuildMode] = useState(false);
   const [routeName, setRouteName] = useState("");
@@ -2731,34 +2858,45 @@ function PresetTab(p) {
   const [chemTankL, setChemTankL] = useState("20"); // 必要な水量を試算する際の総量(L)
 
   const fieldList = fq.trim() ? p.fields.filter(f => f.name.includes(fq.trim()) || (f.crop || "").includes(fq.trim())) : p.fields;
+  // 編集対象の圃場(マスタから消えていたらポップアップは閉じた扱いにする)
+  const editField = editId != null ? p.fields.find(f => f.id === editId) : null;
   const chemList = cq.trim() ? p.chemMaster.filter(c => c.name.includes(cq.trim())) : p.chemMaster;
+  // 新規登録(このカードは登録専用。編集はポップアップで行う)
   const submitField = () => {
     if (!fName.trim()) return;
     const cropName = fCrop.trim();
     if (cropName) p.addCrop(cropName); // 入力された作物をマスタに自動登録
-    if (editId) {
-      p.upsertField({
-        name: fName.trim(),
-        crop: cropName,
-        areaA: parseFloat(fArea) || ""
-      }, editId);
-    } else {
-      p.addFieldOnly({
-        name: fName.trim(),
-        crop: cropName,
-        areaA: parseFloat(fArea) || ""
-      });
-    }
+    p.addFieldOnly({
+      name: fName.trim(),
+      crop: cropName,
+      areaA: parseFloat(fArea) || ""
+    });
     setFName("");
     setFCrop("");
     setFArea("");
-    setEditId(null);
   };
+  // 編集ポップアップを開く(一覧のその場で開くので、画面上部まで戻る必要がない)
   const startEdit = f => {
     setEditId(f.id);
-    setFName(f.name);
-    setFCrop(f.crop || "");
-    setFArea(String(f.areaA || ""));
+    setMf({
+      name: f.name,
+      crop: f.crop || "",
+      areaA: String(f.areaA || "")
+    });
+  };
+  const closeEdit = () => setEditId(null);
+  // 保存すると圃場マスタが更新され、作業タブに入っている同じ圃場の
+  // 名前・面積の表示も同時に切り替わる(resolveWorkがマスタを参照しているため)
+  const saveEdit = () => {
+    if (!mf.name.trim()) return;
+    const cropName = mf.crop.trim();
+    if (cropName) p.addCrop(cropName);
+    p.upsertField({
+      name: mf.name.trim(),
+      crop: cropName,
+      areaA: parseFloat(mf.areaA) || ""
+    }, editId);
+    setEditId(null);
   };
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.subTabWrap
@@ -2769,11 +2907,18 @@ function PresetTab(p) {
       ...S.subTab,
       ...(sub === t[0] ? S.subTabOn : {})
     }
-  }, t[1]))), sub === "field" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+  }, t[1]))), sub === "field" && /*#__PURE__*/React.createElement(React.Fragment, null, editField && /*#__PURE__*/React.createElement(FieldEditModal, {
+    field: editField,
+    mf: mf,
+    setMf: setMf,
+    crops: p.crops,
+    onCancel: closeEdit,
+    onSave: saveEdit
+  }), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, editId ? "圃場を編集" : "圃場を登録"), /*#__PURE__*/React.createElement("datalist", {
+  }, "圃場を登録"), /*#__PURE__*/React.createElement("datalist", {
     id: "croplist"
   }, p.crops.map(c => /*#__PURE__*/React.createElement("option", {
     key: c,
@@ -2819,28 +2964,16 @@ function PresetTab(p) {
       ...S.cropPickChip,
       ...(fCrop === c ? S.cropPickChipOn : {})
     }
-  }, c))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.btnRow,
-      marginTop: 12
-    }
-  }, editId && /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setEditId(null);
-      setFName("");
-      setFCrop("");
-      setFArea("");
-    },
-    style: S.secondaryBtn
-  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
+  }, c))), /*#__PURE__*/React.createElement("button", {
     onClick: submitField,
     disabled: !fName.trim(),
     style: {
       ...S.primaryBtn,
-      gridColumn: editId ? "auto" : "1 / -1",
+      width: "100%",
+      marginTop: 12,
       opacity: fName.trim() ? 1 : 0.4
     }
-  }, editId ? "更新" : "＋ 圃場を登録"))), /*#__PURE__*/React.createElement("section", {
+  }, "＋ 圃場を登録")), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -4302,13 +4435,13 @@ function SettingsTab(p) {
     desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。「⭐プリセットに保存」で薬液の組み合わせを登録でき、次回から作業タブの「薬剤を圃場に適用」で呼び出せます。「↩ この薬液を控える」で前回薬液として記憶します。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます(この回数はアプリに記録された散布実績を通算した簡易的な目安で、作期での自動リセットは行われません)。"
   }, {
     title: "🚁 作業・記録タブ",
-    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場はプリセットタブで登録したマスタを「圃場を検索」で探して「＋この日へ」で追加します。「圃場コースから追加」でよく回るルートをまとめて一括投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「薬剤を圃場に適用」でプリセットや前回薬液を未実施の圃場に適用でき、各圃場の予定薬液量で薬量を自動計算します。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンで散布量・フライト数を空欄から記録します。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」でいつでも入力し直せます。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
+    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場はプリセットタブで登録したマスタを「圃場を検索」で探して「＋この日へ」で追加します。「圃場コースから追加」でよく回るルートをまとめて一括投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「薬剤を圃場に適用」でプリセットや前回薬液を未実施の圃場に適用でき、各圃場の予定薬液量で薬量を自動計算します。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 地図タブ",
     desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
   }, {
     title: "📋 プリセットタブ",
-    desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。登録した圃場は作業タブで「検索→＋この日へ」で追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。🧪薬剤プリセットは調合タブで「⭐プリセットに保存」するとここに蓄積されます。"
+    desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブで「検索→＋この日へ」で追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。🧪薬剤プリセットは調合タブで「⭐プリセットに保存」するとここに蓄積されます。"
   }, {
     title: "⚙ 設定タブ",
     desc: "面積(a/ha/反/町)と薬量(L/mL/kg/g)の表示単位を切り替えられます。データは常にa・Lで保存され、表示だけ変換されます。作物マスタの管理もここで行います。送信先URL(GASのウェブアプリURL)は一度設定すれば保存されます。GASを再デプロイするときは「デプロイを管理→編集→新しいバージョン」を使うとURLが変わりません。チームコードを使って複数端末間でデータを共有できます。このガイドとバージョン履歴もここで確認できます。"
@@ -4341,7 +4474,7 @@ function SettingsTab(p) {
     ver: "v8.20",
     date: "2026-07",
     isNew: true,
-    notes: ["🚁 実績入力しても作業タブから消えず、そのまま一覧に残って編集できるように変更", "実績値(散布量・面積・備考)をその場に表示。「✎ 実績を修正」を押すと入力済みの値を復元して編集可能に", "送信が完了した圃場だけ色が変わり「✓送信済」と表示(未送信は「実績入力済(未送信)」)", "実績入力(散布量)の初期値を空欄に変更(誤った数値の入力保存を防止)", "作業タブの圃場名・作物名・面積の編集ボタンが実績入力済みの圃場でも使えるように", "予定薬液量を圃場マスタから廃止。「本日の投下量」入力で計算した当日限りの値のみを使用し、日をまたいだ古い値の誤使用を防止", "投下量が未入力の圃場があるとき、作業タブに常時注意バナーを表示", "プリセットの圃場マスタ・作業タブの✎編集から「予定薬液量」欄を削除(面積のみ)", "作業タブ下部の「記録」は一覧表示をやめ、CSV出力・印刷のみに整理", "🔒 地図ラベル(圃場名・作物名)の表示方法を修正し、記号を含む名前でも安全に表示されるように", "APIキーの説明文を修正(Google読み込み時に送信される点を明記)", "APIキー入力欄でブラウザの自動入力候補が出ないように変更", "農薬使用回数警告に「簡易的な目安・作期リセットなし」の注記を追加", "「この端末のデータをすべて消去」に誤タップ防止の二段階確認(「消去」と入力)を追加", "作業リストのドラッグ並べ替えで、つかんでいる圃場名がその場に浮かんで見えるように改善", "並べ替えは右の⣿マークのみで行うように変更し、左の番号に触れて誤って動いてしまわないように修正", "設定タブの各項目をバージョン履歴と同じように開閉式にし、タップするまで折りたたまれているように変更"]
+    notes: ["🚁 実績入力しても作業タブから消えず、そのまま一覧に残って編集できるように変更", "実績値(散布量・面積・備考)をその場に表示。「✎ 実績を修正」を押すと入力済みの値を復元して編集可能に", "送信が完了した圃場だけ色が変わり「✓送信済」と表示(未送信は「実績入力済(未送信)」)", "実績入力(散布量)の初期値を空欄に変更(誤った数値の入力保存を防止)", "作業タブの圃場名・作物名・面積の編集ボタンが実績入力済みの圃場でも使えるように", "予定薬液量を圃場マスタから廃止。「本日の投下量」入力で計算した当日限りの値のみを使用し、日をまたいだ古い値の誤使用を防止", "投下量が未入力の圃場があるとき、作業タブに常時注意バナーを表示", "プリセットの圃場マスタ・作業タブの✎編集から「予定薬液量」欄を削除(面積のみ)", "作業タブ下部の「記録」は一覧表示をやめ、CSV出力・印刷のみに整理", "🔒 地図ラベル(圃場名・作物名)の表示方法を修正し、記号を含む名前でも安全に表示されるように", "APIキーの説明文を修正(Google読み込み時に送信される点を明記)", "APIキー入力欄でブラウザの自動入力候補が出ないように変更", "農薬使用回数警告に「簡易的な目安・作期リセットなし」の注記を追加", "「この端末のデータをすべて消去」に誤タップ防止の二段階確認(「消去」と入力)を追加", "作業リストのドラッグ並べ替えで、つかんでいる圃場名がその場に浮かんで見えるように改善", "並べ替えは右の⣿マークのみで行うように変更し、左の番号に触れて誤って動いてしまわないように修正", "設定タブの各項目をバージョン履歴と同じように開閉式にし、タップするまで折りたたまれているように変更", "🌾 プリセットの圃場「編集」をポップアップ化。画面上部まで戻らずその場で編集できるように変更", "圃場名・面積の変更が、作業タブに入っている同じ圃場にも同時に反映されるように", "🐞 コース一括投入などで作業・圃場のIDが重複し、別の圃場を書き換えてしまう不具合を修正(25圃場で約26%発生)", "使われていない処理(旧並べ替え・旧圃場追加・未使用フラグ)を整理", "🚁 作業タブの実績入力・実績修正をポップアップ化(その場で開くので画面を動かさずに入力できる)", "作業タブの✎圃場編集もポップアップ化", "🗑 作業リストに「選択して削除」を追加。チェックした圃場だけ外す・この日をすべて外すが可能に", "まとめ散布と選択削除は同時に動かないようにし、モードを切り替えると選択がリセットされるように", "🗺 地図タブで下のタブバーが地図に隠れる不具合を修正", "実績入力を散布量のみに簡素化。散布面積は圃場の登録面積が自動で記録されるように(面積の修正は✎から)", "まとめ散布にあった、入力しても記録に反映されない面積欄を削除"]
   }, {
     ver: "v8.19",
     date: "2026-07",
@@ -4515,12 +4648,33 @@ const S = {
     flexDirection: "column",
     gap: 12
   },
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(28,43,33,0.5)",
+    zIndex: 1100,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16
+  },
+  modalBox: {
+    background: "#fff",
+    borderRadius: 14,
+    padding: "16px 16px 18px",
+    border: "1.5px solid #D8E0D2",
+    boxShadow: "0 8px 28px rgba(0,0,0,0.25)",
+    width: "100%",
+    maxWidth: 440,
+    maxHeight: "88vh",
+    overflowY: "auto"
+  },
   toast: {
     position: "fixed",
     top: 14,
     left: "50%",
     transform: "translateX(-50%)",
-    zIndex: 50,
+    zIndex: 1000,
     background: "#1C2B21",
     color: "#fff",
     padding: "12px 20px",
@@ -4890,6 +5044,17 @@ const S = {
     cursor: "pointer",
     flexShrink: 0
   },
+  smallDangerOn: {
+    padding: "10px 14px",
+    fontSize: 14.5,
+    fontWeight: 700,
+    color: "#fff",
+    background: "#C74E36",
+    border: "1.5px solid #C74E36",
+    borderRadius: 8,
+    cursor: "pointer",
+    flexShrink: 0
+  },
   listItem: {
     display: "flex",
     alignItems: "center",
@@ -5001,7 +5166,9 @@ const S = {
     borderTop: "1.5px solid #D8E0D2",
     paddingBottom: "env(safe-area-inset-bottom)",
     boxShadow: "0 -2px 12px rgba(28,43,33,0.07)",
-    zIndex: 40
+    // 地図(Leafletは内部でz-index 400〜800を使う)より必ず上に出す。重なり順は
+    // 地図=0 < タブバー=850 < ドラッグ中の札=900 < トースト=1000 < ポップアップ=1100
+    zIndex: 850
   },
   tabBtn: {
     flex: 1,
@@ -5181,6 +5348,22 @@ const S = {
   },
   checkBtnOn: {
     background: "#B78A1F"
+  },
+  checkBtnDanger: {
+    background: "#C74E36",
+    borderColor: "#C74E36"
+  },
+  recordDeleting: {
+    border: "2.5px solid #C74E36",
+    background: "#FDF3F1"
+  },
+  delBar: {
+    marginTop: 10,
+    marginBottom: 12,
+    padding: "10px 12px",
+    background: "#FBF0EE",
+    border: "1.5px solid #E8C4BB",
+    borderRadius: 10
   },
   anbunBox: {
     marginTop: 10,
@@ -5489,7 +5672,12 @@ const S = {
     borderRadius: 12,
     overflow: "hidden",
     border: "1.5px solid #D8E0D2",
-    background: "#dfe6da"
+    background: "#dfe6da",
+    // Leafletは内部でz-index 400〜800を使うため、そのままだと下のタブバーを覆ってしまう。
+    // ここで独立した重なり階層(スタッキングコンテキスト)を作り、地図の中に閉じ込める。
+    position: "relative",
+    zIndex: 0,
+    isolation: "isolate"
   },
   drawInfo: {
     marginTop: 8,
