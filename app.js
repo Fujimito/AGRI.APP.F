@@ -809,6 +809,36 @@ function App() {
     });
     setChemMasterSave(next);
   };
+  // 薬剤を1件だけ手動でマスタに登録する(プリセットタブの登録フォームから)
+  const addChemMaster = data => {
+    const name = (data.name || "").trim();
+    if (!name) return false;
+    const exists = chemMaster.some(c => c.name === name);
+    upsertChemMaster([{
+      name,
+      form: data.form,
+      use: data.use,
+      ratio: data.ratio
+    }]);
+    flash(exists ? "「" + name + "」の登録内容を更新しました" : "薬剤「" + name + "」を登録しました");
+    return true;
+  };
+  // 登録済み薬剤を調合タブの薬剤欄に呼び出す(倍率は登録値が入り、その場で変更できる)
+  const applyChemMaster = (id, m) => setChems(chems.map(c => c.id === id ? {
+    ...c,
+    name: m.name,
+    form: m.form,
+    use: m.use || c.use,
+    ratio: String(m.ratio || "")
+  } : c));
+  // 登録済み薬剤を新しい行として追加する
+  const addChemFromMaster = m => setChems([...chems, {
+    ...newChem(),
+    name: m.name,
+    form: m.form,
+    use: m.use || "other",
+    ratio: String(m.ratio || "")
+  }]);
   const saveRecord = () => {
     const chemsData = calc.filter(c => c.valid).map(c => ({
       name: c.name || "(無名)",
@@ -1276,6 +1306,8 @@ function App() {
     updateChemName,
     addChem,
     removeChem,
+    applyChemMaster,
+    addChemFromMaster,
     effTotalL,
     totalMl,
     waterMl,
@@ -1336,6 +1368,7 @@ function App() {
     works,
     workDate,
     chemMaster,
+    addChemMaster,
     deleteChemMaster,
     editChemMaster,
     presets,
@@ -1405,7 +1438,17 @@ function App() {
 
 // ═══════════════════ 調合計算タブ ═══════════════════
 function CalcTab(p) {
-  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+  // 登録薬剤の呼び出し先。薬剤行のID、または新しい行として追加する場合は "new"
+  const [pickFor, setPickFor] = useState(null);
+  const onPick = m => {
+    if (pickFor === "new") p.addChemFromMaster(m);else p.applyChemMaster(pickFor, m);
+    setPickFor(null);
+  };
+  return /*#__PURE__*/React.createElement(React.Fragment, null, pickFor !== null && /*#__PURE__*/React.createElement(ChemPickModal, {
+    chemMaster: p.chemMaster,
+    onPick: onPick,
+    onCancel: () => setPickFor(null)
+  }), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -1518,6 +1561,11 @@ function CalcTab(p) {
     onChange: e => p.updateChemName(c.id, e.target.value),
     style: S.nameInput
   }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPickFor(c.id),
+    style: S.chemPickBtn,
+    title: "登録済みの薬剤から選ぶ",
+    "aria-label": "登録薬剤から選ぶ"
+  }, "📋"), /*#__PURE__*/React.createElement("button", {
     onClick: () => p.removeChem(c.id),
     style: S.removeBtn,
     disabled: p.chems.length <= 1,
@@ -1566,10 +1614,24 @@ function CalcTab(p) {
     style: {
       color: "#aab5ac"
     }
-  }, "—"))))), /*#__PURE__*/React.createElement("button", {
+  }, "—"))))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
     onClick: p.addChem,
-    style: S.addBtn
-  }, "＋ 薬剤を追加")), /*#__PURE__*/React.createElement("section", {
+    style: {
+      ...S.addBtn,
+      marginTop: 0
+    }
+  }, "＋ 薬剤を追加"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setPickFor("new"),
+    style: {
+      ...S.addBtn,
+      marginTop: 0
+    }
+  }, "📋 登録薬剤から追加"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -1753,55 +1815,14 @@ function WorkTab(p) {
   const pendingWorks = p.works.filter(w => !w.synced || w.reported && !w.reportSynced);
   const pending = pendingWorks.length;
 
-  // ドラッグ&ドロップ並べ替え(タッチ・マウス両対応)
-  const onHandleDown = (e, id) => {
-    e.preventDefault();
-    setDragId(id);
-    dragIdRef.current = id;
-    setDragOverId(id);
-    const startPt = e.touches ? e.touches[0] : e;
-    setDragPos({
-      x: startPt.clientX,
-      y: startPt.clientY
-    });
-    const move = ev => {
-      const pt = ev.touches ? ev.touches[0] : ev;
-      setDragPos({
-        x: pt.clientX,
-        y: pt.clientY
-      });
-      const el = document.elementFromPoint(pt.clientX, pt.clientY);
-      const row = el && el.closest ? el.closest("[data-work-id]") : null;
-      if (row) {
-        const overId = Number(row.getAttribute("data-work-id"));
-        if (overId) setDragOverId(overId);
-      }
-    };
-    const up = ev => {
-      const pt = ev.changedTouches ? ev.changedTouches[0] : ev;
-      const el = document.elementFromPoint(pt.clientX, pt.clientY);
-      const row = el && el.closest ? el.closest("[data-work-id]") : null;
-      const fromId = dragIdRef.current;
-      if (row) {
-        const toId = Number(row.getAttribute("data-work-id"));
-        if (toId && fromId && toId !== fromId) p.reorderWork(fromId, toId);
-      }
-      setDragId(null);
-      dragIdRef.current = null;
-      setDragOverId(null);
-      setDragPos(null);
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-      window.removeEventListener("touchmove", move);
-      window.removeEventListener("touchend", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
-    window.addEventListener("touchmove", move, {
-      passive: false
-    });
-    window.addEventListener("touchend", up);
-  };
+  // ドラッグ&ドロップ並べ替え(タッチ・マウス両対応)。共通処理を利用
+  const onHandleDown = (e, id) => startDragReorder(e, id, "data-work-id", {
+    ref: dragIdRef,
+    setDragId,
+    setDragOverId,
+    setDragPos,
+    onDrop: p.reorderWork
+  });
   const sumArea = pendingDayList.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
   const sumLiters = pendingDayList.reduce((s, w) => s + (w.totalL > 0 ? w.totalL : parseFloat(w.plannedL) || 0), 0);
   const openReport = w => {
@@ -1918,28 +1939,7 @@ function WorkTab(p) {
     setMemo: setRepMemo,
     onCancel: () => setReportingId(null),
     onSave: sendReport
-  }), draggingWork && dragPos && /*#__PURE__*/React.createElement("div", {
-    className: "no-print",
-    style: {
-      position: "fixed",
-      left: dragPos.x,
-      top: dragPos.y - 46,
-      transform: "translateX(-50%)",
-      zIndex: 900,
-      pointerEvents: "none",
-      background: "#1C2B21",
-      color: "#fff",
-      fontWeight: 800,
-      fontSize: 14.5,
-      padding: "9px 16px",
-      borderRadius: 20,
-      boxShadow: "0 6px 18px rgba(0,0,0,0.3)",
-      whiteSpace: "nowrap",
-      maxWidth: "80vw",
-      overflow: "hidden",
-      textOverflow: "ellipsis"
-    }
-  }, "⣿ ", p.resolveWork(draggingWork).name), /*#__PURE__*/React.createElement("section", {
+  }), draggingWork && dragPos && dragChip(dragPos, p.resolveWork(draggingWork).name), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -2636,6 +2636,140 @@ function WorkTab(p) {
   }))));
 }
 
+// ═══════════════════ 長押しドラッグで並べ替える共通処理 ═══════════════════
+// attr で指定した data属性を持つ行を探し、指を離した位置の行へ移動する。
+// 作業タブの圃場並べ替えと、プリセットタブのコース順の並べ替えで共用している。
+function startDragReorder(e, id, attr, o) {
+  e.preventDefault();
+  o.setDragId(id);
+  o.ref.current = id;
+  o.setDragOverId(id);
+  const p0 = e.touches ? e.touches[0] : e;
+  o.setDragPos({
+    x: p0.clientX,
+    y: p0.clientY
+  });
+  const rowAt = (x, y) => {
+    const el = document.elementFromPoint(x, y);
+    return el && el.closest ? el.closest("[" + attr + "]") : null;
+  };
+  const move = ev => {
+    const pt = ev.touches ? ev.touches[0] : ev;
+    o.setDragPos({
+      x: pt.clientX,
+      y: pt.clientY
+    });
+    const row = rowAt(pt.clientX, pt.clientY);
+    if (row) {
+      const overId = Number(row.getAttribute(attr));
+      if (overId) o.setDragOverId(overId);
+    }
+  };
+  const up = ev => {
+    const pt = ev.changedTouches ? ev.changedTouches[0] : ev;
+    const row = rowAt(pt.clientX, pt.clientY);
+    const fromId = o.ref.current;
+    if (row) {
+      const toId = Number(row.getAttribute(attr));
+      if (toId && fromId && toId !== fromId) o.onDrop(fromId, toId);
+    }
+    o.setDragId(null);
+    o.ref.current = null;
+    o.setDragOverId(null);
+    o.setDragPos(null);
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+    window.removeEventListener("touchmove", move);
+    window.removeEventListener("touchend", up);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+  window.addEventListener("touchmove", move, {
+    passive: false
+  });
+  window.addEventListener("touchend", up);
+}
+
+// ドラッグ中に指の位置へ浮かぶ名札
+function dragChip(pos, label) {
+  return /*#__PURE__*/React.createElement("div", {
+    className: "no-print",
+    style: {
+      position: "fixed",
+      left: pos.x,
+      top: pos.y - 46,
+      transform: "translateX(-50%)",
+      zIndex: 900,
+      pointerEvents: "none",
+      background: "#1C2B21",
+      color: "#fff",
+      fontWeight: 800,
+      fontSize: 14.5,
+      padding: "9px 16px",
+      borderRadius: 20,
+      boxShadow: "0 6px 18px rgba(0,0,0,0.3)",
+      whiteSpace: "nowrap",
+      maxWidth: "80vw",
+      overflow: "hidden",
+      textOverflow: "ellipsis"
+    }
+  }, "⣿ ", label);
+}
+
+// ═══════════════════ 登録薬剤の呼び出しポップアップ ═══════════════════
+// プリセットタブで登録した薬剤(名前・種類・剤型・希釈倍率)を一覧から選んで
+// 調合タブの薬剤欄にそのまま入れる。倍率は入った後でも書き換えられる。
+function ChemPickModal(p) {
+  const [q, setQ] = useState("");
+  const list = q.trim() ? p.chemMaster.filter(c => c.name.includes(q.trim()) || useLabel(c.use).includes(q.trim())) : p.chemMaster;
+  return /*#__PURE__*/React.createElement("div", {
+    style: S.modalOverlay,
+    className: "no-print",
+    onClick: p.onCancel
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.modalBox,
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "登録済みの薬剤から選ぶ"), p.chemMaster.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "まだ薬剤が登録されていません。", /*#__PURE__*/React.createElement("br", null), "プリセットタブの🧪薬剤で登録してください。") : /*#__PURE__*/React.createElement(React.Fragment, null, p.chemMaster.length > 4 && /*#__PURE__*/React.createElement("input", {
+    value: q,
+    placeholder: "🔍 薬剤名・種類で検索",
+    onChange: e => setQ(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginBottom: 10
+    }
+  }), list.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "該当する薬剤がありません。"), list.map(c => /*#__PURE__*/React.createElement("button", {
+    key: c.name,
+    onClick: () => p.onPick(c),
+    style: S.chemPickRow
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      textAlign: "left"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.listTitle
+  }, c.name), /*#__PURE__*/React.createElement("div", {
+    style: S.listSub
+  }, useLabel(c.use), "・", formLabel(c.form))), /*#__PURE__*/React.createElement("span", {
+    style: S.chemPickRatio,
+    className: "num"
+  }, c.ratio ? fmt(c.ratio, 0) + "倍" : "倍率未設定")))), /*#__PURE__*/React.createElement("button", {
+    onClick: p.onCancel,
+    style: {
+      ...S.secondaryBtn,
+      width: "100%",
+      marginTop: 14
+    }
+  }, "閉じる")));
+}
+
 // ═══════════════════ 散布実績の入力ポップアップ ═══════════════════
 // 一覧のその場で開くので、入力欄を探して画面を動かす必要がない。
 function ReportModal(p) {
@@ -2847,6 +2981,37 @@ function PresetTab(p) {
   const [routeName, setRouteName] = useState("");
   const [routePicks, setRoutePicks] = useState([]);
   const [routeEditId, setRouteEditId] = useState(null);
+  const [routeQ, setRouteQ] = useState(""); // 追加できる圃場の検索
+  // コース順のドラッグ並べ替え
+  const [rDragId, setRDragId] = useState(null);
+  const [rDragOverId, setRDragOverId] = useState(null);
+  const [rDragPos, setRDragPos] = useState(null);
+  const rDragRef = useRef(null);
+  const reorderPick = (fromId, toId) => {
+    const from = routePicks.indexOf(fromId);
+    const to = routePicks.indexOf(toId);
+    if (from < 0 || to < 0 || from === to) return;
+    const next = [...routePicks];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setRoutePicks(next);
+  };
+  const onPickHandleDown = (e, id) => startDragReorder(e, id, "data-pick-id", {
+    ref: rDragRef,
+    setDragId: setRDragId,
+    setDragOverId: setRDragOverId,
+    setDragPos: setRDragPos,
+    onDrop: reorderPick
+  });
+  const addPick = fid => setRoutePicks(routePicks.includes(fid) ? routePicks : [...routePicks, fid]);
+  const removePick = fid => setRoutePicks(routePicks.filter(x => x !== fid));
+  const closeRouteBuild = () => {
+    setRouteBuildMode(false);
+    setRouteEditId(null);
+    setRoutePicks([]);
+    setRouteName("");
+    setRouteQ("");
+  };
   // 薬剤編集
   const [editChem, setEditChem] = useState(null);
   const [ec, setEc] = useState({
@@ -2856,6 +3021,23 @@ function PresetTab(p) {
   });
   const [cq, setCq] = useState("");
   const [chemTankL, setChemTankL] = useState("20"); // 必要な水量を試算する際の総量(L)
+  // 薬剤の新規登録フォーム
+  const [nName, setNName] = useState("");
+  const [nUse, setNUse] = useState("fungicide");
+  const [nForm, setNForm] = useState("sc");
+  const [nRatio, setNRatio] = useState("");
+  const submitChem = () => {
+    if (!nName.trim()) return;
+    const ok = p.addChemMaster({
+      name: nName.trim(),
+      use: nUse,
+      form: nForm,
+      ratio: nRatio
+    });
+    if (ok === false) return;
+    setNName("");
+    setNRatio("");
+  };
 
   const fieldList = fq.trim() ? p.fields.filter(f => f.name.includes(fq.trim()) || (f.crop || "").includes(fq.trim())) : p.fields;
   // 編集対象の圃場(マスタから消えていたらポップアップは閉じた扱いにする)
@@ -3023,68 +3205,154 @@ function PresetTab(p) {
   }, "圃場コース(", p.routes.length, "件)"), !routeBuildMode && /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setRouteBuildMode(true);
+      // 編集対象を必ず解除する。残っていると新規作成が既存コースの上書きになってしまう
+      setRouteEditId(null);
       setRoutePicks([]);
       setRouteName("");
+      setRouteQ("");
     },
     style: S.smallPrimary
   }, "＋ 新規作成")), routeBuildMode ? /*#__PURE__*/React.createElement("div", {
     style: S.settingsBox
-  }, /*#__PURE__*/React.createElement("div", {
+  }, rDragPos && rDragId != null && dragChip(rDragPos, (p.fields.find(x => x.id === rDragId) || {
+    name: ""
+  }).name), /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
-  }, "コースに入れる圃場を回る順にタップ"), /*#__PURE__*/React.createElement("input", {
+  }, "コース名"), /*#__PURE__*/React.createElement("input", {
     value: routeName,
     placeholder: "コース名(例:月曜ルート)",
     onChange: e => setRouteName(e.target.value),
     style: {
       ...S.fieldInput,
-      marginTop: 8
+      marginTop: 6
     }
   }), /*#__PURE__*/React.createElement("div", {
     style: {
-      marginTop: 10,
-      maxHeight: 300,
-      overflowY: "auto"
+      ...S.smallLabel,
+      marginTop: 14
     }
-  }, p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
-    style: S.memoLine
-  }, "先に「🌾 圃場」タブで圃場を登録してください。"), p.fields.map(f => {
-    const pickIdx = routePicks.indexOf(f.id);
+  }, "コースの順番(", routePicks.length, "件)"), routePicks.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: {
+      ...S.memoLine,
+      marginTop: 6
+    }
+  }, "下の「追加できる圃場」から回る順にタップして入れてください。") : /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 6
+    }
+  }, routePicks.map((fid, i) => {
+    const f = p.fields.find(x => x.id === fid);
     return /*#__PURE__*/React.createElement("div", {
-      key: f.id,
-      onClick: () => setRoutePicks(pickIdx >= 0 ? routePicks.filter(x => x !== f.id) : [...routePicks, f.id]),
+      key: fid,
+      "data-pick-id": fid,
       style: {
-        ...S.pickRow,
-        ...(pickIdx >= 0 ? S.pickRowOn : {})
+        ...S.routeRow,
+        ...(rDragId === fid ? {
+          opacity: 0.35,
+          border: "2px dashed #B9C3B4"
+        } : {}),
+        ...(rDragOverId === fid && rDragId !== fid ? {
+          outline: "2.5px solid #2E7D4F",
+          outlineOffset: -2
+        } : {})
       }
     }, /*#__PURE__*/React.createElement("span", {
+      style: S.routeNum,
+      className: "num"
+    }, i + 1), /*#__PURE__*/React.createElement("span", {
       style: {
-        ...S.pickNum,
-        ...(pickIdx >= 0 ? S.pickNumOn : {})
+        flex: 1,
+        minWidth: 0,
+        fontWeight: 700
       }
-    }, pickIdx >= 0 ? pickIdx + 1 : "＋"), /*#__PURE__*/React.createElement("span", {
+    }, f ? f.name + (f.crop ? "(" + f.crop + ")" : "") : "(削除済の圃場)"), f && f.areaA ? /*#__PURE__*/React.createElement("span", {
+      style: S.tdSub,
+      className: "num"
+    }, fmt(parseFloat(f.areaA), 2), "a") : null, /*#__PURE__*/React.createElement("span", {
+      onPointerDown: e => onPickHandleDown(e, fid),
+      onTouchStart: e => onPickHandleDown(e, fid),
+      style: S.dragHandle,
+      title: "ドラッグで並べ替え",
+      "aria-label": "並べ替え"
+    }, "\u28ff"), /*#__PURE__*/React.createElement("button", {
+      onClick: () => removePick(fid),
       style: {
-        flex: 1
+        ...S.smallDanger,
+        padding: "8px 12px"
+      },
+      "aria-label": "コースから外す"
+    }, "外す"));
+  })), routePicks.length > 1 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      ...S.note,
+      marginTop: 8
+    }
+  }, "右の\u28ffマークを長押ししてドラッグすると、回る順番を入れ替えられます。"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.smallLabel,
+      marginTop: 16
+    }
+  }, "追加できる圃場"), p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      ...S.memoLine,
+      marginTop: 6
+    }
+  }, "先に「\U0001F33E 圃場」タブで圃場を登録してください。"), (() => {
+    const rest = p.fields.filter(f => !routePicks.includes(f.id));
+    const q = routeQ.trim();
+    const list = q ? rest.filter(f => f.name.includes(q) || (f.crop || "").includes(q)) : rest;
+    return /*#__PURE__*/React.createElement(React.Fragment, null, rest.length > 4 && /*#__PURE__*/React.createElement("input", {
+      value: routeQ,
+      placeholder: "\U0001F50D 圃場名・作物名で検索",
+      onChange: e => setRouteQ(e.target.value),
+      style: {
+        ...S.fieldInput,
+        marginTop: 6
       }
-    }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("span", {
-      style: S.tdSub
-    }, f.areaA ? fmt(parseFloat(f.areaA), 2) + "a" : ""));
-  })), /*#__PURE__*/React.createElement("div", {
+    }), p.fields.length > 0 && rest.length === 0 && /*#__PURE__*/React.createElement("p", {
+      style: {
+        ...S.memoLine,
+        marginTop: 6
+      }
+    }, "すべての圃場をコースに入れました。"), q && list.length === 0 && rest.length > 0 && /*#__PURE__*/React.createElement("p", {
+      style: {
+        ...S.memoLine,
+        marginTop: 6
+      }
+    }, "該当する圃場がありません。"), /*#__PURE__*/React.createElement("div", {
+      style: {
+        marginTop: 6,
+        maxHeight: 260,
+        overflowY: "auto"
+      }
+    }, list.map(f => /*#__PURE__*/React.createElement("div", {
+      key: f.id,
+      onClick: () => addPick(f.id),
+      style: S.pickRow
+    }, /*#__PURE__*/React.createElement("span", {
+      style: S.pickNum
+    }, "\uFF0B"), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, f.name, f.crop ? "(" + f.crop + ")" : ""), f.areaA ? /*#__PURE__*/React.createElement("span", {
+      style: S.tdSub,
+      className: "num"
+    }, fmt(parseFloat(f.areaA), 2), "a") : null))));
+  })(), /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.btnRow,
-      marginTop: 12
+      marginTop: 14
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setRouteBuildMode(false);
-      setRouteEditId(null);
-    },
+    onClick: closeRouteBuild,
     style: S.secondaryBtn
   }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       if (routeName.trim() && routePicks.length > 0) {
         if (routeEditId) p.updateRoute(routeEditId, routeName.trim(), routePicks);else p.createRoute(routeName.trim(), routePicks);
-        setRouteBuildMode(false);
-        setRouteEditId(null);
+        closeRouteBuild();
       }
     },
     disabled: !routeName.trim() || routePicks.length === 0,
@@ -3128,6 +3396,7 @@ function PresetTab(p) {
         setRouteEditId(r.id);
         setRouteName(r.name);
         setRoutePicks([...r.fieldIds]);
+        setRouteQ("");
       },
       style: {
         ...S.smallSecondary,
@@ -3155,7 +3424,70 @@ function PresetTab(p) {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "使用薬剤リスト(調合計算で使うと自動登録)"), /*#__PURE__*/React.createElement("div", {
+  }, "薬剤を登録"), /*#__PURE__*/React.createElement("input", {
+    value: nName,
+    placeholder: "薬剤名 ※必須",
+    onChange: e => setNName(e.target.value),
+    style: S.fieldInput
+  }), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.areaGrid,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "種類"), /*#__PURE__*/React.createElement("select", {
+    value: nUse,
+    onChange: e => setNUse(e.target.value),
+    style: S.formSelect
+  }, USES.map(u => /*#__PURE__*/React.createElement("option", {
+    key: u.key,
+    value: u.key
+  }, u.label)))), /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "剤型"), /*#__PURE__*/React.createElement("select", {
+    value: nForm,
+    onChange: e => setNForm(e.target.value),
+    style: S.formSelect
+  }, FORMS.map(f => /*#__PURE__*/React.createElement("option", {
+    key: f.key,
+    value: f.key
+  }, f.label))))), /*#__PURE__*/React.createElement("label", {
+    style: {
+      ...S.areaField,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "希釈倍率(倍)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "1",
+    placeholder: "例:1000",
+    value: nRatio,
+    onChange: e => setNRatio(e.target.value),
+    style: S.midInput,
+    className: "num"
+  })), /*#__PURE__*/React.createElement("button", {
+    onClick: submitChem,
+    disabled: !nName.trim(),
+    style: {
+      ...S.primaryBtn,
+      width: "100%",
+      marginTop: 12,
+      opacity: nName.trim() ? 1 : 0.4
+    }
+  }, "＋ 薬剤を登録"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "登録した薬剤は、調合タブの「📋 登録薬剤から追加」や各薬剤欄の📋ボタンから、名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出したあと倍率だけ変えることもできます)。同じ名前で登録すると内容が上書きされます。")), /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "登録済みの薬剤(", p.chemMaster.length, "件)"), /*#__PURE__*/React.createElement("div", {
     style: S.tankRow
   }, /*#__PURE__*/React.createElement("span", {
     style: S.smallLabel
@@ -4432,7 +4764,7 @@ function SettingsTab(p) {
     style: S.card
   }, collapsibleHead("使い方ガイド", openSec.guide, () => toggleSec("guide")), openSec.guide && [{
     title: "🧮 調合タブ(起動画面)",
-    desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。「⭐プリセットに保存」で薬液の組み合わせを登録でき、次回から作業タブの「薬剤を圃場に適用」で呼び出せます。「↩ この薬液を控える」で前回薬液として記憶します。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます(この回数はアプリに記録された散布実績を通算した簡易的な目安で、作期での自動リセットは行われません)。"
+    desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、プリセットタブに登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。「⭐プリセットに保存」で薬液の組み合わせを登録でき、次回から作業タブの「薬剤を圃場に適用」で呼び出せます。「↩ この薬液を控える」で前回薬液として記憶します。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます(この回数はアプリに記録された散布実績を通算した簡易的な目安で、作期での自動リセットは行われません)。"
   }, {
     title: "🚁 作業・記録タブ",
     desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場はプリセットタブで登録したマスタを「圃場を検索」で探して「＋この日へ」で追加します。「圃場コースから追加」でよく回るルートをまとめて一括投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「薬剤を圃場に適用」でプリセットや前回薬液を未実施の圃場に適用でき、各圃場の予定薬液量で薬量を自動計算します。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
@@ -4441,7 +4773,7 @@ function SettingsTab(p) {
     desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
   }, {
     title: "📋 プリセットタブ",
-    desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブで「検索→＋この日へ」で追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。🧪薬剤プリセットは調合タブで「⭐プリセットに保存」するとここに蓄積されます。"
+    desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブで「検索→＋この日へ」で追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。コースの編集画面は上が「コースの順番」、下が「追加できる圃場」に分かれています。下のリストをタップすると順番の最後に追加され、順番リストの各行では⣿マークを長押ししてドラッグで順番を入れ替えたり、「外す」でコースから抜いたりできます。🧪薬剤サブタブでは、薬剤を1つずつ「薬剤名・種類・剤型・希釈倍率」で登録できます。登録した薬剤は調合タブの「📋 登録薬剤から追加」や各薬剤欄の📋ボタンから呼び出せ、名前・種類・剤型・倍率がそのまま入ります(呼び出した後で倍率だけ変えることもでき、登録内容は変わりません)。同じ名前で登録し直すと内容が上書きされます。調合計算で使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
   }, {
     title: "⚙ 設定タブ",
     desc: "面積(a/ha/反/町)と薬量(L/mL/kg/g)の表示単位を切り替えられます。データは常にa・Lで保存され、表示だけ変換されます。作物マスタの管理もここで行います。送信先URL(GASのウェブアプリURL)は一度設定すれば保存されます。GASを再デプロイするときは「デプロイを管理→編集→新しいバージョン」を使うとURLが変わりません。チームコードを使って複数端末間でデータを共有できます。このガイドとバージョン履歴もここで確認できます。"
@@ -4474,7 +4806,7 @@ function SettingsTab(p) {
     ver: "v8.20",
     date: "2026-07",
     isNew: true,
-    notes: ["🚁 実績入力しても作業タブから消えず、そのまま一覧に残って編集できるように変更", "実績値(散布量・面積・備考)をその場に表示。「✎ 実績を修正」を押すと入力済みの値を復元して編集可能に", "送信が完了した圃場だけ色が変わり「✓送信済」と表示(未送信は「実績入力済(未送信)」)", "実績入力(散布量)の初期値を空欄に変更(誤った数値の入力保存を防止)", "作業タブの圃場名・作物名・面積の編集ボタンが実績入力済みの圃場でも使えるように", "予定薬液量を圃場マスタから廃止。「本日の投下量」入力で計算した当日限りの値のみを使用し、日をまたいだ古い値の誤使用を防止", "投下量が未入力の圃場があるとき、作業タブに常時注意バナーを表示", "プリセットの圃場マスタ・作業タブの✎編集から「予定薬液量」欄を削除(面積のみ)", "作業タブ下部の「記録」は一覧表示をやめ、CSV出力・印刷のみに整理", "🔒 地図ラベル(圃場名・作物名)の表示方法を修正し、記号を含む名前でも安全に表示されるように", "APIキーの説明文を修正(Google読み込み時に送信される点を明記)", "APIキー入力欄でブラウザの自動入力候補が出ないように変更", "農薬使用回数警告に「簡易的な目安・作期リセットなし」の注記を追加", "「この端末のデータをすべて消去」に誤タップ防止の二段階確認(「消去」と入力)を追加", "作業リストのドラッグ並べ替えで、つかんでいる圃場名がその場に浮かんで見えるように改善", "並べ替えは右の⣿マークのみで行うように変更し、左の番号に触れて誤って動いてしまわないように修正", "設定タブの各項目をバージョン履歴と同じように開閉式にし、タップするまで折りたたまれているように変更", "🌾 プリセットの圃場「編集」をポップアップ化。画面上部まで戻らずその場で編集できるように変更", "圃場名・面積の変更が、作業タブに入っている同じ圃場にも同時に反映されるように", "🐞 コース一括投入などで作業・圃場のIDが重複し、別の圃場を書き換えてしまう不具合を修正(25圃場で約26%発生)", "使われていない処理(旧並べ替え・旧圃場追加・未使用フラグ)を整理", "🚁 作業タブの実績入力・実績修正をポップアップ化(その場で開くので画面を動かさずに入力できる)", "作業タブの✎圃場編集もポップアップ化", "🗑 作業リストに「選択して削除」を追加。チェックした圃場だけ外す・この日をすべて外すが可能に", "まとめ散布と選択削除は同時に動かないようにし、モードを切り替えると選択がリセットされるように", "🗺 地図タブで下のタブバーが地図に隠れる不具合を修正", "実績入力を散布量のみに簡素化。散布面積は圃場の登録面積が自動で記録されるように(面積の修正は✎から)", "まとめ散布にあった、入力しても記録に反映されない面積欄を削除"]
+    notes: ["🚁 実績入力しても作業タブから消えず、そのまま一覧に残って編集できるように変更", "実績値(散布量・面積・備考)をその場に表示。「✎ 実績を修正」を押すと入力済みの値を復元して編集可能に", "送信が完了した圃場だけ色が変わり「✓送信済」と表示(未送信は「実績入力済(未送信)」)", "実績入力(散布量)の初期値を空欄に変更(誤った数値の入力保存を防止)", "作業タブの圃場名・作物名・面積の編集ボタンが実績入力済みの圃場でも使えるように", "予定薬液量を圃場マスタから廃止。「本日の投下量」入力で計算した当日限りの値のみを使用し、日をまたいだ古い値の誤使用を防止", "投下量が未入力の圃場があるとき、作業タブに常時注意バナーを表示", "プリセットの圃場マスタ・作業タブの✎編集から「予定薬液量」欄を削除(面積のみ)", "作業タブ下部の「記録」は一覧表示をやめ、CSV出力・印刷のみに整理", "🔒 地図ラベル(圃場名・作物名)の表示方法を修正し、記号を含む名前でも安全に表示されるように", "APIキーの説明文を修正(Google読み込み時に送信される点を明記)", "APIキー入力欄でブラウザの自動入力候補が出ないように変更", "農薬使用回数警告に「簡易的な目安・作期リセットなし」の注記を追加", "「この端末のデータをすべて消去」に誤タップ防止の二段階確認(「消去」と入力)を追加", "作業リストのドラッグ並べ替えで、つかんでいる圃場名がその場に浮かんで見えるように改善", "並べ替えは右の⣿マークのみで行うように変更し、左の番号に触れて誤って動いてしまわないように修正", "設定タブの各項目をバージョン履歴と同じように開閉式にし、タップするまで折りたたまれているように変更", "🌾 プリセットの圃場「編集」をポップアップ化。画面上部まで戻らずその場で編集できるように変更", "圃場名・面積の変更が、作業タブに入っている同じ圃場にも同時に反映されるように", "🐞 コース一括投入などで作業・圃場のIDが重複し、別の圃場を書き換えてしまう不具合を修正(25圃場で約26%発生)", "使われていない処理(旧並べ替え・旧圃場追加・未使用フラグ)を整理", "🚁 作業タブの実績入力・実績修正をポップアップ化(その場で開くので画面を動かさずに入力できる)", "作業タブの✎圃場編集もポップアップ化", "🗑 作業リストに「選択して削除」を追加。チェックした圃場だけ外す・この日をすべて外すが可能に", "まとめ散布と選択削除は同時に動かないようにし、モードを切り替えると選択がリセットされるように", "🗺 地図タブで下のタブバーが地図に隠れる不具合を修正", "実績入力を散布量のみに簡素化。散布面積は圃場の登録面積が自動で記録されるように(面積の修正は✎から)", "まとめ散布にあった、入力しても記録に反映されない面積欄を削除", "🧪 薬剤を1つずつプリセット登録できるように(薬剤名・種類・剤型・希釈倍率)", "調合タブの📋ボタンから、登録した薬剤を種類・倍率ごとそのまま呼び出せるように(呼び出し後に倍率だけ変更も可能)", "🚜 コースの編集画面を「コースの順番」と「追加できる圃場」に分割。⣿ドラッグで順番の入れ替え、「外す」で除外ができるように", "コース編集に圃場の検索を追加。圃場数が多くても探しやすく", "🐞 コース編集をキャンセルした後に新規作成すると既存コースを上書きしてしまう恐れがあった箇所を修正"]
   }, {
     ver: "v8.19",
     date: "2026-07",
@@ -5348,6 +5680,59 @@ const S = {
   },
   checkBtnOn: {
     background: "#B78A1F"
+  },
+  routeRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    padding: "8px 10px",
+    marginBottom: 6,
+    background: "#fff",
+    border: "1.5px solid #2E7D4F",
+    borderRadius: 10
+  },
+  routeNum: {
+    width: 30,
+    height: 30,
+    borderRadius: 8,
+    background: "#2E7D4F",
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: 800,
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    WebkitUserSelect: "none",
+    userSelect: "none"
+  },
+  chemPickBtn: {
+    width: 40,
+    height: 40,
+    fontSize: 17,
+    border: "1.5px solid #BBD6E8",
+    background: "#EAF3FA",
+    borderRadius: 8,
+    cursor: "pointer",
+    flexShrink: 0
+  },
+  chemPickRow: {
+    width: "100%",
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "12px 14px",
+    marginTop: 8,
+    background: "#fff",
+    border: "1.5px solid #D8E0D2",
+    borderRadius: 10,
+    cursor: "pointer"
+  },
+  chemPickRatio: {
+    fontSize: 15,
+    fontWeight: 800,
+    color: "#2b5a7a",
+    flexShrink: 0
   },
   checkBtnDanger: {
     background: "#C74E36",
