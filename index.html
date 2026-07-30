@@ -52,8 +52,27 @@
 <script>
   // Service Worker登録(オフライン対応)
   if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-      navigator.serviceWorker.register("./sw.js").catch((e) => console.error("SW登録失敗", e));
+    // 初回インストールかどうか。初回は再読み込み不要なので区別しておく
+    var hadController = !!navigator.serviceWorker.controller;
+    var reloading = false;
+    // 新しいバージョンが有効になったら一度だけ再読み込みして最新画面に切り替える。
+    // これが無いと、更新が反映されるまでアプリを2回開き直す必要があった。
+    navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (!hadController || reloading) return;
+      reloading = true;
+      location.reload();
+    });
+    window.addEventListener("load", function () {
+      navigator.serviceWorker.register("./sw.js").then(function (reg) {
+        reg.update();
+        // ホーム画面アプリを前面に戻したときにも更新を確認する
+        // (完全終了しないと更新されない、という状態を防ぐため)
+        document.addEventListener("visibilitychange", function () {
+          if (document.visibilityState === "visible") reg.update();
+        });
+      }).catch(function (e) {
+        console.error("SW登録失敗", e);
+      });
     });
   }
 </script>

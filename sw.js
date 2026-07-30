@@ -1,6 +1,6 @@
 // 薬液調合ノート — Service Worker(完全オフライン対応)
 // 更新を配布するときは CACHE_VERSION の数字を上げてください
-const CACHE_VERSION = "tankmix-v8.20";
+const CACHE_VERSION = "tankmix-v8.21";
 
 const ASSETS = [
   "./",
@@ -16,10 +16,20 @@ const ASSETS = [
   "./apple-touch-icon.png",
 ];
 
-// インストール時に全ファイルをキャッシュ
+// インストール時に全ファイルをキャッシュ。
+// cache:"reload" でブラウザのHTTPキャッシュを迂回する。GitHub Pagesは
+// Cache-Control: max-age=600 を返すため、これが無いとデプロイ直後の更新で
+// 古いファイルをそのままキャッシュに取り込んでしまう。
 self.addEventListener("install", (e) => {
   e.waitUntil(
-    caches.open(CACHE_VERSION).then((cache) => cache.addAll(ASSETS)).then(() => self.skipWaiting())
+    caches.open(CACHE_VERSION).then((cache) =>
+      Promise.all(ASSETS.map((url) =>
+        fetch(new Request(url, { cache: "reload" })).then((res) => {
+          if (!res || !res.ok) throw new Error("取得失敗: " + url);
+          return cache.put(url, res);
+        })
+      ))
+    ).then(() => self.skipWaiting())
   );
 });
 
