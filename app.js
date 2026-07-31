@@ -25,6 +25,8 @@ function escapeHtml(s) {
     "'": "&#39;"
   })[ch]);
 }
+// 薬剤マスタに上限が登録されていないときに使う、農薬使用回数の既定上限
+const CHEM_LIMIT_DEFAULT = 3;
 const SWATCHES = ["#C74E36", "#B78A1F", "#6A5ACD", "#2E7D4F", "#A34D7C", "#3B7EA1", "#7A6A4F", "#4F7A6A"];
 const FORMS = [{
   key: "wp",
@@ -337,7 +339,6 @@ function App() {
     use: "fungicide",
     ratio: ""
   }]);
-  const [targetIds, setTargetIds] = useState([]);
   const [fields, setFields] = useState(() => load("tankmix:fields", []));
   const [works, setWorks] = useState(() => load("tankmix:works", []));
   const [chemMaster, setChemMaster] = useState(() => load("tankmix:chemmaster", []));
@@ -358,6 +359,8 @@ function App() {
   });
   const [areaUnitKey, setAreaUnitKeyState] = useState(() => localStorage.getItem("tankmix:areaunit") || "a");
   const [volUnitKey, setVolUnitKeyState] = useState(() => localStorage.getItem("tankmix:volunit") || "L");
+  // 作期の開始日。この日以降の実績だけを農薬使用回数としてカウントする
+  const [seasonStart, setSeasonStartState] = useState(() => localStorage.getItem("tankmix:seasonstart") || new Date().getFullYear() + "-01-01");
   const [mapEngine, setMapEngineState] = useState(() => localStorage.getItem("tankmix:mapengine") || "leaflet");
   const [gmapKey, setGmapKeyState] = useState(() => localStorage.getItem("tankmix:gmapkey") || "");
   const [gmapKeyInput, setGmapKeyInput] = useState(() => localStorage.getItem("tankmix:gmapkey") || "");
@@ -408,6 +411,10 @@ function App() {
   const setAreaUnitKey = v => {
     setAreaUnitKeyState(v);
     localStorage.setItem("tankmix:areaunit", v);
+  };
+  const setSeasonStart = v => {
+    setSeasonStartState(v);
+    localStorage.setItem("tankmix:seasonstart", v);
   };
   const setVolUnitKey = v => {
     setVolUnitKeyState(v);
@@ -632,6 +639,18 @@ function App() {
     flash("コースを投入:" + added + "圃場追加" + (skipped > 0 ? "(" + skipped + "件は既存)" : ""));
   };
 
+  // 圃場に薬剤を適用したら、その内容を「前回薬液」として自動で控える。
+  // (以前は調合タブの「この薬液を控える」を押す必要があったが、押し忘れが起きるため自動化した)
+  const rememberMix = chemList => {
+    const snap = chemList.map(c => ({
+      name: c.name || "",
+      form: c.form,
+      use: c.use || "other",
+      ratio: c.ratio
+    }));
+    setLastMix(snap);
+    save("tankmix:lastmix", snap);
+  };
   // 薬剤(プリセット/前回薬液)を1圃場に適用。各圃場の予定薬液量で薬量を自動計算
   const applyChemsToWork = (workId, chemList) => {
     if (!chemList || chemList.length === 0) {
@@ -665,6 +684,7 @@ function App() {
       ratio: c.ratio,
       ml: 0
     })));
+    rememberMix(chemList);
     flash("薬剤を適用しました");
   };
   // 薬剤をその日の全圃場に一括適用(各圃場の予定薬液量で自動計算)
@@ -705,6 +725,7 @@ function App() {
       ratio: c.ratio,
       ml: 0
     })));
+    rememberMix(chemList);
     flash(dayIds.length + "圃場すべてに薬剤を適用しました");
   };
 
@@ -776,6 +797,13 @@ function App() {
   const waterMl = totalMl - chemMl;
   const over = totalMl > 0 && waterMl < 0;
   const ready = totalMl > 0 && calc.some(c => c.valid) && !over;
+  // 調合タブで入力中の薬液(倍率が入っている行のみ)。作業タブからそのまま適用できる
+  const currentMix = calc.filter(c => c.valid).map(c => ({
+    name: c.name || "",
+    form: c.form,
+    use: c.use || "other",
+    ratio: c.ratio
+  }));
   const mixOrder = calc.filter(c => c.valid).slice().sort((a, b) => formOrder(a.form) - formOrder(b.form));
   const update = (id, k, v) => setChems(chems.map(c => c.id === id ? {
     ...c,
@@ -797,23 +825,6 @@ function App() {
   const addChem = () => setChems([...chems, newChem()]);
   const removeChem = id => setChems(chems.filter(c => c.id !== id));
 
-  // 圃場の選択をトグル(複数選択可)。最初の1件選択時は予定薬液量を総量に反映
-  const togglePlan = id => {
-    const nid = Number(id);
-    if (targetIds.includes(nid)) {
-      setTargetIds(targetIds.filter(x => x !== nid));
-    } else {
-      const w = works.find(x => x.id === nid);
-      if (targetIds.length === 0 && w) {
-        if (parseFloat(w.plannedL) > 0) {
-          setMode("direct");
-          setTotalL(String(w.plannedL));
-        }
-      }
-      setTargetIds([...targetIds, nid]);
-    }
-  };
-  const clearPlans = () => setTargetIds([]);
   const upsertChemMaster = list => {
     let next = [...chemMaster];
     list.forEach(c => {
@@ -825,6 +836,11 @@ function App() {
         use: c.use || "other",
         ratio: parseFloat(c.ratio) || 0
       };
+      // 総使用回数の上限は、指定がなければ既存の登録値を引き継ぐ
+      // (調合計算からの自動登録で、設定済みの上限が消えないように)
+      const prevMax = i >= 0 ? next[i].maxUse : undefined;
+      const mu = c.maxUse !== undefined && c.maxUse !== "" ? parseFloat(c.maxUse) || 0 : prevMax;
+      if (mu) item.maxUse = mu;
       if (i >= 0) next[i] = item;else next.push(item);
     });
     setChemMasterSave(next);
@@ -838,7 +854,8 @@ function App() {
       name,
       form: data.form,
       use: data.use,
-      ratio: data.ratio
+      ratio: data.ratio,
+      maxUse: data.maxUse
     }]);
     flash(exists ? "「" + name + "」の登録内容を更新しました" : "薬剤「" + name + "」を登録しました");
     return true;
@@ -859,31 +876,6 @@ function App() {
     use: m.use || "other",
     ratio: String(m.ratio || "")
   }]);
-  const saveRecord = () => {
-    const chemsData = calc.filter(c => c.valid).map(c => ({
-      name: c.name || "(無名)",
-      form: c.form,
-      use: c.use || "other",
-      ratio: c.ratio,
-      ml: c.ml
-    }));
-    if (chemsData.length === 0) {
-      flash("薬剤を入力してください");
-      return;
-    }
-    upsertChemMaster(chemsData);
-    // 前回調合として保存(作業タブの「前回と同じ薬液」で呼び出せる)
-    const mixSnap = calc.filter(c => c.valid).map(c => ({
-      name: c.name || "",
-      form: c.form,
-      use: c.use || "other",
-      ratio: c.ratio
-    }));
-    setLastMix(mixSnap);
-    save("tankmix:lastmix", mixSnap);
-    flash("この薬液を控えました。作業タブの「前回と同じ薬液」で圃場に適用できます");
-    setTab("work");
-  };
   const submitReport = (id, rep) => {
     const flights = Array.isArray(rep.flights) ? rep.flights.filter(f => f > 0) : [];
     const next = works.map(w => w.id === id ? {
@@ -1155,19 +1147,42 @@ function App() {
     }
   };
   const savePreset = () => {
-    const name = prompt("プリセット名を入力してください", "調合セット");
-    if (!name) return;
+    // 倍率が入っている薬剤だけを保存する(空欄の行が「(無名)」として混ざるのを防ぐ)
+    const valid = calc.filter(c => c.valid);
+    if (valid.length === 0) {
+      flash("薬剤名と希釈倍率を入力してください");
+      return;
+    }
+    const input = prompt("プリセット名を入力してください", "調合セット");
+    if (input === null) return;
+    const name = input.trim();
+    if (!name) {
+      flash("プリセット名を入力してください");
+      return;
+    }
+    const chemList = valid.map(c => ({
+      name: c.name || "(無名)",
+      form: c.form,
+      use: c.use || "other",
+      ratio: c.ratio
+    }));
+    // 同名のプリセットがあるときは、増やさずに上書きするか確認する
+    const exists = presets.find(p => p.name === name);
+    if (exists) {
+      if (!confirm("「" + name + "」は既にあります。内容を上書きしますか？")) return;
+      setPresetsSave(presets.map(p => p.name === name ? {
+        ...p,
+        chems: chemList
+      } : p));
+      flash("プリセット「" + name + "」を更新しました");
+      return;
+    }
     setPresetsSave([{
-      id: Date.now(),
+      id: newId(),
       name,
-      chems: chems.map(c => ({
-        name: c.name,
-        form: c.form,
-        use: c.use || "other",
-        ratio: c.ratio
-      }))
+      chems: chemList
     }, ...presets]);
-    flash("プリセットを保存しました");
+    flash("プリセット「" + name + "」を保存しました");
   };
   const loadPreset = p => {
     setChems(p.chems.map(c => ({
@@ -1214,13 +1229,16 @@ function App() {
     URL.revokeObjectURL(a.href);
     flash("CSVを出力しました");
   };
-  const planOptions = works.filter(w => w.workDate === workDate && !w.reported && w.chems.length === 0);
 
   // 農薬使用回数警告(同圃場×同農薬の使用回数をカウント、デフォルト上限3回)
-  const CHEM_LIMIT_DEFAULT = 3;
   const chemWarnings = React.useMemo(() => {
     const counts = {};
-    works.filter(w => w.reported).forEach(w => {
+    // 作期開始日より前の記録は数えない(作期ごとに使用回数がリセットされるため)
+    works.filter(w => w.reported).filter(w => {
+      if (!seasonStart) return true;
+      const d = w.reportDate || w.workDate || "";
+      return d >= seasonStart;
+    }).forEach(w => {
       const f = resolveWork(w);
       (w.chems || []).forEach(c => {
         const key = f.name + "||" + c.name;
@@ -1229,9 +1247,11 @@ function App() {
     });
     const warnings = [];
     Object.entries(counts).forEach(([key, count]) => {
-      const limit = CHEM_LIMIT_DEFAULT;
+      const [fieldName, chemName] = key.split("||");
+      // 薬剤マスタに登録された総使用回数の上限を使う(未設定なら既定値)
+      const m = chemMaster.find(x => x.name === chemName);
+      const limit = m && parseFloat(m.maxUse) > 0 ? parseFloat(m.maxUse) : CHEM_LIMIT_DEFAULT;
       if (count >= limit - 1) {
-        const [fieldName, chemName] = key.split("||");
         warnings.push({
           fieldName,
           chemName,
@@ -1241,7 +1261,7 @@ function App() {
       }
     });
     return warnings.sort((a, b) => b.count - a.count);
-  }, [works]);
+  }, [works, fields, chemMaster, seasonStart]);
   const pendingCount = works.filter(w => !w.synced || w.reported && !w.reportSynced).length;
 
   // 電波が戻ったら自動で送信を試みる(未送信があるときだけ)
@@ -1335,7 +1355,6 @@ function App() {
     ready,
     mixOrder,
     savePreset,
-    saveRecord,
     chemMaster,
     resolveWork,
     works,
@@ -1367,6 +1386,7 @@ function App() {
     recorder,
     presets,
     lastMix,
+    currentMix,
     applyChemsToWork,
     applyChemsToAll,
     crops,
@@ -1432,6 +1452,8 @@ function App() {
     gmapKeyInput,
     setGmapKeyInput,
     saveGmapKey,
+    seasonStart,
+    setSeasonStart,
     eraseAllData,
     forceUpdate
   })), /*#__PURE__*/React.createElement("nav", {
@@ -1741,25 +1763,17 @@ function CalcTab(p) {
     style: S.orderStep
   }, p.mixOrder.length + 2), "残りの水を加えて全量にする")), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "※ 一般的な剤型順の目安です。", /*#__PURE__*/React.createElement("strong", null, "混用可否と順序は必ず各薬剤のラベル・メーカー指示を優先"), "してください。")), /*#__PURE__*/React.createElement("div", {
-    style: S.btnRow
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: p.saveRecord,
-    disabled: !p.ready,
-    style: {
-      ...S.secondaryBtn,
-      opacity: p.ready ? 1 : 0.4
-    }
-  }, "↩ この薬液を控える"), /*#__PURE__*/React.createElement("button", {
+  }, "※ 一般的な剤型順の目安です。", /*#__PURE__*/React.createElement("strong", null, "混用可否と順序は必ず各薬剤のラベル・メーカー指示を優先"), "してください。")), /*#__PURE__*/React.createElement("button", {
     onClick: p.savePreset,
     disabled: !p.ready,
     style: {
       ...S.primaryBtn,
+      width: "100%",
       opacity: p.ready ? 1 : 0.4
     }
-  }, "⭐ プリセットに保存")), /*#__PURE__*/React.createElement("p", {
+  }, "⭐ プリセットに保存"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "薬剤の適用は「作業・記録」タブで、圃場ごと(または全圃場)に行います。")));
+  }, "ここで計算した薬液は、作業タブの「薬剤を圃場に適用」→「🧮 いま調合タブで計算中の薬液」からそのまま圃場に適用できます(保存の操作は不要です)。何度も使う組み合わせは「⭐ プリセットに保存」で名前を付けて残せます。")));
 }
 function TankViz({
   calc,
@@ -2108,7 +2122,18 @@ function WorkTab(p) {
     }, f.name, w.plannedL ? "(予定" + fmt(parseFloat(w.plannedL), 1) + "L)" : "(予定なし)");
   })), /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
-  }, "② 使う薬剤を選ぶ"), p.lastMix && p.lastMix.length > 0 && /*#__PURE__*/React.createElement("button", {
+  }, "② 使う薬剤を選ぶ"), p.currentMix && p.currentMix.length > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      chemTargetId === null ? p.applyChemsToAll(p.currentMix) : p.applyChemsToWork(chemTargetId, p.currentMix);
+      setChemApplyOpen(false);
+    },
+    style: {
+      ...S.applyChemBtn,
+      marginTop: 6,
+      borderColor: "#2E7D4F",
+      background: "#EDF5EE"
+    }
+  }, "🧮 いま調合タブで計算中の薬液（", p.currentMix.map(c => (c.name || "無名") + " " + c.ratio + "倍").join("・"), "）"), p.lastMix && p.lastMix.length > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       chemTargetId === null ? p.applyChemsToAll(p.lastMix) : p.applyChemsToWork(chemTargetId, p.lastMix);
       setChemApplyOpen(false);
@@ -2122,7 +2147,7 @@ function WorkTab(p) {
       ...S.memoLine,
       marginTop: 6
     }
-  }, "まだ薬剤プリセットがありません。調合タブで薬液を作って「⭐プリセットに保存」するか「↩この薬液を控える」を押してください。"), p.presets.map(pr => /*#__PURE__*/React.createElement("button", {
+  }, "まだ使える薬液がありません。調合タブで薬剤名と希釈倍率を入力すると、ここに「🧮 いま調合タブで計算中の薬液」として出てきます。"), p.presets.map(pr => /*#__PURE__*/React.createElement("button", {
     key: pr.id,
     onClick: () => {
       chemTargetId === null ? p.applyChemsToAll(pr.chems) : p.applyChemsToWork(chemTargetId, pr.chems);
@@ -3063,7 +3088,8 @@ function PresetTab(p) {
   const [ec, setEc] = useState({
     form: "sc",
     use: "fungicide",
-    ratio: ""
+    ratio: "",
+    maxUse: ""
   });
   const [cq, setCq] = useState("");
   const [chemTankL, setChemTankL] = useState("20"); // 必要な水量を試算する際の総量(L)
@@ -3072,17 +3098,20 @@ function PresetTab(p) {
   const [nUse, setNUse] = useState("fungicide");
   const [nForm, setNForm] = useState("sc");
   const [nRatio, setNRatio] = useState("");
+  const [nMax, setNMax] = useState("");
   const submitChem = () => {
     if (!nName.trim()) return;
     const ok = p.addChemMaster({
       name: nName.trim(),
       use: nUse,
       form: nForm,
-      ratio: nRatio
+      ratio: nRatio,
+      maxUse: nMax
     });
     if (ok === false) return;
     setNName("");
     setNRatio("");
+    setNMax("");
   };
 
   const fieldList = fq.trim() ? p.fields.filter(f => f.name.includes(fq.trim()) || (f.crop || "").includes(fq.trim())) : p.fields;
@@ -3518,6 +3547,22 @@ function PresetTab(p) {
     onChange: e => setNRatio(e.target.value),
     style: S.midInput,
     className: "num"
+  })), /*#__PURE__*/React.createElement("label", {
+    style: {
+      ...S.areaField,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "総使用回数の上限(回)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "numeric",
+    min: "1",
+    placeholder: "未入力なら既定" + CHEM_LIMIT_DEFAULT + "回",
+    value: nMax,
+    onChange: e => setNMax(e.target.value),
+    style: S.midInput,
+    className: "num"
   })), /*#__PURE__*/React.createElement("button", {
     onClick: submitChem,
     disabled: !nName.trim(),
@@ -3611,12 +3656,25 @@ function PresetTab(p) {
       style: S.ratioInput,
       className: "num",
       placeholder: "倍率"
+    }), /*#__PURE__*/React.createElement("input", {
+      type: "number",
+      inputMode: "numeric",
+      min: "1",
+      value: ec.maxUse,
+      onChange: e => setEc({
+        ...ec,
+        maxUse: e.target.value
+      }),
+      style: S.ratioInput,
+      className: "num",
+      placeholder: "上限回数"
     }), /*#__PURE__*/React.createElement("button", {
       onClick: () => {
         p.editChemMaster(c.name, {
           form: ec.form,
           use: ec.use,
-          ratio: parseFloat(ec.ratio) || 0
+          ratio: parseFloat(ec.ratio) || 0,
+          maxUse: parseFloat(ec.maxUse) || 0
         });
         setEditChem(null);
       },
@@ -3631,7 +3689,7 @@ function PresetTab(p) {
     }, c.name), /*#__PURE__*/React.createElement("div", {
       style: S.listSub,
       className: "num"
-    }, useLabel(c.use), " ／ ", formLabel(c.form), " ／ 標準 ", c.ratio, "倍"), ratio > 0 && tank > 0 && /*#__PURE__*/React.createElement("div", {
+    }, useLabel(c.use), " ／ ", formLabel(c.form), " ／ 標準 ", c.ratio, "倍 ／ 上限 ", c.maxUse ? c.maxUse + "回" : CHEM_LIMIT_DEFAULT + "回(既定)"), ratio > 0 && tank > 0 && /*#__PURE__*/React.createElement("div", {
       style: S.waterHint,
       className: "num"
     }, fmt(tank, 1), "L作るなら → 薬剤 ", fmt(chemMl, 1), "mL ＋ 水 約 ", fmt(waterL, 2), "L")), /*#__PURE__*/React.createElement("button", {
@@ -3640,7 +3698,8 @@ function PresetTab(p) {
         setEc({
           form: c.form,
           use: c.use || "other",
-          ratio: String(c.ratio)
+          ratio: String(c.ratio),
+          maxUse: c.maxUse ? String(c.maxUse) : ""
         });
       },
       style: S.smallSecondary
@@ -4797,6 +4856,20 @@ function SettingsTab(p) {
     style: S.note
   }, "Google マップに切り替えると、地図タブで衛星写真と道路・地名を同時に表示できます。APIキーはこの端末の中にだけ保存され、ソースコード(GitHub)には一切含まれません。ただし地図を読み込むたびにGoogleのサーバーへは送信されるため、Google Cloud Consoleでドメイン制限(HTTPリファラー制限)を必ず設定してください。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
+  }, collapsibleHead("農薬の使用回数", openSec.season, () => toggleSec("season")), openSec.season && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "作期の開始日"), /*#__PURE__*/React.createElement("input", {
+    type: "date",
+    value: p.seasonStart,
+    onChange: e => e.target.value && p.setSeasonStart(e.target.value),
+    style: S.fieldInput,
+    className: "num"
+  })), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "この日以降の散布実績だけを農薬の使用回数として数えます。作期が変わったらこの日付を更新すると、カウントが0からやり直しになります(過去の記録は消えません)。使用回数の上限は薬剤ごとにプリセットタブの🧪薬剤で登録できます。登録していない薬剤は既定の", CHEM_LIMIT_DEFAULT, "回で警告します。"))), /*#__PURE__*/React.createElement("section", {
+    style: S.card
   }, collapsibleHead("アプリの更新", openSec.update, () => toggleSec("update")), openSec.update && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.updateNow
   }, "この端末のバージョン ", /*#__PURE__*/React.createElement("strong", null, APP_VERSION)), /*#__PURE__*/React.createElement("button", {
@@ -4823,7 +4896,7 @@ function SettingsTab(p) {
     style: S.card
   }, collapsibleHead("使い方ガイド", openSec.guide, () => toggleSec("guide")), openSec.guide && [{
     title: "🧮 調合タブ(起動画面)",
-    desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、プリセットタブに登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。「⭐プリセットに保存」で薬液の組み合わせを登録でき、次回から作業タブの「薬剤を圃場に適用」で呼び出せます。「↩ この薬液を控える」で前回薬液として記憶します。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます(この回数はアプリに記録された散布実績を通算した簡易的な目安で、作期での自動リセットは行われません)。"
+    desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、プリセットタブに登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。ここで計算した薬液は保存操作なしで、作業タブの「薬剤を圃場に適用」→「🧮 いま調合タブで計算中の薬液」からそのまま圃場に適用できます。何度も使う組み合わせは「⭐プリセットに保存」で名前を付けて残せば、作業タブから呼び出せます。圃場に適用した薬液は自動的に「前回薬液」として控えられます。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます。上限は薬剤ごとにプリセットタブの🧪薬剤で登録でき、未登録の薬剤は既定3回です。設定タブの「農薬の使用回数」で作期の開始日を設定すると、その日以降の実績だけを数えます(作期が変わったら日付を更新するとカウントがやり直しになります)。"
   }, {
     title: "🚁 作業・記録タブ",
     desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。「🚜 コースから」を選ぶとプルダウンからコースを選んで登録順のまま一括投入でき、「🌾 圃場を選んで」を選ぶと登録済みの圃場が一覧で出るのでタップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「薬剤を圃場に適用」でプリセットや前回薬液を未実施の圃場に適用でき、各圃場の予定薬液量で薬量を自動計算します。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
@@ -4832,7 +4905,7 @@ function SettingsTab(p) {
     desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
   }, {
     title: "📋 プリセットタブ",
-    desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」→「🌾 圃場を選んで」から追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。コースの編集画面は上が「コースの順番」、下が「追加できる圃場」に分かれています。下のリストをタップすると順番の最後に追加され、順番リストの各行では⣿マークを長押ししてドラッグで順番を入れ替えたり、「外す」でコースから抜いたりできます。🧪薬剤サブタブでは、薬剤を1つずつ「薬剤名・種類・剤型・希釈倍率」で登録できます。登録した薬剤は調合タブの「📋 登録薬剤から追加」や各薬剤欄の📋ボタンから呼び出せ、名前・種類・剤型・倍率がそのまま入ります(呼び出した後で倍率だけ変えることもでき、登録内容は変わりません)。同じ名前で登録し直すと内容が上書きされます。調合計算で使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
+    desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」→「🌾 圃場を選んで」から追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。コースの編集画面は上が「コースの順番」、下が「追加できる圃場」に分かれています。下のリストをタップすると順番の最後に追加され、順番リストの各行では⣿マークを長押ししてドラッグで順番を入れ替えたり、「外す」でコースから抜いたりできます。🧪薬剤サブタブでは、薬剤を1つずつ「薬剤名・種類・剤型・希釈倍率」で登録できます。登録した薬剤は調合タブの「📋 登録薬剤から追加」や各薬剤欄の📋ボタンから呼び出せ、名前・種類・剤型・倍率がそのまま入ります(呼び出した後で倍率だけ変えることもでき、登録内容は変わりません)。「総使用回数の上限」も登録でき、農薬使用回数の警告に使われます(未登録なら既定3回)。同じ名前で登録し直すと内容が上書きされます。調合計算で使った薬剤も自動でここに貯まりますが、登録済みの上限は消えません。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
   }, {
     title: "⚙ 設定タブ",
     desc: "面積(a/ha/反/町)と薬量(L/mL/kg/g)の表示単位を切り替えられます。データは常にa・Lで保存され、表示だけ変換されます。作物マスタの管理もここで行います。送信先URL(GASのウェブアプリURL)は一度設定すれば保存されます。GASを再デプロイするときは「デプロイを管理→編集→新しいバージョン」を使うとURLが変わりません。チームコードを使って複数端末間でデータを共有できます。このガイドとバージョン履歴もここで確認できます。"
@@ -4865,7 +4938,7 @@ function SettingsTab(p) {
     ver: "v8.21",
     date: "2026-07",
     isNew: true,
-    notes: ["集計バーの「残り圃場」を「圃場数」に変更。合計面積・合計薬量も実績入力済みを含めたその日の合計に統一(見出しの「合計」と中身を一致)", "🚁 作業タブの「圃場を検索」を廃止し、「圃場を追加」に統合。「🚜 コースから」と「🌾 圃場を選んで」を切り替えて追加できるように", "「🌾 圃場を選んで」では検索しなくても登録済みの圃場が一覧で出て、タップで追加できるように", "🔄 更新が自動で反映されるように修正(これまではスマホで2回開き直すか、アプリを完全終了しないと切り替わらなかった)", "ホーム画面アプリを前面に戻したときにも新しいバージョンを確認するように", "設定タブに「アプリの更新」を新設。「🔄 最新版に更新する」ボタンで確実に切り替えられます(保存データは消えません)", "🐞 デプロイ直後に更新すると、古いファイルをキャッシュに取り込んでしまう不具合を修正"]
+    notes: ["🧮 調合タブの「↩ この薬液を控える」を廃止。作業タブの「薬剤を圃場に適用」に「🧮 いま調合タブで計算中の薬液」が出るようになり、保存操作なしでそのまま適用できます", "圃場に薬剤を適用すると、自動で「前回薬液」として控えられるように(控え忘れが起きない)", "⚠ 農薬使用回数の上限を薬剤ごとに登録できるように(プリセットタブの🧪薬剤)", "⚠ 設定タブに「農薬の使用回数」を新設。作期の開始日を設定すると、その日以降の実績だけを数えます", "🐞 プリセット保存の不具合を修正(空の薬剤行が混ざる・同名で増え続ける・空白名で保存できる・ID採番)", "使われていない旧コード(調合タブの圃場選択の名残)を削除", "集計バーの「残り圃場」を「圃場数」に変更。合計面積・合計薬量も実績入力済みを含めたその日の合計に統一(見出しの「合計」と中身を一致)", "🚁 作業タブの「圃場を検索」を廃止し、「圃場を追加」に統合。「🚜 コースから」と「🌾 圃場を選んで」を切り替えて追加できるように", "「🌾 圃場を選んで」では検索しなくても登録済みの圃場が一覧で出て、タップで追加できるように", "🔄 更新が自動で反映されるように修正(これまではスマホで2回開き直すか、アプリを完全終了しないと切り替わらなかった)", "ホーム画面アプリを前面に戻したときにも新しいバージョンを確認するように", "設定タブに「アプリの更新」を新設。「🔄 最新版に更新する」ボタンで確実に切り替えられます(保存データは消えません)", "🐞 デプロイ直後に更新すると、古いファイルをキャッシュに取り込んでしまう不具合を修正"]
   }, {
     ver: "v8.20",
     date: "2026-07",
