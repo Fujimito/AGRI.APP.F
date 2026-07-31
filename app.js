@@ -1820,6 +1820,9 @@ function WorkTab(p) {
     areaA: ""
   });
   const [ratePerDay, setRatePerDay] = useState("");
+  // 圃場の追加方法:"route"=コースから一括 / "field"=圃場を1つずつ選ぶ
+  // コースが未登録の端末では最初から「圃場を選んで」を開いておく
+  const [addMode, setAddMode] = useState(() => p.routes.length > 0 ? "route" : "field");
   const [chemApplyOpen, setChemApplyOpen] = useState(false);
   const [chemTargetId, setChemTargetId] = useState(null); // 個別適用の対象圃場(null=全圃場)
   const [dragId, setDragId] = useState(null); // ドラッグ中の圃場ID
@@ -1844,8 +1847,10 @@ function WorkTab(p) {
     setDragPos,
     onDrop: p.reorderWork
   });
-  const sumArea = pendingDayList.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
-  const sumLiters = pendingDayList.reduce((s, w) => s + (w.totalL > 0 ? w.totalL : parseFloat(w.plannedL) || 0), 0);
+  // 集計バーは「圃場数・合計面積・合計薬量」なので、実績入力済みも含めた
+  // その日のリスト全体で集計する(見出しの「合計」と中身を一致させる)
+  const sumArea = dayList.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
+  const sumLiters = dayList.reduce((s, w) => s + (w.totalL > 0 ? w.totalL : parseFloat(w.plannedL) || 0), 0);
   const openReport = w => {
     const f = p.resolveWork(w);
     setReportingId(w.id);
@@ -1929,7 +1934,9 @@ function WorkTab(p) {
     }, editingFieldId);
     setEditingFieldId(null);
   };
-  const results = query.trim() ? p.fields.filter(f => f.name.includes(query.trim()) || (f.crop || "").includes(query.trim())) : [];
+  // 「圃場を選んで」追加するときの候補。検索が空なら登録済みの全圃場を出す
+  // (打たなくてもタップだけで追加できるように)
+  const results = query.trim() ? p.fields.filter(f => f.name.includes(query.trim()) || (f.crop || "").includes(query.trim())) : p.fields;
   const orderInToday = fieldId => {
     const idx = dayList.findIndex(w => w.fieldId === fieldId);
     return idx >= 0 ? idx + 1 : 0;
@@ -1992,9 +1999,9 @@ function WorkTab(p) {
     style: S.totalsItem
   }, /*#__PURE__*/React.createElement("div", {
     style: S.totalsNum
-  }, pendingDayList.length), /*#__PURE__*/React.createElement("div", {
+  }, dayList.length), /*#__PURE__*/React.createElement("div", {
     style: S.totalsLabel
-  }, "残り圃場")), /*#__PURE__*/React.createElement("div", {
+  }, "圃場数")), /*#__PURE__*/React.createElement("div", {
     style: S.totalsItem
   }, /*#__PURE__*/React.createElement("div", {
     style: S.totalsNum
@@ -2130,42 +2137,49 @@ function WorkTab(p) {
       ...S.note,
       marginTop: 8
     }
-  }, "薬量は各圃場の予定薬液量から自動計算されます。予定薬液量が未設定の圃場は、先に上の「本日の散布投下量」で計算してください。"))), p.routes.length > 0 && /*#__PURE__*/React.createElement("section", {
+  }, "薬量は各圃場の予定薬液量から自動計算されます。予定薬液量が未設定の圃場は、先に上の「本日の散布投下量」で計算してください。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "圃場コースから追加"), /*#__PURE__*/React.createElement("div", {
+  }, "圃場を追加"), /*#__PURE__*/React.createElement("div", {
+    style: S.segWrap
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setAddMode("route"),
     style: {
-      display: "flex",
-      gap: 8
+      ...S.seg,
+      ...(addMode === "route" ? S.segOn : {})
     }
-  }, /*#__PURE__*/React.createElement("select", {
+  }, "🚜 コースから"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setAddMode("field"),
+    style: {
+      ...S.seg,
+      ...(addMode === "field" ? S.segOn : {})
+    }
+  }, "🌾 圃場を選んで")), addMode === "route" ? /*#__PURE__*/React.createElement(React.Fragment, null, p.routes.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "まだ圃場コースがありません。", /*#__PURE__*/React.createElement("br", null), "プリセットタブの🚜コースで、よく回る順番を登録できます。") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("select", {
     value: "",
     onChange: e => {
       if (e.target.value) p.applyRoute(Number(e.target.value));
     },
     style: {
       ...S.planSelect,
-      marginBottom: 0,
-      flex: 1
+      marginBottom: 0
     }
   }, /*#__PURE__*/React.createElement("option", {
     value: ""
-  }, "▼ コースを選んでこの日へ投入"), p.routes.map(r => /*#__PURE__*/React.createElement("option", {
+  }, "\u25BC コースを選んでこの日へ投入"), p.routes.map(r => /*#__PURE__*/React.createElement("option", {
     key: r.id,
     value: r.id
-  }, "🚜 ", r.name, "(", r.fieldIds.length, "圃場)")))), /*#__PURE__*/React.createElement("p", {
+  }, "🚜 ", r.name, "(", r.fieldIds.length, "圃場)"))), /*#__PURE__*/React.createElement("p", {
     style: {
       ...S.note,
       marginTop: 8
     }
-  }, "コースの作成・編集は「プリセット」タブで行えます。")), /*#__PURE__*/React.createElement("section", {
-    style: S.card,
-    className: "no-print"
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "圃場を検索(登録済みマスタから)"), /*#__PURE__*/React.createElement("input", {
+  }, "コースを選ぶと、登録した順番のままこの日のリストへまとめて入ります。コースの作成・編集は「プリセット」タブで行えます。"))) : /*#__PURE__*/React.createElement(React.Fragment, null, p.fields.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "まだ圃場が登録されていません。", /*#__PURE__*/React.createElement("br", null), "プリセットタブの🌾圃場で登録してください。") : /*#__PURE__*/React.createElement(React.Fragment, null, p.fields.length > 4 && /*#__PURE__*/React.createElement("input", {
     value: query,
     placeholder: "🔍 圃場名・作物名で検索",
     onChange: e => setQuery(e.target.value),
@@ -2175,7 +2189,13 @@ function WorkTab(p) {
       ...S.memoLine,
       marginTop: 10
     }
-  }, "該当する圃場がありません。下のフォームから新規登録できます。"), results.map(f => {
+  }, "該当する圃場がありません。"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      maxHeight: 320,
+      overflowY: "auto"
+    }
+  }, results.map(f => {
     const ord = orderInToday(f.id);
     return /*#__PURE__*/React.createElement("div", {
       key: f.id,
@@ -2197,7 +2217,12 @@ function WorkTab(p) {
       onClick: () => p.addWork(f.id),
       style: S.smallPrimary
     }, "＋この日へ"));
-  })), /*#__PURE__*/React.createElement("section", {
+  })), /*#__PURE__*/React.createElement("p", {
+    style: {
+      ...S.note,
+      marginTop: 8
+    }
+  }, "タップした順にこの日のリストへ追加されます。圃場の登録・編集は「プリセット」タブで行えます。")))), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -3318,13 +3343,13 @@ function PresetTab(p) {
       ...S.memoLine,
       marginTop: 6
     }
-  }, "先に「\U0001F33E 圃場」タブで圃場を登録してください。"), (() => {
+  }, "先に「🌾 圃場」タブで圃場を登録してください。"), (() => {
     const rest = p.fields.filter(f => !routePicks.includes(f.id));
     const q = routeQ.trim();
     const list = q ? rest.filter(f => f.name.includes(q) || (f.crop || "").includes(q)) : rest;
     return /*#__PURE__*/React.createElement(React.Fragment, null, rest.length > 4 && /*#__PURE__*/React.createElement("input", {
       value: routeQ,
-      placeholder: "\U0001F50D 圃場名・作物名で検索",
+      placeholder: "🔍 圃場名・作物名で検索",
       onChange: e => setRouteQ(e.target.value),
       style: {
         ...S.fieldInput,
@@ -3441,7 +3466,7 @@ function PresetTab(p) {
     }).join(" → "))));
   }), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "コースの呼び出しは「作業・記録」タブの「圃場コースから追加」で行います。")))), sub === "chem" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+  }, "コースの呼び出しは「作業・記録」タブの「圃場を追加」→「🚜 コースから」で行います。")))), sub === "chem" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -4801,13 +4826,13 @@ function SettingsTab(p) {
     desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、プリセットタブに登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。「⭐プリセットに保存」で薬液の組み合わせを登録でき、次回から作業タブの「薬剤を圃場に適用」で呼び出せます。「↩ この薬液を控える」で前回薬液として記憶します。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます(この回数はアプリに記録された散布実績を通算した簡易的な目安で、作期での自動リセットは行われません)。"
   }, {
     title: "🚁 作業・記録タブ",
-    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場はプリセットタブで登録したマスタを「圃場を検索」で探して「＋この日へ」で追加します。「圃場コースから追加」でよく回るルートをまとめて一括投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「薬剤を圃場に適用」でプリセットや前回薬液を未実施の圃場に適用でき、各圃場の予定薬液量で薬量を自動計算します。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
+    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。「🚜 コースから」を選ぶとプルダウンからコースを選んで登録順のまま一括投入でき、「🌾 圃場を選んで」を選ぶと登録済みの圃場が一覧で出るのでタップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「薬剤を圃場に適用」でプリセットや前回薬液を未実施の圃場に適用でき、各圃場の予定薬液量で薬量を自動計算します。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 地図タブ",
     desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
   }, {
     title: "📋 プリセットタブ",
-    desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブで「検索→＋この日へ」で追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。コースの編集画面は上が「コースの順番」、下が「追加できる圃場」に分かれています。下のリストをタップすると順番の最後に追加され、順番リストの各行では⣿マークを長押ししてドラッグで順番を入れ替えたり、「外す」でコースから抜いたりできます。🧪薬剤サブタブでは、薬剤を1つずつ「薬剤名・種類・剤型・希釈倍率」で登録できます。登録した薬剤は調合タブの「📋 登録薬剤から追加」や各薬剤欄の📋ボタンから呼び出せ、名前・種類・剤型・倍率がそのまま入ります(呼び出した後で倍率だけ変えることもでき、登録内容は変わりません)。同じ名前で登録し直すと内容が上書きされます。調合計算で使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
+    desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」→「🌾 圃場を選んで」から追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。コースの編集画面は上が「コースの順番」、下が「追加できる圃場」に分かれています。下のリストをタップすると順番の最後に追加され、順番リストの各行では⣿マークを長押ししてドラッグで順番を入れ替えたり、「外す」でコースから抜いたりできます。🧪薬剤サブタブでは、薬剤を1つずつ「薬剤名・種類・剤型・希釈倍率」で登録できます。登録した薬剤は調合タブの「📋 登録薬剤から追加」や各薬剤欄の📋ボタンから呼び出せ、名前・種類・剤型・倍率がそのまま入ります(呼び出した後で倍率だけ変えることもでき、登録内容は変わりません)。同じ名前で登録し直すと内容が上書きされます。調合計算で使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
   }, {
     title: "⚙ 設定タブ",
     desc: "面積(a/ha/反/町)と薬量(L/mL/kg/g)の表示単位を切り替えられます。データは常にa・Lで保存され、表示だけ変換されます。作物マスタの管理もここで行います。送信先URL(GASのウェブアプリURL)は一度設定すれば保存されます。GASを再デプロイするときは「デプロイを管理→編集→新しいバージョン」を使うとURLが変わりません。チームコードを使って複数端末間でデータを共有できます。このガイドとバージョン履歴もここで確認できます。"
@@ -4840,7 +4865,7 @@ function SettingsTab(p) {
     ver: "v8.21",
     date: "2026-07",
     isNew: true,
-    notes: ["🔄 更新が自動で反映されるように修正(これまではスマホで2回開き直すか、アプリを完全終了しないと切り替わらなかった)", "ホーム画面アプリを前面に戻したときにも新しいバージョンを確認するように", "設定タブに「アプリの更新」を新設。「🔄 最新版に更新する」ボタンで確実に切り替えられます(保存データは消えません)", "🐞 デプロイ直後に更新すると、古いファイルをキャッシュに取り込んでしまう不具合を修正"]
+    notes: ["集計バーの「残り圃場」を「圃場数」に変更。合計面積・合計薬量も実績入力済みを含めたその日の合計に統一(見出しの「合計」と中身を一致)", "🚁 作業タブの「圃場を検索」を廃止し、「圃場を追加」に統合。「🚜 コースから」と「🌾 圃場を選んで」を切り替えて追加できるように", "「🌾 圃場を選んで」では検索しなくても登録済みの圃場が一覧で出て、タップで追加できるように", "🔄 更新が自動で反映されるように修正(これまではスマホで2回開き直すか、アプリを完全終了しないと切り替わらなかった)", "ホーム画面アプリを前面に戻したときにも新しいバージョンを確認するように", "設定タブに「アプリの更新」を新設。「🔄 最新版に更新する」ボタンで確実に切り替えられます(保存データは消えません)", "🐞 デプロイ直後に更新すると、古いファイルをキャッシュに取り込んでしまう不具合を修正"]
   }, {
     ver: "v8.20",
     date: "2026-07",
