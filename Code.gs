@@ -53,6 +53,37 @@ function getSheet_() {
   return sh;
 }
 
+// 散布日ごとに行の背景色を塗り分ける(同じ散布日は同色、日付が変わると色が切り替わる)
+const DATE_COLORS = ["#FFFFFF", "#EAF4EA"];
+
+function colorByDate_(sh) {
+  const last = sh.getLastRow();
+  if (last < 2) return;
+  const n = last - 1;
+  const dates = sh.getRange(2, 3, n, 1).getValues(); // 3列目 = 散布日
+  const colorOf = {};   // 散布日 → 色
+  let next = 0;         // 次に割り当てる色の番号
+  const bg = [];
+  for (let i = 0; i < n; i++) {
+    const v = dates[i][0];
+    const key = (v instanceof Date)
+      ? Utilities.formatDate(v, "Asia/Tokyo", "yyyy-MM-dd")
+      : String(v || "");
+    if (!(key in colorOf)) {
+      colorOf[key] = DATE_COLORS[next % DATE_COLORS.length];
+      next++;
+    }
+    const c = colorOf[key];
+    bg.push(new Array(HEADERS.length).fill(c));
+  }
+  sh.getRange(2, 1, n, HEADERS.length).setBackgrounds(bg);
+}
+
+// 既存の全行を塗り直す(GASエディタから手動実行)
+function recolorAll() {
+  colorByDate_(getSheet_());
+}
+
 // 旧レイアウトのヘッダー行を現行HEADERSに貼り直す(GASエディタから1回だけ手動実行)
 function fixHeaders() {
   const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
@@ -176,6 +207,7 @@ function doPost(e) {
       // 調合記録の新規受信(再送による二重登録は防止)
       if (row > 0) return json_({ ok: true, duplicated: true });
       sh.appendRow(buildRow_(data, "調合済"));
+      colorByDate_(sh);
       return json_({ ok: true, added: 1 });
     }
 
@@ -191,6 +223,7 @@ function doPost(e) {
       }
       // 元の記録が見つからない場合は報告内容ごと新規追加(取りこぼし防止)
       sh.appendRow(buildRow_(data, "散布済"));
+      colorByDate_(sh);
       return json_({ ok: true, added: 1 });
     }
 
