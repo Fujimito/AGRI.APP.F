@@ -53,6 +53,17 @@ function getSheet_() {
   return sh;
 }
 
+// 旧レイアウトのヘッダー行を現行HEADERSに貼り直す(GASエディタから1回だけ手動実行)
+function fixHeaders() {
+  const sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
+  if (!sh) throw new Error("シートがありません: " + SHEET_NAME);
+  const lastCol = Math.max(sh.getLastColumn(), HEADERS.length);
+  sh.getRange(1, 1, 1, lastCol).clearContent();
+  sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS])
+    .setFontWeight("bold").setBackground("#EDF5EE");
+  sh.setFrozenRows(1);
+}
+
 // 指定した記録IDの行番号を返す(なければ0)
 function findRow_(sh, recordId) {
   if (sh.getLastRow() < 2) return 0;
