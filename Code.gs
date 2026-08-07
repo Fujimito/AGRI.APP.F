@@ -54,7 +54,13 @@ function getSheet_() {
 }
 
 // 散布日ごとに行の背景色を塗り分ける(同じ散布日は同色、日付が変わると色が切り替わる)
-const DATE_COLORS = ["#FFFFFF", "#EAF4EA"];
+const DATE_COLORS = [
+  "#FFFFFF", // 白
+  "#EAF4EA", // 薄緑
+  "#FDF3E0", // 薄オレンジ
+  "#E8F1FA", // 薄青
+  "#F6ECF6", // 薄紫
+];
 
 function colorByDate_(sh) {
   const last = sh.getLastRow();
