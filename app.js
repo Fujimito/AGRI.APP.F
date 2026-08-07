@@ -13,7 +13,7 @@ const {
 //  ・チームコードによる端末間データ共有
 // ═══════════════════════════════════════════════════════
 
-const APP_VERSION = "v8.21";
+const APP_VERSION = "v8.22";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -723,7 +723,9 @@ function App() {
     }
     setWorksSave(works.map(w => {
       if (w.id !== workId) return w;
-      const per = parseFloat(w.plannedL) > 0 ? parseFloat(w.plannedL) : 0;
+      // 実績入力済みの圃場は、実際に散布した量を基準に薬量を計算する
+      const base = w.reported && parseFloat(w.sprayedL) > 0 ? parseFloat(w.sprayedL) : parseFloat(w.plannedL);
+      const per = base > 0 ? base : 0;
       const perMl = per * 1000;
       const scaled = chemList.map(c => scaleChem(c, perMl));
       const chemMlSum = scaled.reduce((s, c) => s + c.ml, 0);
@@ -2328,12 +2330,13 @@ function WorkTab(p) {
     }
   }, /*#__PURE__*/React.createElement("option", {
     value: "all"
-  }, "🚁 この日の全圃場(", pendingDayList.length, "件)にまとめて適用"), pendingDayList.map(w => {
+  }, "🚁 この日の全圃場(", pendingDayList.length, "件)にまとめて適用"), dayList.map(w => {
     const f = p.resolveWork(w);
+    // 実績入力済みの圃場も個別適用の対象に出す(後から薬剤を入れられるようにするため)
     return /*#__PURE__*/React.createElement("option", {
       key: w.id,
       value: w.id
-    }, f.name, w.plannedL ? "(予定" + fmt(parseFloat(w.plannedL), 1) + "L)" : "(予定なし)");
+    }, w.reported ? "✅ " : "", f.name, w.reported ? "(実績" + fmt(parseFloat(w.sprayedL) || 0, 1) + "L)" : w.plannedL ? "(予定" + fmt(parseFloat(w.plannedL), 1) + "L)" : "(予定なし)");
   })), /*#__PURE__*/React.createElement("div", {
     style: S.btnRow
   }, /*#__PURE__*/React.createElement("button", {
@@ -2355,7 +2358,7 @@ function WorkTab(p) {
       ...S.note,
       marginTop: 8
     }
-  }, "薬量は各圃場の予定薬液量 ÷ 希釈倍率で自動計算されます。予定薬液量が未設定の圃場は、先に上の「本日の散布投下量」で計算してください。"))),/*#__PURE__*/React.createElement("div", {
+  }, "薬量は各圃場の予定薬液量 ÷ 希釈倍率で自動計算されます。予定薬液量が未設定の圃場は、先に上の「本日の散布投下量」で計算してください。✅付き(実績入力済み)の圃場を選ぶと、実散布量を基準に計算し、次回の送信でスプレッドシートの薬剤欄が更新されます。"))),/*#__PURE__*/React.createElement("div", {
     style: S.prepBlock
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -5127,9 +5130,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
+    ver: "v8.22",
+    date: "2026-08",
+    isNew: true,
+    notes: ["🚁 実績入力済みの圃場にも、あとから薬剤を適用できるように。「この日の薬剤」の適用先プルダウンに✅付きで出ます", "実績入力済みの圃場に適用したときは、予定薬液量ではなく実散布量を基準に薬量を計算します", "あとから適用した薬剤は、次回の送信でスプレッドシートの薬剤欄(薬剤数・薬剤内容・総量・水量)が上書きされます(行は増えません)", "📊 スプレッドシートで散布日ごとに行の背景色が変わるように(5色を循環)", "📊 送信データと列名がズレていた問題の修正用に、Code.gs に fixHeaders() を追加"]
+  }, {
     ver: "v8.21",
     date: "2026-07",
-    isNew: true,
+    isNew: false,
     notes: ["🧪 薬剤マスタを単純化。薬剤名・種類・剤型・使用回数の上限だけの名前帳にし、希釈倍率と10aあたり薬量の登録をやめました", "🚁 作業タブに「この日に使用した薬剤」を新設。その日使う薬剤名と希釈倍率をその場で入力して圃場に適用できます(散布水量が変わってもその日の倍率を入れるだけ)", "入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります", "⭐プリセット・↩前回と同じ薬液は「読み込み」として当日の薬剤欄を埋める形になりました", "調合タブは「タンク1杯分の電卓」として役割を明確化", "🧮 調合タブの「↩ この薬液を控える」を廃止。作業タブの「薬剤を圃場に適用」に「🧮 いま調合タブで計算中の薬液」が出るようになり、保存操作なしでそのまま適用できます", "圃場に薬剤を適用すると、自動で「前回薬液」として控えられるように(控え忘れが起きない)", "⚠ 農薬使用回数の上限を薬剤ごとに登録できるように(プリセットタブの🧪薬剤)", "⚠ 設定タブに「農薬の使用回数」を新設。作期の開始日を設定すると、その日以降の実績だけを数えます", "🐞 プリセット保存の不具合を修正(空の薬剤行が混ざる・同名で増え続ける・空白名で保存できる・ID採番)", "使われていない旧コード(調合タブの圃場選択の名残)を削除", "集計バーの「残り圃場」を「圃場数」に変更。合計面積・合計薬量も実績入力済みを含めたその日の合計に統一(見出しの「合計」と中身を一致)", "🚁 作業タブの「圃場を検索」を廃止し、「圃場を追加」に統合。「🚜 コースから」と「🌾 圃場を選んで」を切り替えて追加できるように", "「🌾 圃場を選んで」では検索しなくても登録済みの圃場が一覧で出て、タップで追加できるように", "🔄 更新が自動で反映されるように修正(これまではスマホで2回開き直すか、アプリを完全終了しないと切り替わらなかった)", "ホーム画面アプリを前面に戻したときにも新しいバージョンを確認するように", "設定タブに「アプリの更新」を新設。「🔄 最新版に更新する」ボタンで確実に切り替えられます(保存データは消えません)", "🐞 デプロイ直後に更新すると、古いファイルをキャッシュに取り込んでしまう不具合を修正"]
   }, {
     ver: "v8.20",
