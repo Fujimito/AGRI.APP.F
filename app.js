@@ -1011,8 +1011,9 @@ function App() {
     abortRef.current = false;
     setSyncing(true);
     let current = load("tankmix:works", []);
-    // 送信対象(未送信のもの)
-    const pendingList = current.filter(w => !w.synced || w.reported && !w.reportSynced);
+    // 送信対象は「作業日で選んでいる日」の未送信ぶんだけ。
+    // 以前は全期間の未送信をまとめて送っていたため、意図しない日の記録まで一斉に送られていた。
+    const pendingList = current.filter(w => w.workDate === workDate && (!w.synced || w.reported && !w.reportSynced));
     // 開始圃場が指定されていれば、その位置から
     let startIdx = 0;
     if (startFromId) {
@@ -1283,18 +1284,22 @@ function App() {
     });
     return warnings.sort((a, b) => b.count - a.count);
   }, [works, fields, chemMaster, seasonStart]);
-  const pendingCount = works.filter(w => !w.synced || w.reported && !w.reportSynced).length;
+  const isPending = w => !w.synced || w.reported && !w.reportSynced;
+  // 未送信の件数は「選んでいる作業日」ぶんだけを数える
+  const pendingCount = works.filter(w => w.workDate === workDate && isPending(w)).length;
+  // 他の日に残っている未送信の件数(日付を切り替えてもらうための案内に使う)
+  const pendingOtherDays = works.filter(w => w.workDate !== workDate && isPending(w)).length;
 
-  // 電波が戻ったら自動で送信を試みる(未送信があるときだけ)
+  // 電波が戻ったら自動で送信を試みる(その日の未送信があるときだけ)
   useEffect(() => {
     const onOnline = () => {
       const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
-      const pend = load("tankmix:works", []).filter(w => !w.synced || w.reported && !w.reportSynced).length;
+      const pend = load("tankmix:works", []).filter(w => w.workDate === workDate && isPending(w)).length;
       if (url && pend > 0) syncPending();
     };
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
-  }, []);
+  }, [workDate]);
   return /*#__PURE__*/React.createElement("div", {
     style: S.page
   }, /*#__PURE__*/React.createElement("header", {
@@ -1326,7 +1331,7 @@ function App() {
       syncPending();
     },
     style: S.headerBadge
-  }, syncing ? "送信中…" : "☁ 未送信 " + pendingCount + "件")))), chemWarnings.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, syncing ? "送信中…" : "☁ " + dateLabel(workDate) + " 未送信 " + pendingCount + "件")))), chemWarnings.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.warnBand,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("span", {
@@ -1400,6 +1405,7 @@ function App() {
     deleteWork,
     syncPending,
     syncing,
+    pendingOtherDays,
     exportCSV,
     syncProgress,
     abortSync,
@@ -1891,7 +1897,8 @@ function WorkTab(p) {
   // 本日の投下量(L/10a)がまだ計算されていない圃場がある場合は警告バナーを出す
   const needsRateWarning = pendingDayList.some(w => !(parseFloat(w.plannedL) > 0));
   const history = p.works.filter(w => w.reported).sort((a, b) => b.id - a.id);
-  const pendingWorks = p.works.filter(w => !w.synced || w.reported && !w.reportSynced);
+  // 送信はその日ぶんだけ。日付を切り替えないと他の日の記録は送られない
+  const pendingWorks = dayList.filter(w => !w.synced || w.reported && !w.reportSynced);
   const pending = pendingWorks.length;
 
   // ドラッグ&ドロップ並べ替え(タッチ・マウス両対応)。共通処理を利用
@@ -2806,7 +2813,7 @@ function WorkTab(p) {
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "作業終了後に送信"), p.syncing && p.syncProgress.total > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "作業終了後に送信(", dateLabel(p.workDate), "ぶん・未送信 ", pending, "件)"), p.syncing && p.syncProgress.total > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.progressBox
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -2843,7 +2850,7 @@ function WorkTab(p) {
       ...S.bigSendBtn,
       opacity: p.syncing || pending === 0 || !p.gasUrl ? 0.45 : 1
     }
-  }, p.syncing ? "送信中…" : !p.gasUrl ? "☁ 送信先が未設定です" : pending === 0 ? "☁ 送信するデータはありません" : "☁ 全データを送信(未送信 " + pending + "件)"), !p.syncing && pending > 0 && p.gasUrl && pendingWorks.length > 1 && /*#__PURE__*/React.createElement("div", {
+  }, p.syncing ? "送信中…" : !p.gasUrl ? "☁ 送信先が未設定です" : pending === 0 ? "☁ " + dateLabel(p.workDate) + "に送信するデータはありません" : "☁ " + dateLabel(p.workDate) + "の未送信 " + pending + "件を送信"), !p.syncing && pending > 0 && p.gasUrl && pendingWorks.length > 1 && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 10
     }
@@ -2869,7 +2876,12 @@ function WorkTab(p) {
     }, f.name, w.reported ? "(実績)" : "(調合)");
   }))), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "電波のある場所で押してください。送信済みは二重登録されません。中止した場合は、上の選択から途中の圃場を選んで再開できます。")), /*#__PURE__*/React.createElement("section", {
+  }, "送信されるのは", dateLabel(p.workDate), "ぶんだけです。電波のある場所で押してください。送信済みは二重登録されません。中止した場合は、上の選択から途中の圃場を選んで再開できます。"), p.pendingOtherDays > 0 && /*#__PURE__*/React.createElement("p", {
+    style: {
+      ...S.memoLine,
+      marginTop: 8
+    }
+  }, "⚠ 他の日にも未送信が", p.pendingOtherDays, "件あります。上の「作業日」をその日に切り替えてから送信してください。")), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     id: "print-area"
   }, /*#__PURE__*/React.createElement("div", {
@@ -5175,7 +5187,7 @@ function SettingsTab(p) {
     ver: "v8.22",
     date: "2026-08",
     isNew: true,
-    notes: ["🎨 「この日の薬剤」パネルを2つのゾーンに色分け。「① 何を撒くか(薬剤)」は青、「② どこに撒くか(圃場)」は緑にして、どちらの操作をしているか一目で分かるように(これまで全体が同じ緑系で工程が読み取りにくかったため)", "🚁 薬剤の適用先をプルダウンからチェックリストに変更。圃場を複数チェックしてまとめて適用できます(1日のうちで場所によって薬剤が変わる場合、チェックを付け替えて何度でも適用できます)", "「未実施すべて」「この日すべて」「選択解除」のボタンで一括選択。開いたときは未実施の圃場が最初から選ばれています", "各行に現在入っている薬剤名と、予定薬液量(実績入力済みなら実散布量)を表示", "🚁 実績入力済みの圃場にも、あとから薬剤を適用できるように。適用先の一覧に✅付きで出ます", "実績入力済みの圃場に適用したときは、予定薬液量ではなく実散布量を基準に薬量を計算します", "あとから適用した薬剤は、次回の送信でスプレッドシートの薬剤欄(薬剤数・薬剤内容・総量・水量)が上書きされます(行は増えません)", "📊 スプレッドシートで散布日ごとに行の背景色が変わるように(5色を循環)", "📊 送信データと列名がズレていた問題の修正用に、Code.gs に fixHeaders() を追加"]
+    notes: ["☁ 送信が「作業日で選んでいる日」ぶんだけに限定されました(これまでは未送信のデータが日付に関係なく一斉に送られていました)", "送信ボタン・見出し・画面右上のバッジに日付と件数を表示(例:8月7日(金)の未送信 3件を送信)", "他の日にも未送信が残っているときは、件数と「作業日を切り替えてください」の案内を表示", "電波が戻ったときの自動送信も、選んでいる日ぶんだけを送るように変更", "🎨 「この日の薬剤」パネルを2つのゾーンに色分け。「① 何を撒くか(薬剤)」は青、「② どこに撒くか(圃場)」は緑にして、どちらの操作をしているか一目で分かるように(これまで全体が同じ緑系で工程が読み取りにくかったため)", "🚁 薬剤の適用先をプルダウンからチェックリストに変更。圃場を複数チェックしてまとめて適用できます(1日のうちで場所によって薬剤が変わる場合、チェックを付け替えて何度でも適用できます)", "「未実施すべて」「この日すべて」「選択解除」のボタンで一括選択。開いたときは未実施の圃場が最初から選ばれています", "各行に現在入っている薬剤名と、予定薬液量(実績入力済みなら実散布量)を表示", "🚁 実績入力済みの圃場にも、あとから薬剤を適用できるように。適用先の一覧に✅付きで出ます", "実績入力済みの圃場に適用したときは、予定薬液量ではなく実散布量を基準に薬量を計算します", "あとから適用した薬剤は、次回の送信でスプレッドシートの薬剤欄(薬剤数・薬剤内容・総量・水量)が上書きされます(行は増えません)", "📊 スプレッドシートで散布日ごとに行の背景色が変わるように(5色を循環)", "📊 送信データと列名がズレていた問題の修正用に、Code.gs に fixHeaders() を追加"]
   }, {
     ver: "v8.21",
     date: "2026-07",
