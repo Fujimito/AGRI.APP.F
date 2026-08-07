@@ -1232,7 +1232,9 @@ function App() {
     ...data
   } : c));
   const exportCSV = () => {
-    const plain = (n, d = 2) => isFinite(n) && n !== "" ? Number(n).toFixed(d).replace(/\.?0+$/, "") : "";
+    // 末尾のゼロ落としは stripTrailingZeros に任せる。以前は小数点の有無を見ずに
+    // 削っていたため、桁数0で呼ぶと "100" が "1" になる取り違えが起きえた。
+    const plain = (n, d = 2) => isFinite(n) && n !== "" ? stripTrailingZeros(Number(n).toFixed(d)) : "";
     const head = "散布日,圃場,作物,面積(a),薬剤数,薬剤内容,総量(L),水量(L),実散布量(L),フライト数,フライト内訳,状態,報告日,備考\n";
     const body = works.map(w => {
       const f = resolveWork(w);
@@ -2039,7 +2041,8 @@ function WorkTab(p) {
     onCancel: () => setReportingId(null),
     onSave: sendReport
   }), agriOpen && /*#__PURE__*/React.createElement(AgriNoteModal, {
-    groups: buildAgriGroups(p.works, p.resolveWork),
+    works: p.works,
+    resolveWork: p.resolveWork,
     flash: p.flash,
     onCancel: () => setAgriOpen(false)
   }), nextWork && selMode === "none" && !reportingWork && !editingField && !pickForDay && /*#__PURE__*/React.createElement("div", {
@@ -3263,81 +3266,139 @@ function ReportModal(p) {
 // 実績・調合を「同じ作業日 × 同じ調合」でまとめ、AgriNote の1レコード分
 // (圃場一覧・合計面積・散布液量合計・各農薬の希釈倍数と使用量)を作って
 // コピーしやすく並べる。使用量は AgriNote と同じ式(散布液量 ÷ 希釈倍数)で計算。
-// 剤型が固形(粉・粒・水和剤など)のものは kg、それ以外(液剤)は mL で出す。
-const AGRI_SOLID_FORMS = ["wp", "wg", "sp", "sg", "gr", "dl", "jumbo", "paste"];
-const agriUnit = form => AGRI_SOLID_FORMS.indexOf(form) >= 0 ? "kg" : "mL";
-const agriNum = (n, d) => !isFinite(n) ? "" : n === 0 ? "0" : Number(n).toFixed(d == null ? 3 : d).replace(/\.?0+$/, "");
+
+// 固形の剤型。使用量を kg で出すものを列挙し、それ以外(液状)は mL で出す。
+// AgriNote 側の使用量の単位と合わせるための対応表。
+const SOLID_FORM_KEYS = ["wp", "wg", "sp", "sg", "gr", "dl", "jumbo", "paste"];
+const agriAmountUnit = formKey => SOLID_FORM_KEYS.indexOf(formKey) >= 0 ? "kg" : "mL";
+
+// 末尾の余分なゼロだけを落とす。小数点を含まない文字列には手を触れない
+// ("100" から "00" を削って "1" になるような誤削除を防ぐ)。
+const stripTrailingZeros = s => s.indexOf(".") < 0 || s.indexOf("e") >= 0 ? s : s.replace(/0+$/, "").replace(/\.$/, "");
+
+// 転記用の数値表記。指定桁で丸めたうえで余分なゼロを落とす。
+// 丸めると 0 になってしまう小さな値は、0 と誤解されないよう有効数字で見せる。
+const agriNum = (value, digits) => {
+  const n = Number(value);
+  if (!isFinite(n)) return "";
+  if (n === 0) return "0";
+  const rounded = stripTrailingZeros(n.toFixed(digits == null ? 3 : digits));
+  return Number(rounded) === 0 ? stripTrailingZeros(n.toPrecision(2)) : rounded;
+};
+
+// 薬剤名のゆれ(半角カナ・全角英数)を吸収する。chemdb.json 側も同じ正規化を
+// かけてあるので、登録番号検索から登録した薬剤と手入力の薬剤が同じ名前に揃う。
+const normalizeChemName = name => (name || "").normalize("NFKC").trim();
+
+// その圃場の散布液量(L)。実績があれば実散布量、まだなら調合上の予定量を使う。
+const sprayVolumeL = work => work.reported && parseFloat(work.sprayedL) > 0 ? parseFloat(work.sprayedL) : parseFloat(work.totalL) > 0 ? parseFloat(work.totalL) : parseFloat(work.plannedL) || 0;
+
+// 作業記録を「作業日 × 調合内容」でまとめ、AgriNote の1レコード分に整形する。
 function buildAgriGroups(works, resolveWork) {
-  // 圃場ごとの散布液量:実績があれば実散布量、なければ調合上の総量
-  const sprayOf = w => w.reported && parseFloat(w.sprayedL) > 0 ? parseFloat(w.sprayedL) : parseFloat(w.totalL) > 0 ? parseFloat(w.totalL) : parseFloat(w.plannedL) || 0;
-  const groups = {};
-  (works || []).forEach(w => {
-    const chems = (w.chems || []).filter(c => c.name && parseFloat(c.ratio) > 0);
-    if (chems.length === 0) return;
-    const sig = chems.map(c => c.name + "@" + c.ratio).sort().join("|");
-    const key = w.workDate + "##" + sig;
-    if (!groups[key]) groups[key] = {
-      key,
-      date: w.workDate,
-      chems: chems.map(c => ({
-        name: c.name,
-        form: c.form,
-        ratio: parseFloat(c.ratio)
-      })),
-      fields: [],
-      sprayL: 0,
-      area: 0,
-      reportedCount: 0
-    };
-    const g = groups[key];
-    const f = resolveWork(w);
-    const a = parseFloat(w.reportAreaA || f.areaA) || 0;
-    g.fields.push({
-      name: f.name,
-      area: a,
-      reported: !!w.reported
-    });
-    g.sprayL += sprayOf(w);
-    g.area += a;
-    if (w.reported) g.reportedCount++;
-  });
-  return Object.keys(groups).map(k => {
-    const g = groups[k];
-    g.chemRows = g.chems.map(c => {
-      const base = c.ratio > 0 ? g.sprayL / c.ratio : 0; // 散布液量(L) ÷ 希釈倍数
-      const unit = agriUnit(c.form);
-      return {
-        name: c.name,
-        ratio: c.ratio,
-        unit: unit,
-        amount: unit === "kg" ? base : base * 1000,
-        form: c.form
+  const groups = new Map();
+  (works || []).forEach(work => {
+    // 日付のない記録は転記先(AgriNoteの1レコード)を決められないので除く。
+    // 見出しの日付表示でも落ちるため、ここで確実に弾いておく。
+    if (!work.workDate) return;
+    // 倍率の入っていない薬剤は使用量を計算できないので対象外
+    const validChems = (work.chems || []).filter(c => c.name && parseFloat(c.ratio) > 0);
+    if (validChems.length === 0) return;
+    // 名前と倍率は正規化してから鍵にする。"16" と "16.0"、半角カナと全角カナが
+    // 別グループに割れて転記が二度手間になるのを防ぐため。
+    const mix = validChems.map(c => ({
+      name: normalizeChemName(c.name),
+      form: c.form,
+      ratio: parseFloat(c.ratio)
+    }));
+    const mixKey = mix.map(c => c.name + "@" + c.ratio).sort().join("|");
+    const groupKey = work.workDate + "##" + mixKey;
+    let group = groups.get(groupKey);
+    if (!group) {
+      group = {
+        key: groupKey,
+        date: work.workDate,
+        chems: mix,
+        fieldMap: new Map(),
+        sprayL: 0
       };
-    });
-    return g;
+      groups.set(groupKey, group);
+    }
+    const field = resolveWork(work);
+    // 同じ圃場に同日・同じ調合の記録が2件あっても、圃場と面積は1回だけ数える
+    // (AgriNote では圃場を1回しか選べないため)。散布液量だけは合算する。
+    const fieldKey = work.fieldId != null ? "id:" + work.fieldId : "name:" + field.name;
+    const known = group.fieldMap.get(fieldKey);
+    if (known) {
+      if (work.reported) known.reported = true;
+    } else {
+      group.fieldMap.set(fieldKey, {
+        name: field.name,
+        areaA: parseFloat(work.reportAreaA || field.areaA) || 0,
+        reported: !!work.reported
+      });
+    }
+    group.sprayL += sprayVolumeL(work);
+  });
+  return Array.from(groups.values()).map(group => {
+    const fields = Array.from(group.fieldMap.values());
+    return {
+      key: group.key,
+      date: group.date,
+      fields,
+      areaA: fields.reduce((sum, f) => sum + f.areaA, 0),
+      sprayL: group.sprayL,
+      reportedCount: fields.filter(f => f.reported).length,
+      chemRows: group.chems.map(chem => {
+        const amountL = group.sprayL / chem.ratio; // 散布液量 ÷ 希釈倍数
+        const unit = agriAmountUnit(chem.form);
+        return {
+          name: chem.name,
+          ratio: chem.ratio,
+          form: chem.form,
+          unit,
+          amount: unit === "kg" ? amountL : amountL * 1000
+        };
+      })
+    };
   }).sort((a, b) => a.date < b.date ? 1 : a.date > b.date ? -1 : 0);
 }
-function AgriNoteModal(p) {
-  const copy = (text, label) => {
-    const done = () => p.flash && p.flash((label || "値") + "をコピーしました");
-    const fallback = () => {
-      const ta = document.createElement("textarea");
-      ta.value = text;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      try {
-        document.execCommand("copy");
-        done();
-      } catch (e) {}
-      document.body.removeChild(ta);
-    };
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);else fallback();
+
+// クリップボードへコピーする。navigator.clipboard は https か localhost でしか
+// 使えないため、失敗したときは textarea 経由の従来手段にフォールバックする。
+function copyToClipboard(text, onDone) {
+  const fallback = () => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch (e) {}
+    document.body.removeChild(ta);
+    if (ok && onDone) onDone();
   };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(() => onDone && onDone(), fallback);else fallback();
+}
+const agriRowStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 8,
+  padding: "6px 0",
+  borderTop: "1px solid #eef2f7"
+};
+const agriValueStyle = {
+  fontWeight: 700,
+  fontSize: 15
+};
+function AgriNoteModal(p) {
+  const groups = React.useMemo(() => buildAgriGroups(p.works, p.resolveWork), [p.works, p.resolveWork]);
   const copyBtn = (text, label) => /*#__PURE__*/React.createElement("button", {
-    onClick: () => copy(text, label),
-    title: "コピー",
+    onClick: () => copyToClipboard(text, () => p.flash && p.flash(label + "をコピーしました")),
+    title: label + "をコピー",
     style: {
       marginLeft: 6,
       padding: "2px 8px",
@@ -3349,18 +3410,79 @@ function AgriNoteModal(p) {
       flex: "0 0 auto"
     }
   }, "⧉");
-  const rowStyle = {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-    padding: "6px 0",
-    borderTop: "1px solid #eef2f7"
-  };
-  const valStyle = {
-    fontWeight: 700,
-    fontSize: 15
-  };
+  // 「圃場」行。AgriNote へは1行1圃場で貼れるよう、コピー時だけ改行区切りにする
+  const fieldsRow = group => /*#__PURE__*/React.createElement("div", {
+    style: agriRowStyle
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.tdSub
+  }, "圃場"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 13,
+      wordBreak: "break-all"
+    }
+  }, group.fields.map(f => f.name).join("、"))), copyBtn(group.fields.map(f => f.name).join("\n"), "圃場一覧"));
+  const sprayRow = group => /*#__PURE__*/React.createElement("div", {
+    style: agriRowStyle
+  }, /*#__PURE__*/React.createElement("div", null, "散布液量 合計", group.areaA > 0 && /*#__PURE__*/React.createElement("span", {
+    style: S.tdSub
+  }, "  (", agriNum(group.sprayL / (group.areaA / 10), 4), " L/10a)")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: agriValueStyle
+  }, agriNum(group.sprayL, 3), " L"), copyBtn(agriNum(group.sprayL, 3), "散布液量")));
+  const chemRow = (chem, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: agriRowStyle
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14,
+      fontWeight: 600
+    }
+  }, chem.name), /*#__PURE__*/React.createElement("div", {
+    style: S.tdSub
+  }, formLabel(chem.form))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 4
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 13
+    }
+  }, chem.ratio, "倍"), copyBtn(String(chem.ratio), "希釈倍数"), /*#__PURE__*/React.createElement("span", {
+    style: agriValueStyle
+  }, agriNum(chem.amount, 3), " ", chem.unit), copyBtn(agriNum(chem.amount, 3), "使用量")));
+  const groupCard = group => /*#__PURE__*/React.createElement("div", {
+    key: group.key,
+    style: {
+      border: "1px solid #e2e8f0",
+      borderRadius: 10,
+      padding: 12,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700,
+      fontSize: 15,
+      marginBottom: 6
+    }
+  }, dateLabel(group.date), "  ", /*#__PURE__*/React.createElement("span", {
+    style: S.tdSub
+  }, group.fields.length, "圃場・", fmt(group.areaA, 2), " a", group.reportedCount < group.fields.length ? "(未実績あり)" : "")), fieldsRow(group), sprayRow(group), group.chemRows.map(chemRow));
   return /*#__PURE__*/React.createElement("div", {
     style: S.modalOverlay,
     className: "no-print",
@@ -3380,77 +3502,9 @@ function AgriNoteModal(p) {
     style: S.cardLabel
   }, "📋 アグリノート転記"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "「同じ日 × 同じ調合」でまとめた1グループが、AgriNote の1レコードに対応します。⧉ で数値をコピーして貼り付けてください。使用量 = 散布液量 ÷ 希釈倍数(AgriNote と同じ式)。単位は剤型からの推定です。"), p.groups.length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }, "「同じ日 × 同じ調合」でまとめた1グループが、AgriNote の1レコードに対応します。⧉ で数値をコピーして貼り付けてください。使用量 = 散布液量 ÷ 希釈倍数(AgriNote と同じ式)。単位は剤型からの推定です。"), groups.length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "薬剤が入力された記録がありません。") : p.groups.map(g => /*#__PURE__*/React.createElement("div", {
-    key: g.key,
-    style: {
-      border: "1px solid #e2e8f0",
-      borderRadius: 10,
-      padding: 12,
-      marginTop: 12
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontWeight: 700,
-      fontSize: 15,
-      marginBottom: 6
-    }
-  }, dateLabel(g.date), "  ", /*#__PURE__*/React.createElement("span", {
-    style: S.tdSub
-  }, g.fields.length, "圃場・", fmt(g.area, 2), " a", g.reportedCount < g.fields.length ? "(未実績あり)" : "")), /*#__PURE__*/React.createElement("div", {
-    style: rowStyle
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.tdSub
-  }, "圃場"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 13,
-      wordBreak: "break-all"
-    }
-  }, g.fields.map(f => f.name).join("、"))), copyBtn(g.fields.map(f => f.name).join("\n"), "圃場一覧")), /*#__PURE__*/React.createElement("div", {
-    style: rowStyle
-  }, /*#__PURE__*/React.createElement("div", null, "散布液量 合計", /*#__PURE__*/React.createElement("span", {
-    style: S.tdSub
-  }, "  (", agriNum(g.area > 0 ? g.sprayL / (g.area / 10) : 0, 4), " L/10a)")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center"
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: valStyle
-  }, agriNum(g.sprayL, 3), " L"), copyBtn(agriNum(g.sprayL, 3), "散布液量"))), g.chemRows.map((c, i) => /*#__PURE__*/React.createElement("div", {
-    key: i,
-    style: rowStyle
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 14,
-      fontWeight: 600
-    }
-  }, c.name), /*#__PURE__*/React.createElement("div", {
-    style: S.tdSub
-  }, formLabel(c.form))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 4
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 13
-    }
-  }, c.ratio, "倍"), copyBtn(String(c.ratio), "希釈倍数"), /*#__PURE__*/React.createElement("span", {
-    style: valStyle
-  }, agriNum(c.amount, 3), " ", c.unit), copyBtn(agriNum(c.amount, 3), "使用量")))))), /*#__PURE__*/React.createElement("button", {
+  }, "薬剤が入力された記録がありません。") : groups.map(groupCard), /*#__PURE__*/React.createElement("button", {
     onClick: p.onCancel,
     style: {
       ...S.secondaryBtn,
@@ -3464,67 +3518,77 @@ function AgriNoteModal(p) {
 // FAMICの農薬登録情報(基本部)を chemdb.json として同梱し、登録番号・農薬名・
 // 成分名で検索して、その場で薬剤マスタ(プリセット)に登録できるようにする。
 // データは公的情報(FAMIC 農薬登録情報ダウンロード)のスナップショット。
-let CHEMDB_CACHE = null;
-let CHEMDB_PROMISE = null;
+// chemdb.json の1件は {n:登録番号, nm:農薬名, u:用途キー, f:剤型キー, ig:有効成分, mk:登録者}。
+// 容量を抑えるためキー名を短くしてある。生成は tools/update_chemdb.py。
+const CHEM_SEARCH_LIMIT = 200; // 一度に表示する検索結果の上限
+let chemDbCache = null;
+let chemDbLoading = null;
 function loadChemDb() {
-  if (CHEMDB_CACHE) return Promise.resolve(CHEMDB_CACHE);
-  if (!CHEMDB_PROMISE) CHEMDB_PROMISE = fetch("chemdb.json").then(r => {
-    if (!r.ok) throw new Error("load失敗");
-    return r.json();
-  }).then(d => {
-    CHEMDB_CACHE = d;
-    return d;
+  if (chemDbCache) return Promise.resolve(chemDbCache);
+  if (!chemDbLoading) chemDbLoading = fetch("chemdb.json").then(res => {
+    if (!res.ok) throw new Error("農薬データの取得に失敗しました");
+    return res.json();
+  }).then(data => {
+    chemDbCache = data;
+    return data;
+  }).catch(err => {
+    // 失敗した Promise を残すと、オンラインに戻っても二度と読み込めなくなる
+    chemDbLoading = null;
+    throw err;
   });
-  return CHEMDB_PROMISE;
+  return chemDbLoading;
 }
 function ChemSearchModal(p) {
-  const [db, setDb] = useState(null);
-  const [err, setErr] = useState(false);
-  const [q, setQ] = useState("");
+  const [chemDb, setChemDb] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [keyword, setKeyword] = useState("");
   const [byNo, setByNo] = useState(true);
   const [byName, setByName] = useState(true);
-  const [byIng, setByIng] = useState(false);
-  const [added, setAdded] = useState({}); // 登録番号 -> true(この画面で登録した印)
+  const [byIngredient, setByIngredient] = useState(false);
+  const [justAdded, setJustAdded] = useState({}); // 登録番号 -> true(この画面で登録した印)
   useEffect(() => {
     let alive = true;
-    loadChemDb().then(d => {
-      if (alive) setDb(d);
+    loadChemDb().then(data => {
+      if (alive) setChemDb(data);
     }).catch(() => {
-      if (alive) setErr(true);
+      if (alive) setLoadFailed(true);
     });
     return () => {
       alive = false;
     };
   }, []);
-  const query = q.trim();
+  const query = keyword.trim();
   const results = React.useMemo(() => {
-    if (!db || !query) return [];
+    if (!chemDb || !query) return [];
     // 半角カナ・全角英数のゆれを吸収(DB側は生成時にNFKC正規化済み)
-    const qn = query.normalize("NFKC");
-    const ql = qn.toLowerCase();
-    const out = [];
-    for (let i = 0; i < db.length && out.length < 200; i++) {
-      const c = db[i];
-      if (byNo && String(c.n).indexOf(qn) >= 0 || byName && c.nm && c.nm.toLowerCase().indexOf(ql) >= 0 || byIng && c.ig && c.ig.toLowerCase().indexOf(ql) >= 0) out.push(c);
+    const normalized = query.normalize("NFKC");
+    const lower = normalized.toLowerCase();
+    const found = [];
+    for (let i = 0; i < chemDb.length && found.length < CHEM_SEARCH_LIMIT; i++) {
+      const chem = chemDb[i];
+      if (byNo && String(chem.n).indexOf(normalized) >= 0 || byName && chem.nm && chem.nm.toLowerCase().indexOf(lower) >= 0 || byIngredient && chem.ig && chem.ig.toLowerCase().indexOf(lower) >= 0) found.push(chem);
     }
-    return out;
-  }, [db, query, byNo, byName, byIng]);
-  const isRegistered = c => !!added[c.n] || p.existingNames.indexOf(c.nm) >= 0;
-  const register = c => {
+    return found;
+  }, [chemDb, query, byNo, byName, byIngredient]);
+  // 登録済み判定も正規化して比べる。手入力した半角カナの薬剤と、ここから登録した
+  // 全角の薬剤が別物と見なされて二重登録されるのを防ぐ。
+  const registeredNames = React.useMemo(() => (p.existingNames || []).map(normalizeChemName), [p.existingNames]);
+  const isRegistered = chem => !!justAdded[chem.n] || registeredNames.indexOf(normalizeChemName(chem.nm)) >= 0;
+  const register = chem => {
     p.onPick({
-      name: c.nm,
-      use: c.u,
-      form: c.f
+      name: chem.nm,
+      use: chem.u,
+      form: chem.f
     });
-    setAdded(a => {
-      const n = {
-        ...a
+    setJustAdded(prev => {
+      const next = {
+        ...prev
       };
-      n[c.n] = true;
-      return n;
+      next[chem.n] = true;
+      return next;
     });
   };
-  const chk = (val, set, label) => /*#__PURE__*/React.createElement("label", {
+  const filterCheck = (checked, setChecked, label) => /*#__PURE__*/React.createElement("label", {
     style: {
       display: "inline-flex",
       alignItems: "center",
@@ -3534,8 +3598,8 @@ function ChemSearchModal(p) {
     }
   }, /*#__PURE__*/React.createElement("input", {
     type: "checkbox",
-    checked: val,
-    onChange: e => set(e.target.checked)
+    checked: checked,
+    onChange: e => setChecked(e.target.checked)
   }), label);
   return /*#__PURE__*/React.createElement("div", {
     style: S.modalOverlay,
@@ -3555,28 +3619,28 @@ function ChemSearchModal(p) {
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
   }, "🔢 農薬を登録番号・名称で検索"), /*#__PURE__*/React.createElement("input", {
-    value: q,
+    value: keyword,
     autoFocus: true,
     placeholder: "🔍 登録番号・農薬名・成分名",
-    onChange: e => setQ(e.target.value),
+    onChange: e => setKeyword(e.target.value),
     style: S.fieldInput
   }), /*#__PURE__*/React.createElement("div", {
     style: {
       margin: "10px 0"
     }
-  }, "絞り込み　", chk(byNo, setByNo, "登録番号"), chk(byName, setByName, "農薬名"), chk(byIng, setByIng, "成分名")), err ? /*#__PURE__*/React.createElement("p", {
+  }, "絞り込み　", filterCheck(byNo, setByNo, "登録番号"), filterCheck(byName, setByName, "農薬名"), filterCheck(byIngredient, setByIngredient, "成分名")), loadFailed ? /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "農薬データを読み込めませんでした。オンラインで一度アプリを開くと、以降はオフラインでも使えます。") : !db ? /*#__PURE__*/React.createElement("p", {
+  }, "農薬データを読み込めませんでした。オンラインで一度アプリを開くと、以降はオフラインでも使えます。") : !chemDb ? /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "農薬データを読み込み中…") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "検索結果：", query ? results.length + "件" + (results.length >= 200 ? "以上(絞り込んでください)" : "") : "キーワードを入力してください"), results.map(c => /*#__PURE__*/React.createElement("button", {
-    key: c.n,
-    onClick: () => register(c),
-    disabled: isRegistered(c),
+  }, "検索結果：", query ? results.length + "件" + (results.length >= CHEM_SEARCH_LIMIT ? "以上(絞り込んでください)" : "") : "キーワードを入力してください"), results.map(chem => /*#__PURE__*/React.createElement("button", {
+    key: chem.n,
+    onClick: () => register(chem),
+    disabled: isRegistered(chem),
     style: {
       ...S.chemPickRow,
-      opacity: isRegistered(c) ? 0.5 : 1
+      opacity: isRegistered(chem) ? 0.5 : 1
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -3586,15 +3650,15 @@ function ChemSearchModal(p) {
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: S.listTitle
-  }, c.nm), /*#__PURE__*/React.createElement("div", {
+  }, chem.nm), /*#__PURE__*/React.createElement("div", {
     style: S.listSub
-  }, "No.", c.n, "・", useLabel(c.u), "・", formLabel(c.f), c.ig ? "・" + c.ig : "")), /*#__PURE__*/React.createElement("span", {
+  }, "No.", chem.n, "・", useLabel(chem.u), "・", formLabel(chem.f), chem.ig ? "・" + chem.ig : "")), /*#__PURE__*/React.createElement("span", {
     style: {
       fontSize: 13,
       fontWeight: 700,
-      color: isRegistered(c) ? "#16a34a" : "#2563eb"
+      color: isRegistered(chem) ? "#16a34a" : "#2563eb"
     }
-  }, isRegistered(c) ? "✓登録済" : "＋登録")))), /*#__PURE__*/React.createElement("button", {
+  }, isRegistered(chem) ? "✓登録済" : "＋登録")))), /*#__PURE__*/React.createElement("button", {
     onClick: p.onCancel,
     style: {
       ...S.secondaryBtn,
