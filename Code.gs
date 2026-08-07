@@ -38,7 +38,8 @@ const HEADERS = [
   "備考",         // 15
 ];
 const COL = {
-  ID: 2, AREA: 7, SPRAYED: 12, STATUS: 13, REPORT_DATE: 14, MEMO: 15,
+  ID: 2, AREA: 7, CHEM_N: 8, CHEM_TEXT: 9, TOTAL: 10, WATER: 11,
+  SPRAYED: 12, STATUS: 13, REPORT_DATE: 14, MEMO: 15,
 };
 
 function getSheet_() {
@@ -210,8 +211,17 @@ function doPost(e) {
     const row = findRow_(sh, rec.id);
 
     if (type === "record") {
-      // 調合記録の新規受信(再送による二重登録は防止)
-      if (row > 0) return json_({ ok: true, duplicated: true });
+      // 既に行がある場合は薬剤の内容だけ上書きする。
+      // (実績入力のあとから薬剤を適用したケースを反映するため。行は増やさない)
+      if (row > 0) {
+        sh.getRange(row, COL.CHEM_N, 1, 4).setValues([[
+          rec.chems.length,
+          chemsText_(rec.chems),
+          Number(rec.totalL) || 0,
+          Math.round(Number(rec.waterMl) || 0) / 1000,
+        ]]);
+        return json_({ ok: true, updated: 1, chemsOnly: true });
+      }
       sh.appendRow(buildRow_(data, "調合済"));
       colorByDate_(sh);
       return json_({ ok: true, added: 1 });
