@@ -715,14 +715,19 @@ function App() {
     setLastMix(snap);
     save("tankmix:lastmix", snap);
   };
-  // 薬剤(プリセット/前回薬液)を1圃場に適用。各圃場の予定薬液量で薬量を自動計算
-  const applyChemsToWork = (workId, chemList) => {
+  // 薬剤(プリセット/前回薬液)を指定した圃場すべてに適用。各圃場の薬液量で薬量を自動計算
+  const applyChemsToWorks = (workIds, chemList) => {
     if (!chemList || chemList.length === 0) {
       flash("薬剤が選ばれていません");
       return;
     }
+    const ids = (workIds || []).filter(id => id != null);
+    if (ids.length === 0) {
+      flash("圃場が選ばれていません");
+      return;
+    }
     setWorksSave(works.map(w => {
-      if (w.id !== workId) return w;
+      if (!ids.includes(w.id)) return w;
       // 実績入力済みの圃場は、実際に散布した量を基準に薬量を計算する
       const base = w.reported && parseFloat(w.sprayedL) > 0 ? parseFloat(w.sprayedL) : parseFloat(w.plannedL);
       const per = base > 0 ? base : 0;
@@ -743,40 +748,18 @@ function App() {
       use: c.use || "other"
     })));
     rememberMix(chemList);
-    flash("薬剤を適用しました");
+    flash(ids.length === 1 ? "薬剤を適用しました" : ids.length + "圃場に薬剤を適用しました");
   };
-  // 薬剤をその日の全圃場に一括適用(各圃場の予定薬液量で自動計算)
+  // 薬剤を1圃場だけに適用
+  const applyChemsToWork = (workId, chemList) => applyChemsToWorks([workId], chemList);
+  // 薬剤をその日の未実施の圃場すべてに一括適用
   const applyChemsToAll = chemList => {
-    if (!chemList || chemList.length === 0) {
-      flash("薬剤が選ばれていません");
-      return;
-    }
     const dayIds = works.filter(w => w.workDate === workDate && !w.reported).map(w => w.id);
     if (dayIds.length === 0) {
       flash("この日の作業リストが空です");
       return;
     }
-    setWorksSave(works.map(w => {
-      if (!dayIds.includes(w.id)) return w;
-      const per = parseFloat(w.plannedL) > 0 ? parseFloat(w.plannedL) : 0;
-      const perMl = per * 1000;
-      const scaled = chemList.map(c => scaleChem(c, perMl));
-      const chemMlSum = scaled.reduce((s, c) => s + c.ml, 0);
-      return {
-        ...w,
-        chems: scaled,
-        totalL: per,
-        waterMl: perMl - chemMlSum,
-        synced: false
-      };
-    }));
-    upsertChemMaster(chemList.map(c => ({
-      name: c.name || "(無名)",
-      form: c.form,
-      use: c.use || "other"
-    })));
-    rememberMix(chemList);
-    flash(dayIds.length + "圃場すべてに薬剤を適用しました");
+    applyChemsToWorks(dayIds, chemList);
   };
 
   // 本日の散布投下量(10aあたりL)から、その日の全圃場の予定薬液量を面積に応じて一括計算
@@ -1434,6 +1417,7 @@ function App() {
     clearDayChems,
     fillDayChems,
     applyChemsToWork,
+    applyChemsToWorks,
     applyChemsToAll,
     crops,
     addCrop,
@@ -1891,7 +1875,7 @@ function WorkTab(p) {
   // 「今日の準備」は既定で畳む。まだ圃場が入っていない日は開いた状態で始める
   const [prepOpen, setPrepOpen] = useState(() => p.works.filter(w => w.workDate === p.workDate).length === 0);
   const [pickForDay, setPickForDay] = useState(false);
-  const [chemTargetId, setChemTargetId] = useState(null); // 個別適用の対象圃場(null=全圃場)
+  const [chemTargetIds, setChemTargetIds] = useState([]); // 薬剤の適用先としてチェックした圃場ID
   const [dragId, setDragId] = useState(null); // ドラッグ中の圃場ID
   const [dragOverId, setDragOverId] = useState(null); // ドロップ先候補
   const [dragPos, setDragPos] = useState(null); // 指・ポインタの現在位置(フロートするチップの表示用)
@@ -2189,7 +2173,11 @@ function WorkTab(p) {
     style: S.dayChemSummary,
     className: "num"
   }, p.dayChems.map(c => (c.name || "(無名)") + (c.ratio ? " " + c.ratio + "倍" : "")).join(" ／ ")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setDayChemsOpen(true),
+    onClick: () => {
+      // 開くたびに未実施の圃場を初期選択しておく(全圃場に使うケースが一番多いため)
+      setChemTargetIds(pendingDayList.map(w => w.id));
+      setDayChemsOpen(true);
+    },
     style: {
       ...S.smallPrimary,
       width: "100%",
@@ -2200,7 +2188,11 @@ function WorkTab(p) {
     style: {
       marginTop: 6
     }
-  }, p.dayChems.length === 0 && /*#__PURE__*/React.createElement("p", {
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.zoneChem
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.zoneChemHead
+  }, "① 何を撒くか（この日に使う薬剤）"), p.dayChems.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "「＋ 薬剤を追加」で、この日に使う薬剤を入れてください。"), p.dayChems.map(c => /*#__PURE__*/React.createElement("div", {
     key: c.id,
@@ -2287,13 +2279,13 @@ function WorkTab(p) {
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => p.addDayChem(),
     style: {
-      ...S.addBtn,
+      ...S.addBtnBlue,
       marginTop: 0
     }
   }, "＋ 薬剤を追加"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setPickForDay(true),
     style: {
-      ...S.addBtn,
+      ...S.addBtnBlue,
       marginTop: 0
     }
   }, "📋 登録薬剤から追加")), (p.presets.length > 0 || p.lastMix && p.lastMix.length > 0) && /*#__PURE__*/React.createElement("div", {
@@ -2315,50 +2307,100 @@ function WorkTab(p) {
       ...S.applyChemBtn,
       marginTop: 6
     }
-  }, "⭐ ", pr.name, "（", pr.chems.map(c => (c.name || "無名") + " " + c.ratio + "倍").join("・"), "）"))), /*#__PURE__*/React.createElement("div", {
+  }, "⭐ ", pr.name, "（", pr.chems.map(c => (c.name || "無名") + " " + c.ratio + "倍").join("・"), "）")))), /*#__PURE__*/React.createElement("div", {
+    style: S.zoneField
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.zoneFieldHead
+  }, "② どこに撒くか（適用先の圃場）"), /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "チェックした圃場に適用します"),
+  // 日によって圃場ごとに使う薬剤が変わるため、複数の圃場をチェックでまとめて選べるようにする
+  /*#__PURE__*/React.createElement("div", {
     style: {
-      ...S.smallLabel,
-      marginTop: 16
-    }
-  }, "適用先"), /*#__PURE__*/React.createElement("select", {
-    value: chemTargetId === null ? "all" : String(chemTargetId),
-    onChange: e => setChemTargetId(e.target.value === "all" ? null : Number(e.target.value)),
-    style: {
-      ...S.planSelect,
+      display: "flex",
+      gap: 8,
+      flexWrap: "wrap",
       marginTop: 6,
+      marginBottom: 8
+    }
+  }, [{
+    label: "未実施すべて(" + pendingDayList.length + ")",
+    ids: pendingDayList.map(w => w.id)
+  }, {
+    label: "この日すべて(" + dayList.length + ")",
+    ids: dayList.map(w => w.id)
+  }, {
+    label: "選択解除",
+    ids: []
+  }].map(b => /*#__PURE__*/React.createElement("button", {
+    key: b.label,
+    onClick: () => setChemTargetIds(b.ids),
+    style: S.chemPickQuick
+  }, b.label))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      maxHeight: 280,
+      overflowY: "auto",
       marginBottom: 10
     }
-  }, /*#__PURE__*/React.createElement("option", {
-    value: "all"
-  }, "🚁 この日の全圃場(", pendingDayList.length, "件)にまとめて適用"), dayList.map(w => {
+  }, dayList.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "この日の作業リストが空です。先に圃場を追加してください。") : dayList.map(w => {
     const f = p.resolveWork(w);
-    // 実績入力済みの圃場も個別適用の対象に出す(後から薬剤を入れられるようにするため)
-    return /*#__PURE__*/React.createElement("option", {
+    const on = chemTargetIds.includes(w.id);
+    return /*#__PURE__*/React.createElement("div", {
       key: w.id,
-      value: w.id
-    }, w.reported ? "✅ " : "", f.name, w.reported ? "(実績" + fmt(parseFloat(w.sprayedL) || 0, 1) + "L)" : w.plannedL ? "(予定" + fmt(parseFloat(w.plannedL), 1) + "L)" : "(予定なし)");
-  })), /*#__PURE__*/React.createElement("div", {
-    style: S.btnRow
+      onClick: () => setChemTargetIds(on ? chemTargetIds.filter(id => id !== w.id) : chemTargetIds.concat(w.id)),
+      style: {
+        ...S.pickRow,
+        marginBottom: 6,
+        ...(on ? S.pickRowOn : {})
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...S.pickNum,
+        ...(on ? S.pickNumOn : {})
+      }
+    }, on ? "✓" : ""), /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1,
+        minWidth: 0
+      }
+    }, w.reported ? "✅ " : "", f.name, w.chems && w.chems.length > 0 && /*#__PURE__*/React.createElement("div", {
+      style: S.tdSub
+    }, "現在: ", w.chems.map(c => c.name || "無名").join("・"))), /*#__PURE__*/React.createElement("span", {
+      style: S.tdSub,
+      className: "num"
+    }, w.reported ? "実績" + fmt(parseFloat(w.sprayedL) || 0, 1) + "L" : w.plannedL ? "予定" + fmt(parseFloat(w.plannedL), 1) + "L" : "予定なし"));
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 12
+    }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setDayChemsOpen(false),
     style: S.secondaryBtn
-  }, "閉じる"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      if (p.validDayChems.length === 0) return;
-      chemTargetId === null ? p.applyChemsToAll(p.validDayChems) : p.applyChemsToWork(chemTargetId, p.validDayChems);
-      setDayChemsOpen(false);
-    },
-    disabled: p.validDayChems.length === 0,
-    style: {
-      ...S.primaryBtn,
-      opacity: p.validDayChems.length === 0 ? 0.4 : 1
-    }
-  }, "🚁 圃場に適用")), /*#__PURE__*/React.createElement("p", {
+  }, "閉じる"), (() => {
+    // この日のリストに残っている圃場だけを適用対象にする(日付を変えたときの選択残りを除く)
+    const targets = chemTargetIds.filter(id => dayList.some(w => w.id === id));
+    const ready = p.validDayChems.length > 0 && targets.length > 0;
+    return /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        if (!ready) return;
+        p.applyChemsToWorks(targets, p.validDayChems);
+        setDayChemsOpen(false);
+      },
+      disabled: !ready,
+      style: {
+        ...S.primaryBtn,
+        opacity: ready ? 1 : 0.4
+      }
+    }, "🚁 選択した", targets.length, "圃場に適用");
+  })()), /*#__PURE__*/React.createElement("p", {
     style: {
       ...S.note,
       marginTop: 8
     }
-  }, "薬量は各圃場の予定薬液量 ÷ 希釈倍率で自動計算されます。予定薬液量が未設定の圃場は、先に上の「本日の散布投下量」で計算してください。✅付き(実績入力済み)の圃場を選ぶと、実散布量を基準に計算し、次回の送信でスプレッドシートの薬剤欄が更新されます。"))),/*#__PURE__*/React.createElement("div", {
+  }, "圃場ごとに使う薬剤が違う日は、チェックを付け替えて何度でも適用できます(適用のたびに、その圃場の薬剤は選んだ内容で置き換わります)。薬量は各圃場の予定薬液量 ÷ 希釈倍率で自動計算されます。予定薬液量が未設定の圃場は、先に上の「本日の散布投下量」で計算してください。✅付き(実績入力済み)の圃場は実散布量を基準に計算し、次回の送信でスプレッドシートの薬剤欄が更新されます。"))),/*#__PURE__*/React.createElement("div", {
     style: S.prepBlock
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -5133,7 +5175,7 @@ function SettingsTab(p) {
     ver: "v8.22",
     date: "2026-08",
     isNew: true,
-    notes: ["🚁 実績入力済みの圃場にも、あとから薬剤を適用できるように。「この日の薬剤」の適用先プルダウンに✅付きで出ます", "実績入力済みの圃場に適用したときは、予定薬液量ではなく実散布量を基準に薬量を計算します", "あとから適用した薬剤は、次回の送信でスプレッドシートの薬剤欄(薬剤数・薬剤内容・総量・水量)が上書きされます(行は増えません)", "📊 スプレッドシートで散布日ごとに行の背景色が変わるように(5色を循環)", "📊 送信データと列名がズレていた問題の修正用に、Code.gs に fixHeaders() を追加"]
+    notes: ["🎨 「この日の薬剤」パネルを2つのゾーンに色分け。「① 何を撒くか(薬剤)」は青、「② どこに撒くか(圃場)」は緑にして、どちらの操作をしているか一目で分かるように(これまで全体が同じ緑系で工程が読み取りにくかったため)", "🚁 薬剤の適用先をプルダウンからチェックリストに変更。圃場を複数チェックしてまとめて適用できます(1日のうちで場所によって薬剤が変わる場合、チェックを付け替えて何度でも適用できます)", "「未実施すべて」「この日すべて」「選択解除」のボタンで一括選択。開いたときは未実施の圃場が最初から選ばれています", "各行に現在入っている薬剤名と、予定薬液量(実績入力済みなら実散布量)を表示", "🚁 実績入力済みの圃場にも、あとから薬剤を適用できるように。適用先の一覧に✅付きで出ます", "実績入力済みの圃場に適用したときは、予定薬液量ではなく実散布量を基準に薬量を計算します", "あとから適用した薬剤は、次回の送信でスプレッドシートの薬剤欄(薬剤数・薬剤内容・総量・水量)が上書きされます(行は増えません)", "📊 スプレッドシートで散布日ごとに行の背景色が変わるように(5色を循環)", "📊 送信データと列名がズレていた問題の修正用に、Code.gs に fixHeaders() を追加"]
   }, {
     ver: "v8.21",
     date: "2026-07",
@@ -6056,7 +6098,7 @@ const S = {
     padding: "10px 12px",
     marginBottom: 8,
     background: "#fff",
-    border: "1.5px solid #D8E0D2",
+    border: "1.5px solid #BBD6E8",
     borderRadius: 10
   },
   dayChemSummary: {
@@ -6152,6 +6194,65 @@ const S = {
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0
+  },
+  // 薬剤の適用先チェックリスト(選択中の行・チェック枠・上部の一括選択ボタン)
+  pickRowOn: {
+    borderColor: "#2E7D4F",
+    background: "#EDF5EE"
+  },
+  pickNumOn: {
+    background: "#2E7D4F",
+    color: "#fff"
+  },
+  chemPickQuick: {
+    padding: "8px 12px",
+    fontSize: 13.5,
+    fontWeight: 700,
+    color: "#2E7D4F",
+    background: "#EDF5EE",
+    border: "1.5px solid #B9D4C0",
+    borderRadius: 8,
+    cursor: "pointer"
+  },
+  // 「この日の薬剤」パネルは2工程あるので、面の色で分ける。
+  // ①何を撒くか = 青系(linkBtn・chemPickBtnで既に使っている青に揃える) / ②どこに撒くか = 緑系
+  zoneChem: {
+    background: "#F2F7FB",
+    border: "1.5px solid #BBD6E8",
+    borderRadius: 12,
+    padding: "12px 12px 14px",
+    marginTop: 6
+  },
+  zoneChemHead: {
+    fontSize: 14.5,
+    fontWeight: 800,
+    color: "#1C6EA4",
+    marginBottom: 10
+  },
+  zoneField: {
+    background: "#F4F8F3",
+    border: "1.5px solid #BFE1CC",
+    borderRadius: 12,
+    padding: "12px 12px 14px",
+    marginTop: 12
+  },
+  zoneFieldHead: {
+    fontSize: 14.5,
+    fontWeight: 800,
+    color: "#2E7D4F",
+    marginBottom: 10
+  },
+  // 青ゾーン内の「追加」ボタン(緑のaddBtnと役割は同じだが、ゾーンの色に合わせる)
+  addBtnBlue: {
+    width: "100%",
+    padding: "15px 0",
+    fontSize: 16,
+    fontWeight: 700,
+    color: "#1C6EA4",
+    background: "#EAF2F8",
+    border: "1.5px dashed #1C6EA4",
+    borderRadius: 10,
+    cursor: "pointer"
   },
   subTabWrap: {
     display: "flex",
