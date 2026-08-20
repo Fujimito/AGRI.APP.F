@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.26";
+const APP_VERSION = "v8.27";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -249,6 +249,48 @@ const volSuffix = unitKey => ({
   kg: "kg",
   g: "g"
 })[unitKey] || "L";
+// 散布車のタンク1杯で回れる圃場を割り出す純関数。
+// works には「その日の未実施の圃場」を回る順番どおりに渡す(実績入力済みは散布も補給も
+// 済んでいる前提なので数えない)。戻り値は work.id をキーにした辞書:
+//   { planned, cum, tankNo, over, refill }
+//   cum    … その杯の中での累計(この圃場ぶんを含む)
+//   over   … その圃場1つだけでタンク容量を超える
+//   refill … この圃場の手前に補給の区切りを出す場合だけ {tankNo, usedL, capL}
+// 結果を state に持たず描画のたびに呼ぶ想定。並べ替え・追加削除・実績入力に自動追従する。
+function planTankRefills(works, capacityL) {
+  const cap = parseFloat(capacityL);
+  // 空欄・0・負数・数値でない入力のときはタンク容量の機能を使わない(累計だけ出す)
+  const useCap = isFinite(cap) && cap > 0;
+  const info = {};
+  let cum = 0;
+  let tankNo = 1;
+  (works || []).forEach(w => {
+    const v = parseFloat(w.plannedL);
+    // 投下量が未計算の圃場は 0 として扱う(未入力の警告は既存のバナーが担当する)
+    const planned = isFinite(v) && v > 0 ? v : 0;
+    // cum が 0 のときは区切らない。1圃場だけで容量を超える場合でも必ず前へ進むので無限ループにならない
+    const needsRefill = useCap && planned > 0 && cum > 0 && cum + planned > cap;
+    let refill = null;
+    if (needsRefill) {
+      refill = {
+        tankNo: tankNo,
+        usedL: cum,
+        capL: cap
+      };
+      tankNo += 1;
+      cum = 0;
+    }
+    cum += planned;
+    info[w.id] = {
+      planned: planned,
+      cum: cum,
+      tankNo: tankNo,
+      over: useCap && planned > cap,
+      refill: refill
+    };
+  });
+  return info;
+}
 const today = () => {
   const d = new Date();
   return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
@@ -384,6 +426,11 @@ function App() {
   });
   const [areaUnitKey, setAreaUnitKeyState] = useState(() => localStorage.getItem("tankmix:areaunit") || "a");
   const [volUnitKey, setVolUnitKeyState] = useState(() => localStorage.getItem("tankmix:volunit") || "L");
+  // 散布車の水タンク容量(L)。空欄にできるよう入力値は文字列のまま持ち、使う側で parseFloat する
+  const [tankCapacityL, setTankCapacityLState] = useState(() => {
+    const v = localStorage.getItem("tankmix:tankcap");
+    return v === null ? "200" : v;
+  });
   // 作期の開始日。この日以降の実績だけを農薬使用回数としてカウントする
   const [seasonStart, setSeasonStartState] = useState(() => localStorage.getItem("tankmix:seasonstart") || new Date().getFullYear() + "-01-01");
   const [mapEngine, setMapEngineState] = useState(() => localStorage.getItem("tankmix:mapengine") || "leaflet");
@@ -444,6 +491,11 @@ function App() {
   const setVolUnitKey = v => {
     setVolUnitKeyState(v);
     localStorage.setItem("tankmix:volunit", v);
+  };
+  const setTankCapacityL = v => {
+    const s = String(v == null ? "" : v);
+    setTankCapacityLState(s);
+    localStorage.setItem("tankmix:tankcap", s);
   };
   const setGasUrl = v => {
     setGasUrlState(v);
@@ -1453,6 +1505,7 @@ function App() {
     addCrop,
     areaUnitKey,
     volUnitKey,
+    tankCapacityL,
     flash
   }), tab === "preset" && /*#__PURE__*/React.createElement(PresetTab, {
     fields,
@@ -1494,6 +1547,8 @@ function App() {
     setAreaUnitKey,
     volUnitKey,
     setVolUnitKey,
+    tankCapacityL,
+    setTankCapacityL,
     gasUrl,
     setGasUrl,
     recorder,
@@ -1926,6 +1981,9 @@ function WorkTab(p) {
   const shownList = onlyPending ? pendingDayList : dayList;
   // 次にやる圃場(この日の並び順で最初の未実施)
   const nextWork = pendingDayList[0] || null;
+  // タンクの累計と補給位置。state に持たず毎回 pendingDayList から導出するので、
+  // 並べ替え・圃場の追加削除・実績入力のたびに自動で計算し直される
+  const tankPlan = planTankRefills(pendingDayList, p.tankCapacityL);
   // 本日の投下量(L/10a)がまだ計算されていない圃場がある場合は警告バナーを出す
   const needsRateWarning = pendingDayList.some(w => !(parseFloat(w.plannedL) > 0));
   // 順送りナビの対象。既存の nextWork(実績入力の導線)は壊さず、飛ばした分だけを別に除く
@@ -2646,8 +2704,14 @@ function WorkTab(p) {
     const collapsed = selMode === "none" && w.reported && openRowId !== w.id;
     // この日で次にやる圃場は目立たせる
     const isNext = selMode === "none" && nextWork && nextWork.id === w.id;
-    return /*#__PURE__*/React.createElement("div", {
-      key: w.id,
+    // 補給の区切りは未実施の並びに対して打つ。実績入力済みの行が混ざっていても位置がズレない
+    const tank = tankPlan[w.id] || null;
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: w.id
+    }, tank && tank.refill && /*#__PURE__*/React.createElement("div", {
+      style: S.tankBand,
+      className: "num"
+    }, "⛽ ここで補給(タンク" + tank.refill.tankNo + "杯目 " + dispVol(tank.refill.usedL, p.volUnitKey) + " " + volSuffix(p.volUnitKey) + " / " + dispVol(tank.refill.capL, p.volUnitKey) + " " + volSuffix(p.volUnitKey) + ")"), /*#__PURE__*/React.createElement("div", {
       "data-work-id": w.id,
       style: {
         ...S.record,
@@ -2730,7 +2794,19 @@ function WorkTab(p) {
       }
     }, dispVol(w.plannedL, p.volUnitKey), /*#__PURE__*/React.createElement("span", {
       style: S.workMetaUnit
-    }, volSuffix(p.volUnitKey)))) : null))), selMode === "none" && /*#__PURE__*/React.createElement("div", {
+    }, volSuffix(p.volUnitKey)))) : null,
+    // 累計はその杯の中での合計。予定薬液量が未計算(0)の圃場には出さない
+    tank && tank.planned > 0 && /*#__PURE__*/React.createElement("span", {
+      style: S.workMetaSep
+    }, "／ 累計 ", /*#__PURE__*/React.createElement("span", {
+      style: {
+        color: "#8a5a12"
+      }
+    }, dispVol(tank.cum, p.volUnitKey), /*#__PURE__*/React.createElement("span", {
+      style: S.workMetaUnit
+    }, volSuffix(p.volUnitKey)))), tank && tank.over && /*#__PURE__*/React.createElement("span", {
+      style: S.tankOverWarn
+    }, "⚠ この圃場だけでタンク容量を超えます")))), selMode === "none" && /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         flexDirection: "column",
@@ -2799,7 +2875,7 @@ function WorkTab(p) {
         ...S.smallDanger,
         alignSelf: "stretch"
       }
-    }, "外す"))));
+    }, "外す")))));
   }), groupMode && selected.length >= 2 && !gFormOpen && /*#__PURE__*/React.createElement("button", {
     onClick: openGroupForm,
     style: {
@@ -5676,6 +5752,24 @@ function SettingsTab(p) {
     style: S.note
   }, "Google マップに切り替えると、地図タブで衛星写真と道路・地名を同時に表示できます。APIキーはこの端末の中にだけ保存され、ソースコード(GitHub)には一切含まれません。ただし地図を読み込むたびにGoogleのサーバーへは送信されるため、Google Cloud Consoleでドメイン制限(HTTPリファラー制限)を必ず設定してください。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
+  }, collapsibleHead("散布タンク", openSec.tank, () => toggleSec("tank")), openSec.tank && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "タンク容量(L)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    step: "10",
+    value: p.tankCapacityL,
+    onChange: e => p.setTankCapacityL(e.target.value),
+    placeholder: "200",
+    style: S.fieldInput,
+    className: "num"
+  })), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "散布車の水タンクの容量です。作業タブでこの日に回る圃場の予定薬液量を上から足していき、容量を超える手前に「⛽ ここで補給」の目印を出します。空欄や0にすると目印は出ず、累計だけを表示します。"))), /*#__PURE__*/React.createElement("section", {
+    style: S.card
   }, collapsibleHead("農薬の使用回数", openSec.season, () => toggleSec("season")), openSec.season && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
     style: S.areaField
   }, /*#__PURE__*/React.createElement("span", {
@@ -5719,7 +5813,7 @@ function SettingsTab(p) {
     desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、プリセットタブに登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。このタブはタンク1杯分を計算するための電卓です。圃場への薬剤の適用は「作業・記録」タブの「この日に使用した薬剤」で行います。何度も使う組み合わせは「⭐プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます。上限は薬剤ごとにプリセットタブの🧪薬剤で登録でき、未登録の薬剤は既定3回です。設定タブの「農薬の使用回数」で作期の開始日を設定すると、その日以降の実績だけを数えます(作期が変わったら日付を更新するとカウントがやり直しになります)。"
   }, {
     title: "🚁 作業・記録タブ",
-    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。「🚜 コースから」を選ぶとプルダウンからコースを選んで登録順のまま一括投入でき、「🌾 圃場を選んで」を選ぶと登録済みの圃場が一覧で出るのでタップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
+    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。「🚜 コースから」を選ぶとプルダウンからコースを選んで登録順のまま一括投入でき、「🌾 圃場を選んで」を選ぶと登録済みの圃場が一覧で出るのでタップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 地図タブ",
     desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
@@ -5728,7 +5822,7 @@ function SettingsTab(p) {
     desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」→「🌾 圃場を選んで」から追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。コースの編集画面は上が「コースの順番」、下が「追加できる圃場」に分かれています。下のリストをタップすると順番の最後に追加され、順番リストの各行では⣿マークを長押ししてドラッグで順番を入れ替えたり、「外す」でコースから抜いたりできます。🧪薬剤サブタブは、薬剤名・種類・剤型を登録しておく単純な名前帳です(希釈倍率は散布水量で変わるため持ちません)。登録しておくと、作業タブの「📋 登録薬剤から追加」で名前・種類・剤型をまとめて呼び出せます。「総使用回数の上限」も登録でき、農薬使用回数の警告に使われます(未登録なら既定3回)。作業タブで使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
   }, {
     title: "⚙ 設定タブ",
-    desc: "面積(a/ha/反/町)と薬量(L/mL/kg/g)の表示単位を切り替えられます。データは常にa・Lで保存され、表示だけ変換されます。作物マスタの管理もここで行います。送信先URL(GASのウェブアプリURL)は一度設定すれば保存されます。GASを再デプロイするときは「デプロイを管理→編集→新しいバージョン」を使うとURLが変わりません。チームコードを使って複数端末間でデータを共有できます。このガイドとバージョン履歴もここで確認できます。"
+    desc: "面積(a/ha/反/町)と薬量(L/mL/kg/g)の表示単位を切り替えられます。データは常にa・Lで保存され、表示だけ変換されます。作物マスタの管理もここで行います。「散布タンク」では散布車の水タンクの容量を設定でき、作業タブの補給の目印に使われます。送信先URL(GASのウェブアプリURL)は一度設定すれば保存されます。GASを再デプロイするときは「デプロイを管理→編集→新しいバージョン」を使うとURLが変わりません。チームコードを使って複数端末間でデータを共有できます。このガイドとバージョン履歴もここで確認できます。"
   }, {
     title: "📡 送信とバックアップ",
     desc: "作業タブの「☁ 全データを送信」でGoogleスプレッドシートに記録が送られます。圏外でも記録は端末に保存され、電波が戻ると自動で再送されます。送信中に「中止」を押すと途中で止められ、どの圃場から再開するか選べます。設定タブの「☁↑ 端末→共有へ保存」「☁↓ 共有→端末へ読込」でチームコードを使った複数端末間のデータ共有ができます。"
@@ -5755,9 +5849,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.26",
+    ver: "v8.27",
     date: "2026-08",
     isNew: true,
+    notes: ["⛽ 作業タブの各圃場に「累計」を表示。その日に回る順で予定薬液量を上から足していくので、どの圃場まででどれだけ使うのかが一目で分かります", "⛽ タンク容量を超える手前に「⛽ ここで補給(タンク1杯目 180L / 200L)」の区切りを表示。補給の後は累計を数え直し、2杯目・3杯目として続けます", "圃場を並べ替えると累計と補給の位置がその場で計算し直されます", "実績入力済みの圃場は散布も補給も済んでいる前提で累計に入れません(これから回る分だけが分かります)", "⚙ 設定タブに「散布タンク」を新設。タンク容量を変更できます(既定200L)。空欄や0にすると補給の目印は出ず、累計だけを表示します", "1つの圃場だけでタンク容量を超える場合は「⚠ この圃場だけでタンク容量を超えます」と表示します"]
+  }, {
+    ver: "v8.26",
+    date: "2026-08",
+    isNew: false,
     notes: ["🚗 作業タブの各圃場に「🚗 ナビ」を追加。その圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場の位置を使います)", "🚗 その日の圃場を散布する順に1つずつ回る「順送りナビ」を追加。作業タブの上部に「次の圃場」が出るので、ナビを開いて向かい、実績を入力すると自動で次の圃場に進みます", "「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録はその日の画面内だけのもので、保存されません。「↩ 飛ばした圃場を戻す」で元に戻せます)", "回る順は作業タブの並び順そのままです。⣿マークのドラッグで並べ替えると、ナビの順番もそのとおりになります", "まだ地図で囲んでいない圃場のナビボタンは薄く表示され、押すと登録方法を案内します"]
   }, {
     ver: "v8.25",
@@ -7241,6 +7340,22 @@ const S = {
   workMetaSep: {
     color: "#66756a",
     fontWeight: 700
+  },
+  tankOverWarn: {
+    fontSize: 13,
+    fontWeight: 800,
+    color: "#B03A2E"
+  },
+  tankBand: {
+    margin: "10px 0",
+    padding: "9px 12px",
+    fontSize: 14,
+    fontWeight: 800,
+    color: "#8a5a12",
+    background: "#FFF6E3",
+    border: "1.5px dashed #E0BE79",
+    borderRadius: 10,
+    textAlign: "center"
   },
   dragHandle: {
     display: "inline-flex",
