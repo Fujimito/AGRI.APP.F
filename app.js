@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.24";
+const APP_VERSION = "v8.25";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -3540,6 +3540,74 @@ function loadChemDb() {
   });
   return chemDbLoading;
 }
+
+// chemdb.json は「登録番号 × 有効成分」で行が分かれているため、同じ登録番号が
+// 複数行ある(例: No.23646 ベジセイバーは ペンチオピラド と TPN の2行、6275行中
+// 1617番号ぶんが重複)。行のまま並べると同じ薬剤が何度も出るうえ、React の key に
+// 登録番号を使うと key が重複し、再描画で前回の検索結果の行が残ってしまう。
+// そこで検索は「登録番号ごとに1件へ集約」して返し、有効成分は「・」で連結する。
+// 並び順は 完全一致 → 前方一致 → 部分一致。打ち切りは呼び出し側で並べ替え後に
+// 行う(先頭N件で走査を止めると、関連度の高い候補が落ちるため全件走査する)。
+function searchChemDb(chemDb, query, byNo, byName, byIngredient) {
+  // 半角カナ・全角英数のゆれを吸収(DB側は生成時にNFKC正規化済み)
+  const normalized = query.normalize("NFKC");
+  const lower = normalized.toLowerCase();
+  // 一致の強さ。0=完全一致 1=前方一致 2=部分一致 -1=不一致
+  const rankOf = (value, needle) => {
+    if (value === needle) return 0;
+    const at = value.indexOf(needle);
+    if (at === 0) return 1;
+    return at > 0 ? 2 : -1;
+  };
+  const stronger = (a, b) => b < 0 ? a : a < 0 ? b : Math.min(a, b);
+  const byNumber = new Map(); // 登録番号 -> 集約した1件
+  const order = []; // Map の列挙順に頼らず、DB の出現順を明示的に保つ
+  for (let i = 0; i < chemDb.length; i++) {
+    const chem = chemDb[i];
+    let rank = -1;
+    if (byNo) rank = stronger(rank, rankOf(String(chem.n), normalized));
+    if (byName && chem.nm) rank = stronger(rank, rankOf(chem.nm.toLowerCase(), lower));
+    if (byIngredient && chem.ig) rank = stronger(rank, rankOf(chem.ig.toLowerCase(), lower));
+    if (rank < 0) continue;
+    const key = String(chem.n);
+    const hit = byNumber.get(key);
+    if (!hit) {
+      byNumber.set(key, {
+        key: key,
+        n: chem.n,
+        nm: chem.nm,
+        u: chem.u,
+        f: chem.f,
+        igs: [],
+        rank: rank,
+        seq: order.length
+      });
+      order.push(key);
+    } else if (rank < hit.rank) {
+      // 同じ登録番号の別の行で当たった場合は、より強い一致のほうを採用する
+      hit.rank = rank;
+    }
+  }
+  // 有効成分は「その登録番号の全行」から集める。成分名で検索したときに
+  // 当たった成分だけが出ると、混合剤なのに片方しか見えず誤解を招くため。
+  for (let i = 0; i < chemDb.length; i++) {
+    const chem = chemDb[i];
+    if (!chem.ig) continue;
+    const hit = byNumber.get(String(chem.n));
+    if (hit && hit.igs.indexOf(chem.ig) < 0) hit.igs.push(chem.ig);
+  }
+  const rows = order.map(key => byNumber.get(key));
+  // 同順位は DB の並び順(seq)を保つ。sort の安定性に依存しない書き方にしておく
+  rows.sort((a, b) => a.rank - b.rank || a.seq - b.seq);
+  return rows.map(r => ({
+    key: r.key,
+    n: r.n,
+    nm: r.nm,
+    u: r.u,
+    f: r.f,
+    ig: r.igs.join("・")
+  }));
+}
 function ChemSearchModal(p) {
   const [chemDb, setChemDb] = useState(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -3560,22 +3628,19 @@ function ChemSearchModal(p) {
     };
   }, []);
   const query = keyword.trim();
-  const results = React.useMemo(() => {
+  const matched = React.useMemo(() => {
     if (!chemDb || !query) return [];
-    // 半角カナ・全角英数のゆれを吸収(DB側は生成時にNFKC正規化済み)
-    const normalized = query.normalize("NFKC");
-    const lower = normalized.toLowerCase();
-    const found = [];
-    for (let i = 0; i < chemDb.length && found.length < CHEM_SEARCH_LIMIT; i++) {
-      const chem = chemDb[i];
-      if (byNo && String(chem.n).indexOf(normalized) >= 0 || byName && chem.nm && chem.nm.toLowerCase().indexOf(lower) >= 0 || byIngredient && chem.ig && chem.ig.toLowerCase().indexOf(lower) >= 0) found.push(chem);
-    }
-    return found;
+    return searchChemDb(chemDb, query, byNo, byName, byIngredient);
   }, [chemDb, query, byNo, byName, byIngredient]);
+  // 打ち切りは並べ替えの後。表示件数と実際に描画する行数を必ず一致させるため、
+  // 件数表示にもこの results.length をそのまま使う。
+  const results = matched.length > CHEM_SEARCH_LIMIT ? matched.slice(0, CHEM_SEARCH_LIMIT) : matched;
   // 登録済み判定も正規化して比べる。手入力した半角カナの薬剤と、ここから登録した
   // 全角の薬剤が別物と見なされて二重登録されるのを防ぐ。
   const registeredNames = React.useMemo(() => (p.existingNames || []).map(normalizeChemName), [p.existingNames]);
-  const isRegistered = chem => !!justAdded[chem.n] || registeredNames.indexOf(normalizeChemName(chem.nm)) >= 0;
+  // justAdded の印は集約キー(=登録番号の文字列)で持つ。集約後は1登録番号=1行なので、
+  // 同じ番号の別行に印が波及することはない。
+  const isRegistered = chem => !!justAdded[chem.key] || registeredNames.indexOf(normalizeChemName(chem.nm)) >= 0;
   const register = chem => {
     p.onPick({
       name: chem.nm,
@@ -3586,7 +3651,7 @@ function ChemSearchModal(p) {
       const next = {
         ...prev
       };
-      next[chem.n] = true;
+      next[chem.key] = true;
       return next;
     });
   };
@@ -3636,8 +3701,8 @@ function ChemSearchModal(p) {
     style: S.empty
   }, "農薬データを読み込み中…") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "検索結果：", query ? results.length + "件" + (results.length >= CHEM_SEARCH_LIMIT ? "以上(絞り込んでください)" : "") : "キーワードを入力してください"), results.map(chem => /*#__PURE__*/React.createElement("button", {
-    key: chem.n,
+  }, "検索結果：", query ? results.length + "件" + (matched.length > CHEM_SEARCH_LIMIT ? "以上(絞り込んでください)" : "") : "キーワードを入力してください"), results.map(chem => /*#__PURE__*/React.createElement("button", {
+    key: chem.key,
     onClick: () => register(chem),
     disabled: isRegistered(chem),
     style: {
@@ -5624,9 +5689,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.24",
+    ver: "v8.25",
     date: "2026-08",
     isNew: true,
+    notes: ["🐞 プリセットタブの「登録番号・名称で検索して登録」で、検索し直しても前の検索結果の行が残り、無関係な薬剤が混ざって表示される不具合を修正", "🐞 同じ農薬が2回以上表示される不具合を修正。農薬データは有効成分ごとに行が分かれているため(例: ベジセイバーはペンチオピラドとTPNの2行)、登録番号ごとに1件へまとめ、成分は「ペンチオピラド・TPN」のように並べて表示します", "🔍 検索結果を「完全一致 → 前方一致 → 部分一致」の順に並べ替え。「ベジセイバー」で検索するとベジセイバーが先頭に出ます", "🔍 候補が多いときの打ち切り(200件)を並べ替えの後に行うように変更。探している薬剤が打ち切りで消える場合があったのを直しました"]
+  }, {
+    ver: "v8.24",
+    date: "2026-08",
+    isNew: false,
     notes: ["📋 作業タブの記録に「アグリノート」ボタンを追加。アグリノートへ手で書き写すための数字を、そのまま貼れる形にまとめて表示します", "「同じ日 × 同じ調合」の記録が1グループにまとまり、アグリノートの1レコードに対応します", "圃場一覧・散布液量の合計・農薬ごとの希釈倍数と使用量を表示し、⧉ボタンで1つずつコピーできます", "使用量はアグリノートと同じ計算(散布液量 ÷ 希釈倍数)で出すので、貼り付けた数字がアグリノート側の自動計算と一致します", "剤型から単位を判断し、粉剤・粒剤・水和剤などは kg、液剤は mL で表示します(アグリノートで単位の警告が出るのを防ぐため)", "同じ圃場に同じ日・同じ調合の記録が2件あるときは、圃場と面積は1回だけ数え、散布液量だけ合算します(アグリノートでは圃場を1回しか選べないため)", "🔢 プリセットタブの🧪薬剤に「登録番号・名称で検索して登録」を追加。農薬の登録番号・農薬名・成分名で検索して、そのまま薬剤に登録できます", "農薬の種類と剤型は検索結果から自動で入るため、手で選び直す必要がありません", "農薬データ(約6,300件)はアプリに同梱しているので、圏外でも検索できます", "半角カナで入力しても全角カナの農薬名が見つかります。登録済みの薬剤は「✓登録済」と表示され、二重登録になりません", "🐞 希釈倍数の「16」と「16.0」、半角カナと全角カナの薬剤名が別の調合として扱われ、転記が二度手間になる不具合を修正", "🐞 数値の末尾のゼロを消す処理に誤りがあり、桁によっては「100」が「1」と表示されうる不具合を修正", "🐞 作業日が入っていない記録があると画面が表示できなくなる不具合を修正"]
   }, {
     ver: "v8.22",
