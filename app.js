@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.27";
+const APP_VERSION = "v8.28";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -214,6 +214,45 @@ const polygonCenter = latlngs => {
     lng += p[1];
   });
   return [lat / latlngs.length, lng / latlngs.length];
+};
+// ---- 作図中の頂点編集ヘルパ(地図ライブラリに依存しない純関数) ----
+// Google版・Leaflet版の両方から同じロジックを使うため、ここに切り出してある
+const DRAW_HISTORY_MAX = 50; // 作図中しか持たない履歴。際限なく溜めない
+// i番目の頂点を動かした配列を返す
+const ptsMove = (pts, i, lat, lng) => pts.map((q, qi) => qi === i ? [lat, lng] : q);
+// i番目の頂点を消した配列を返す
+const ptsRemove = (pts, i) => pts.filter((q, qi) => qi !== i);
+// 辺edgeIndex(頂点edgeIndexと次の頂点の間)に頂点を差し込む。
+// 末尾の辺は「最後→最初」なので splice(length,...) となり結果的に末尾追加になる
+const ptsInsert = (pts, edgeIndex, lat, lng) => {
+  const next = pts.slice();
+  next.splice(edgeIndex + 1, 0, [lat, lng]);
+  return next;
+};
+// 各辺の中点。2点のときは辺が1本だけ、3点以上は「最後→最初」の辺も含める。
+// 0〜1点のときは辺が無いので空配列
+const drawMidpoints = pts => {
+  if (!Array.isArray(pts) || pts.length < 2) return [];
+  const edges = pts.length === 2 ? 1 : pts.length;
+  const out = [];
+  for (let i = 0; i < edges; i++) {
+    const a = pts[i];
+    const b = pts[(i + 1) % pts.length];
+    const lat = (parseFloat(a[0]) + parseFloat(b[0])) / 2;
+    const lng = (parseFloat(a[1]) + parseFloat(b[1])) / 2;
+    if (!isFinite(lat) || !isFinite(lng)) continue; // 壊れた座標では中点を出さない
+    out.push({
+      edge: i,
+      lat,
+      lng
+    });
+  }
+  return out;
+};
+// 履歴に1手積む。上限を超えたら古いものから捨てる
+const pushDrawHistory = (stack, pts) => {
+  const next = stack.concat([pts]);
+  return next.length > DRAW_HISTORY_MAX ? next.slice(next.length - DRAW_HISTORY_MAX) : next;
 };
 // スマホの地図アプリでナビを開くURL(現在地→目的地)
 const naviUrl = center => center ? "https://www.google.com/maps/dir/?api=1&destination=" + center[0] + "," + center[1] + "&travelmode=driving" : "#";
@@ -4700,6 +4739,93 @@ function GoogleMapTab(p) {
   const LABEL_MIN_ZOOM = 17;
   const [zoom, setZoom] = React.useState(15);
   const drawArea = polygonAreaA(drawPts);
+  const [selPt, setSelPt] = React.useState(-1); // 選択中の頂点。-1=未選択
+  const [histLen, setHistLen] = React.useState(0); // 「1つ戻す」の有効判定に使う
+  const selPtRef = React.useRef(-1);
+  const histRef = React.useRef([]); // 作図中だけ持つ操作履歴(変更前のdrawPtsを積む)
+  const draggingRef = React.useRef(false); // ドラッグ中は再描画しない(掴んだマーカーが消えるため)
+  const lastEditAtRef = React.useRef(0); // 直前の頂点操作の時刻。地図のclickに化けた分を弾く
+  const dragBeforeRef = React.useRef(null); // ドラッグ開始時の頂点配列(履歴に積む「変更前」)
+  const drawLineRef = React.useRef(null); // 作図中の線。ドラッグ中に直接書き換える
+  const drawFillRef = React.useRef(null); // 作図中の面。同上
+  // 頂点編集を1手として確定する。履歴には「変更前」を積む
+  const commitPts = (next, opt) => {
+    const o = opt || {};
+    const prev = o.prev || drawPtsRef.current;
+    histRef.current = pushDrawHistory(histRef.current, prev);
+    setHistLen(histRef.current.length);
+    drawPtsRef.current = next;
+    setDrawPts(next);
+    // 頂点の並びが変わると番号もずれるので、既定では選択を解除する
+    const sel = typeof o.select === "number" ? o.select : -1;
+    selPtRef.current = sel;
+    setSelPt(sel);
+  };
+  // 頂点は変えず選択だけ切り替える。編集ではないので履歴には積まない
+  const selectPt = i => {
+    selPtRef.current = i;
+    setSelPt(i);
+  };
+  const removePt = i => {
+    if (i < 0 || i >= drawPtsRef.current.length) return;
+    commitPts(ptsRemove(drawPtsRef.current, i));
+  };
+  // 全消し・作図開始・やめる で使う。履歴も選択も落とす
+  const resetDrawState = () => {
+    histRef.current = [];
+    setHistLen(0);
+    drawPtsRef.current = [];
+    setDrawPts([]);
+    selPtRef.current = -1;
+    setSelPt(-1);
+    draggingRef.current = false;
+    dragBeforeRef.current = null;
+  };
+  // ドラッグの終了処理。dragend からも保険のリスナーからも呼ばれるが、
+  // draggingRef で入口を塞いでいるので二重に走っても履歴は1手しか積まれない
+  const endDragCommit = () => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    lastEditAtRef.current = Date.now();
+    const prev = dragBeforeRef.current;
+    dragBeforeRef.current = null;
+    const next = drawPtsRef.current;
+    if (prev && prev !== next) {
+      commitPts(next, {
+        prev
+      });
+    } else {
+      // 実際には動いていない。履歴を汚さず、マーカーの位置だけ描き直す
+      const same = next.slice();
+      drawPtsRef.current = same;
+      setDrawPts(same);
+    }
+  };
+  // ドラッグ中に線と面だけを追従させる(マーカーは作り直さない)
+  const refreshDrawShapes = () => {
+    const pts = drawPtsRef.current;
+    const toLL = a => ({
+      lat: a[0],
+      lng: a[1]
+    });
+    if (drawLineRef.current) drawLineRef.current.setPath((pts.length >= 3 ? [...pts, pts[0]] : pts).map(toLL));
+    if (drawFillRef.current) drawFillRef.current.setPaths(pts.map(toLL));
+  };
+  // dragend を取りこぼしてもドラッグ状態が残らないようにする保険。
+  // スマホではブラウザがスクロールを引き取って pointercancel で終わることがあり、
+  // その場合 dragend は来ない。フラグが立ちっぱなしになると再描画effectが
+  // 冒頭で抜け続け、地図が二度と更新されなくなるため必ず拾う。
+  // document ではなく window に張るのは、地図ライブラリが document で受ける
+  // ドラッグ終了処理(=正規の dragend)を先に走らせてから保険を効かせるため。
+  React.useEffect(() => {
+    if (!drawing) return;
+    const onEnd = () => endDragCommit();
+    const types = ["pointerup", "pointercancel", "mouseup", "touchend", "touchcancel"];
+    types.forEach(t => window.addEventListener(t, onEnd));
+    return () => {
+      types.forEach(t => window.removeEventListener(t, onEnd));
+    };
+  }, [drawing]);
 
   // Google Maps APIを読み込んで地図を初期化
   React.useEffect(() => {
@@ -4732,10 +4858,10 @@ function GoogleMapTab(p) {
       });
       mapRef.current = map;
       map.addListener("click", e => {
-        if (!drawingRef.current) return;
-        const next = [...drawPtsRef.current, [e.latLng.lat(), e.latLng.lng()]];
-        drawPtsRef.current = next;
-        setDrawPts(next);
+        if (!drawingRef.current || draggingRef.current) return;
+        // マーカー操作の直後に地図のclickが続くと点が増えてしまうので短時間だけ弾く
+        if (Date.now() - lastEditAtRef.current < 400) return;
+        commitPts([...drawPtsRef.current, [e.latLng.lat(), e.latLng.lng()]]);
       });
       map.addListener("zoom_changed", () => setZoom(map.getZoom()));
       setZoom(map.getZoom());
@@ -4811,13 +4937,19 @@ function GoogleMapTab(p) {
   // 作図中の頂点・線を再描画
   React.useEffect(() => {
     if (!ready || !mapRef.current) return;
+    // ドラッグ中に作り直すと掴んでいるマーカーごと消えて動かせなくなる
+    if (draggingRef.current) return;
     const g = window.google.maps;
     drawOverlaysRef.current.forEach(o => {
       o.setMap && o.setMap(null);
     });
     drawOverlaysRef.current = [];
+    drawLineRef.current = null;
+    drawFillRef.current = null;
     if (drawPts.length > 0) {
+      // 頂点(ドラッグで移動・タップで選択・選択中の✕タップで削除)
       drawPts.forEach((pt, i) => {
+        const sel = i === selPt;
         const marker = new g.Marker({
           position: {
             lat: pt[0],
@@ -4825,28 +4957,97 @@ function GoogleMapTab(p) {
           },
           map: mapRef.current,
           draggable: true,
+          zIndex: 1000,
           label: {
-            text: String(i + 1),
+            text: sel ? "✕" : String(i + 1),
             color: "#fff",
             fontWeight: "800",
-            fontSize: "13px"
+            fontSize: sel ? "15px" : "13px"
           },
           icon: {
             path: g.SymbolPath.CIRCLE,
             scale: 13,
-            fillColor: "#C74E36",
+            fillColor: sel ? "#8a2f1c" : "#C74E36",
             fillOpacity: 1,
-            strokeColor: "#fff",
+            strokeColor: sel ? "#FFD9CF" : "#fff",
             strokeWeight: 2.5
           }
         });
+        let moved = false; // 動かしたときは選択・削除に化けさせない
+        let before = drawPtsRef.current;
+        marker.addListener("dragstart", () => {
+          moved = true;
+          draggingRef.current = true;
+          before = drawPtsRef.current;
+          dragBeforeRef.current = before;
+        });
         marker.addListener("drag", () => {
+          // ドラッグ中に作り直すと掴んでいるマーカーごと消えるので、
+          // ref と線・面だけを直接更新し setDrawPts は dragend で1回だけ呼ぶ
           const ll = marker.getPosition();
-          const next = drawPtsRef.current.map((q, qi) => qi === i ? [ll.lat(), ll.lng()] : q);
-          drawPtsRef.current = next;
-          setDrawPts(next);
+          drawPtsRef.current = ptsMove(drawPtsRef.current, i, ll.lat(), ll.lng());
+          refreshDrawShapes();
+        });
+        marker.addListener("dragend", () => {
+          if (!draggingRef.current) return; // 保険のリスナーが先に確定済み
+          const ll = marker.getPosition();
+          drawPtsRef.current = ptsMove(before, i, ll.lat(), ll.lng());
+          endDragCommit();
+        });
+        marker.addListener("click", () => {
+          if (moved) return;
+          lastEditAtRef.current = Date.now();
+          if (selPtRef.current === i) removePt(i);else selectPt(i);
         });
         drawOverlaysRef.current.push(marker);
+      });
+      // 辺の中点ハンドル(頂点より小さく薄い。タップかドラッグで頂点を挿入)
+      drawMidpoints(drawPts).forEach(mp => {
+        const handle = new g.Marker({
+          position: {
+            lat: mp.lat,
+            lng: mp.lng
+          },
+          map: mapRef.current,
+          draggable: true,
+          zIndex: 500,
+          icon: {
+            path: g.SymbolPath.CIRCLE,
+            scale: 8,
+            fillColor: "#C74E36",
+            fillOpacity: 0.45,
+            strokeColor: "#fff",
+            strokeWeight: 2,
+            strokeOpacity: 0.85
+          }
+        });
+        let moved = false;
+        let before = drawPtsRef.current;
+        handle.addListener("dragstart", () => {
+          moved = true;
+          draggingRef.current = true;
+          before = drawPtsRef.current;
+          dragBeforeRef.current = before;
+          // 掴んだ瞬間に挿入しておくと、そのまま新しい頂点として引っ張れる
+          drawPtsRef.current = ptsInsert(before, mp.edge, mp.lat, mp.lng);
+        });
+        handle.addListener("drag", () => {
+          const ll = handle.getPosition();
+          drawPtsRef.current = ptsMove(drawPtsRef.current, mp.edge + 1, ll.lat(), ll.lng());
+          refreshDrawShapes();
+        });
+        handle.addListener("dragend", () => {
+          if (!draggingRef.current) return; // 保険のリスナーが先に確定済み
+          const ll = handle.getPosition();
+          drawPtsRef.current = ptsInsert(before, mp.edge, ll.lat(), ll.lng());
+          endDragCommit();
+        });
+        handle.addListener("click", () => {
+          if (moved) return;
+          lastEditAtRef.current = Date.now();
+          commitPts(ptsInsert(drawPtsRef.current, mp.edge, mp.lat, mp.lng));
+        });
+        drawOverlaysRef.current.push(handle);
       });
       if (drawPts.length >= 2) {
         const path = drawPts.map(pt => ({
@@ -4873,6 +5074,7 @@ function GoogleMapTab(p) {
             repeat: "10px"
           }]
         });
+        drawLineRef.current = line;
         drawOverlaysRef.current.push(line);
       }
       if (drawPts.length >= 3) {
@@ -4888,28 +5090,33 @@ function GoogleMapTab(p) {
           map: mapRef.current,
           clickable: false
         });
+        drawFillRef.current = fillPoly;
         drawOverlaysRef.current.push(fillPoly);
       }
     }
-  }, [ready, drawPts]);
+  }, [ready, drawPts, selPt]);
   const startDraw = () => {
     setDrawing(true);
     drawingRef.current = true;
-    setDrawPts([]);
-    drawPtsRef.current = [];
+    resetDrawState();
   };
   const cancelDraw = () => {
     setDrawing(false);
     drawingRef.current = false;
-    setDrawPts([]);
-    drawPtsRef.current = [];
+    resetDrawState();
     setNewName("");
     setNewCrop("");
   };
+  // 追加・移動・削除・挿入をまとめて1手ずつ戻す
   const undoPt = () => {
-    const next = drawPtsRef.current.slice(0, -1);
-    drawPtsRef.current = next;
-    setDrawPts(next);
+    if (histRef.current.length === 0) return;
+    const prev = histRef.current[histRef.current.length - 1];
+    histRef.current = histRef.current.slice(0, -1);
+    setHistLen(histRef.current.length);
+    drawPtsRef.current = prev;
+    setDrawPts(prev);
+    selPtRef.current = -1;
+    setSelPt(-1);
   };
   const saveDraw = () => {
     if (drawPts.length < 3 || !newName.trim()) return;
@@ -5037,10 +5244,20 @@ function GoogleMapTab(p) {
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
-  }, "地図をタップして圃場の角を順に囲んでください(3点以上)。打った点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "できます。"), /*#__PURE__*/React.createElement("div", {
+  }, "地図をタップして圃場の角を順に打ちます(3点以上)。頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "タップかドラッグ"), "すると頂点を足せます。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
     className: "num"
-  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawArea, 2)), " a"), /*#__PURE__*/React.createElement("div", {
+  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawArea, 2)), " a"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
+    style: S.selPtRow
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "頂点 ", selPt + 1, " を選択中"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => removePt(selPt),
+    style: S.smallDanger
+  }, "✕ この頂点を削除"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => selectPt(-1),
+    style: S.smallSecondary
+  }, "選択をやめる")), /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.btnRow,
       marginTop: 8,
@@ -5048,16 +5265,13 @@ function GoogleMapTab(p) {
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: undoPt,
-    disabled: drawPts.length === 0,
+    disabled: histLen === 0,
     style: {
       ...S.secondaryBtn,
-      opacity: drawPts.length ? 1 : 0.4
+      opacity: histLen ? 1 : 0.4
     }
-  }, "↩ 1点戻す"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setDrawPts([]);
-      drawPtsRef.current = [];
-    },
+  }, "↩ 1つ戻す"), /*#__PURE__*/React.createElement("button", {
+    onClick: resetDrawState,
     disabled: drawPts.length === 0,
     style: {
       ...S.secondaryBtn,
@@ -5154,6 +5368,89 @@ function LeafletMapTab(p) {
   const drawPtsRef = React.useRef([]);
   const drawArea = polygonAreaA(drawPts);
   const LABEL_MIN_ZOOM = 17;
+  const [selPt, setSelPt] = React.useState(-1); // 選択中の頂点。-1=未選択
+  const [histLen, setHistLen] = React.useState(0); // 「1つ戻す」の有効判定に使う
+  const selPtRef = React.useRef(-1);
+  const histRef = React.useRef([]); // 作図中だけ持つ操作履歴(変更前のdrawPtsを積む)
+  const draggingRef = React.useRef(false); // ドラッグ中は再描画しない(掴んだマーカーが消えるため)
+  const lastEditAtRef = React.useRef(0); // 直前の頂点操作の時刻。地図のclickに化けた分を弾く
+  const dragBeforeRef = React.useRef(null); // ドラッグ開始時の頂点配列(履歴に積む「変更前」)
+  const drawLineRef = React.useRef(null); // 作図中の線。ドラッグ中に直接書き換える
+  const drawFillRef = React.useRef(null); // 作図中の面。同上
+  // 頂点編集を1手として確定する。履歴には「変更前」を積む
+  const commitPts = (next, opt) => {
+    const o = opt || {};
+    const prev = o.prev || drawPtsRef.current;
+    histRef.current = pushDrawHistory(histRef.current, prev);
+    setHistLen(histRef.current.length);
+    drawPtsRef.current = next;
+    setDrawPts(next);
+    // 頂点の並びが変わると番号もずれるので、既定では選択を解除する
+    const sel = typeof o.select === "number" ? o.select : -1;
+    selPtRef.current = sel;
+    setSelPt(sel);
+  };
+  // 頂点は変えず選択だけ切り替える。編集ではないので履歴には積まない
+  const selectPt = i => {
+    selPtRef.current = i;
+    setSelPt(i);
+  };
+  const removePt = i => {
+    if (i < 0 || i >= drawPtsRef.current.length) return;
+    commitPts(ptsRemove(drawPtsRef.current, i));
+  };
+  // 全消し・作図開始・やめる で使う。履歴も選択も落とす
+  const resetDrawState = () => {
+    histRef.current = [];
+    setHistLen(0);
+    drawPtsRef.current = [];
+    setDrawPts([]);
+    selPtRef.current = -1;
+    setSelPt(-1);
+    draggingRef.current = false;
+    dragBeforeRef.current = null;
+  };
+  // ドラッグの終了処理。dragend からも保険のリスナーからも呼ばれるが、
+  // draggingRef で入口を塞いでいるので二重に走っても履歴は1手しか積まれない
+  const endDragCommit = () => {
+    if (!draggingRef.current) return;
+    draggingRef.current = false;
+    lastEditAtRef.current = Date.now();
+    const prev = dragBeforeRef.current;
+    dragBeforeRef.current = null;
+    const next = drawPtsRef.current;
+    if (prev && prev !== next) {
+      commitPts(next, {
+        prev
+      });
+    } else {
+      // 実際には動いていない。履歴を汚さず、マーカーの位置だけ描き直す
+      const same = next.slice();
+      drawPtsRef.current = same;
+      setDrawPts(same);
+    }
+  };
+  // ドラッグ中に線と面だけを追従させる(マーカーは作り直さない)
+  const refreshDrawShapes = () => {
+    const pts = drawPtsRef.current;
+    if (drawLineRef.current) drawLineRef.current.setLatLngs(pts.length >= 3 ? [...pts, pts[0]] : pts);
+    if (drawFillRef.current) drawFillRef.current.setLatLngs(pts);
+  };
+  // dragend を取りこぼしてもドラッグ状態が残らないようにする保険。
+  // スマホではブラウザがスクロールを引き取って pointercancel で終わることがあり、
+  // その場合 dragend は来ない。フラグが立ちっぱなしになると再描画effectが
+  // 冒頭で抜け続け、地図が二度と更新されなくなるため必ず拾う。
+  // document ではなく window に張るのは、地図ライブラリが document で受ける
+  // ドラッグ終了処理(=正規の dragend)を先に走らせてから保険を効かせるため。
+  React.useEffect(() => {
+    if (!drawing) return;
+    const onEnd = () => endDragCommit();
+    const types = ["pointerup", "pointercancel", "mouseup", "touchend", "touchcancel"];
+    types.forEach(t => window.addEventListener(t, onEnd));
+    return () => {
+      types.forEach(t => window.removeEventListener(t, onEnd));
+    };
+  }, [drawing]);
 
   // タイル定義
   const TILES = {
@@ -5214,10 +5511,10 @@ function LeafletMapTab(p) {
     layersRef.current.gps = L.layerGroup().addTo(map);
     // タップで作図
     map.on("click", e => {
-      if (!drawingRef.current) return;
-      const next = [...drawPtsRef.current, [e.latlng.lat, e.latlng.lng]];
-      drawPtsRef.current = next;
-      setDrawPts(next);
+      if (!drawingRef.current || draggingRef.current) return;
+      // マーカー操作の直後に地図のclickが続くと点が増えてしまうので短時間だけ弾く
+      if (Date.now() - lastEditAtRef.current < 400) return;
+      commitPts([...drawPtsRef.current, [e.latlng.lat, e.latlng.lng]]);
     });
     map.on("zoomend", () => setZoom(map.getZoom()));
     setReady(true);
@@ -5260,60 +5557,130 @@ function LeafletMapTab(p) {
   // 作図中ポリゴンの再描画
   React.useEffect(() => {
     if (!ready || !window.L) return;
+    // ドラッグ中に作り直すと掴んでいるマーカーごと消えて動かせなくなる
+    if (draggingRef.current) return;
     const L = window.L;
     const grp = layersRef.current.draw;
     grp.clearLayers();
+    drawLineRef.current = null;
+    drawFillRef.current = null;
     if (drawPts.length > 0) {
-      // 頂点(ドラッグで移動可能)
+      // 頂点(ドラッグで移動・タップで選択・選択中の✕タップで削除)
       drawPts.forEach((pt, i) => {
+        const sel = i === selPt;
         const icon = L.divIcon({
           className: "vtx-icon",
-          html: '<div class="vtx">' + (i + 1) + '</div>',
+          html: '<div class="vtx' + (sel ? " vtx-sel" : "") + '">' + escapeHtml(sel ? "✕" : String(i + 1)) + '</div>',
           iconSize: [26, 26],
           iconAnchor: [13, 13]
         });
         const m = L.marker(pt, {
           icon,
-          draggable: true
+          draggable: true,
+          zIndexOffset: 1000
         }).addTo(grp);
+        let moved = false; // 動かしたときは選択・削除に化けさせない
+        let before = drawPtsRef.current;
+        m.on("dragstart", () => {
+          moved = true;
+          draggingRef.current = true;
+          before = drawPtsRef.current;
+          dragBeforeRef.current = before;
+        });
         m.on("drag", e => {
+          // ドラッグ中は ref と線・面だけを直接更新する。
+          // ここで setDrawPts を呼ぶと再描画で掴んでいるマーカーが破棄されてしまう
           const ll = e.target.getLatLng();
-          const next = drawPtsRef.current.map((q, qi) => qi === i ? [ll.lat, ll.lng] : q);
-          drawPtsRef.current = next;
-          setDrawPts(next);
+          drawPtsRef.current = ptsMove(drawPtsRef.current, i, ll.lat, ll.lng);
+          refreshDrawShapes();
+        });
+        m.on("dragend", e => {
+          if (!draggingRef.current) return; // 保険のリスナーが先に確定済み
+          const ll = e.target.getLatLng();
+          drawPtsRef.current = ptsMove(before, i, ll.lat, ll.lng);
+          endDragCommit();
+        });
+        m.on("click", () => {
+          if (moved) return;
+          lastEditAtRef.current = Date.now();
+          if (selPtRef.current === i) removePt(i);else selectPt(i);
         });
       });
-      if (drawPts.length >= 2) L.polyline([...drawPts, ...(drawPts.length >= 3 ? [drawPts[0]] : [])], {
+      // 辺の中点ハンドル(頂点より小さく薄い。タップかドラッグで頂点を挿入)
+      drawMidpoints(drawPts).forEach(mp => {
+        const icon = L.divIcon({
+          className: "vtx-icon",
+          html: '<div class="vtx-mid"></div>',
+          iconSize: [18, 18],
+          iconAnchor: [9, 9]
+        });
+        const h = L.marker([mp.lat, mp.lng], {
+          icon,
+          draggable: true,
+          zIndexOffset: 500
+        }).addTo(grp);
+        let moved = false;
+        let before = drawPtsRef.current;
+        h.on("dragstart", () => {
+          moved = true;
+          draggingRef.current = true;
+          before = drawPtsRef.current;
+          dragBeforeRef.current = before;
+          // 掴んだ瞬間に挿入しておくと、そのまま新しい頂点として引っ張れる
+          drawPtsRef.current = ptsInsert(before, mp.edge, mp.lat, mp.lng);
+        });
+        h.on("drag", e => {
+          const ll = e.target.getLatLng();
+          drawPtsRef.current = ptsMove(drawPtsRef.current, mp.edge + 1, ll.lat, ll.lng);
+          refreshDrawShapes();
+        });
+        h.on("dragend", e => {
+          if (!draggingRef.current) return; // 保険のリスナーが先に確定済み
+          const ll = e.target.getLatLng();
+          drawPtsRef.current = ptsInsert(before, mp.edge, ll.lat, ll.lng);
+          endDragCommit();
+        });
+        h.on("click", () => {
+          if (moved) return;
+          lastEditAtRef.current = Date.now();
+          commitPts(ptsInsert(drawPtsRef.current, mp.edge, mp.lat, mp.lng));
+        });
+      });
+      if (drawPts.length >= 2) drawLineRef.current = L.polyline([...drawPts, ...(drawPts.length >= 3 ? [drawPts[0]] : [])], {
         color: "#C74E36",
         weight: 2,
         dashArray: "6 4"
       }).addTo(grp);
-      if (drawPts.length >= 3) L.polygon(drawPts, {
+      if (drawPts.length >= 3) drawFillRef.current = L.polygon(drawPts, {
         color: "#C74E36",
         weight: 1,
         fillColor: "#C74E36",
         fillOpacity: 0.15
       }).addTo(grp);
     }
-  }, [ready, drawPts]);
+  }, [ready, drawPts, selPt]);
   const startDraw = () => {
     setDrawing(true);
     drawingRef.current = true;
-    setDrawPts([]);
-    drawPtsRef.current = [];
+    resetDrawState();
   };
   const cancelDraw = () => {
     setDrawing(false);
     drawingRef.current = false;
-    setDrawPts([]);
-    drawPtsRef.current = [];
+    resetDrawState();
     setNewName("");
     setNewCrop("");
   };
+  // 追加・移動・削除・挿入をまとめて1手ずつ戻す
   const undoPt = () => {
-    const next = drawPtsRef.current.slice(0, -1);
-    drawPtsRef.current = next;
-    setDrawPts(next);
+    if (histRef.current.length === 0) return;
+    const prev = histRef.current[histRef.current.length - 1];
+    histRef.current = histRef.current.slice(0, -1);
+    setHistLen(histRef.current.length);
+    drawPtsRef.current = prev;
+    setDrawPts(prev);
+    selPtRef.current = -1;
+    setSelPt(-1);
   };
   const saveDraw = () => {
     if (drawPts.length < 3 || !newName.trim()) return;
@@ -5431,10 +5798,20 @@ function LeafletMapTab(p) {
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
-  }, "地図をタップして圃場の角を順に囲んでください(3点以上)。打った点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "できます。"), /*#__PURE__*/React.createElement("div", {
+  }, "地図をタップして圃場の角を順に打ちます(3点以上)。頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "タップかドラッグ"), "すると頂点を足せます。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
     className: "num"
-  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawArea, 2)), " a"), /*#__PURE__*/React.createElement("div", {
+  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawArea, 2)), " a"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
+    style: S.selPtRow
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "頂点 ", selPt + 1, " を選択中"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => removePt(selPt),
+    style: S.smallDanger
+  }, "✕ この頂点を削除"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => selectPt(-1),
+    style: S.smallSecondary
+  }, "選択をやめる")), /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.btnRow,
       marginTop: 8,
@@ -5442,16 +5819,13 @@ function LeafletMapTab(p) {
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: undoPt,
-    disabled: drawPts.length === 0,
+    disabled: histLen === 0,
     style: {
       ...S.secondaryBtn,
-      opacity: drawPts.length ? 1 : 0.4
+      opacity: histLen ? 1 : 0.4
     }
-  }, "↩ 1点戻す"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setDrawPts([]);
-      drawPtsRef.current = [];
-    },
+  }, "↩ 1つ戻す"), /*#__PURE__*/React.createElement("button", {
+    onClick: resetDrawState,
     disabled: drawPts.length === 0,
     style: {
       ...S.secondaryBtn,
@@ -5816,7 +6190,7 @@ function SettingsTab(p) {
     desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。「🚜 コースから」を選ぶとプルダウンからコースを選んで登録順のまま一括投入でき、「🌾 圃場を選んで」を選ぶと登録済みの圃場が一覧で出るのでタップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 地図タブ",
-    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
+    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をタップまたはドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
   }, {
     title: "📋 プリセットタブ",
     desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」→「🌾 圃場を選んで」から追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。コースの編集画面は上が「コースの順番」、下が「追加できる圃場」に分かれています。下のリストをタップすると順番の最後に追加され、順番リストの各行では⣿マークを長押ししてドラッグで順番を入れ替えたり、「外す」でコースから抜いたりできます。🧪薬剤サブタブは、薬剤名・種類・剤型を登録しておく単純な名前帳です(希釈倍率は散布水量で変わるため持ちません)。登録しておくと、作業タブの「📋 登録薬剤から追加」で名前・種類・剤型をまとめて呼び出せます。「総使用回数の上限」も登録でき、農薬使用回数の警告に使われます(未登録なら既定3回)。作業タブで使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
@@ -5849,9 +6223,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.27",
+    ver: "v8.28",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 地図の「圃場を囲む」を作り直しました。頂点をつかんでも動かせない不具合を修正しています", "🐞 頂点をドラッグしても動かなかった原因を修正。ドラッグ中に頂点そのものが作り直されていたため、つかんだ手から外れていました", "✕ 頂点を1つずつ消せるように。頂点をタップすると「✕」に変わり、もう一度タップで削除します(1回の誤タップでは消えません)。作図パネルからも消せます", "➕ 辺の途中に頂点を足せるように。頂点と頂点の間に出る小さな丸をタップ、またはドラッグすると、その位置に頂点が入ります。四角形以外の複雑な形も囲めます", "↩ 「1つ戻す」が、追加だけでなく移動・削除・挿入も1手ずつ戻せるようになりました(最大50手)", "🐞 スマホでドラッグが途中で中断されたとき(画面のスクロールにブラウザが割り込んだ場合など)、作図中の地図が固まって以後何も反映されなくなる不具合を修正"]
+  }, {
+    ver: "v8.27",
+    date: "2026-08",
+    isNew: false,
     notes: ["⛽ 作業タブの各圃場に「累計」を表示。その日に回る順で予定薬液量を上から足していくので、どの圃場まででどれだけ使うのかが一目で分かります", "⛽ タンク容量を超える手前に「⛽ ここで補給(タンク1杯目 180L / 200L)」の区切りを表示。補給の後は累計を数え直し、2杯目・3杯目として続けます", "圃場を並べ替えると累計と補給の位置がその場で計算し直されます", "実績入力済みの圃場は散布も補給も済んでいる前提で累計に入れません(これから回る分だけが分かります)", "⚙ 設定タブに「散布タンク」を新設。タンク容量を変更できます(既定200L)。空欄や0にすると補給の目印は出ず、累計だけを表示します", "1つの圃場だけでタンク容量を超える場合は「⚠ この圃場だけでタンク容量を超えます」と表示します"]
   }, {
     ver: "v8.26",
@@ -7286,6 +7665,13 @@ const S = {
     position: "relative",
     zIndex: 0,
     isolation: "isolate"
+  },
+  selPtRow: {
+    marginTop: 8,
+    display: "flex",
+    flexWrap: "wrap",
+    alignItems: "center",
+    gap: 8
   },
   drawInfo: {
     marginTop: 8,
