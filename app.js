@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.28";
+const APP_VERSION = "v8.29";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -1055,15 +1055,18 @@ function App() {
       return share;
     });
     const names = members.map(w => resolveWork(w).name).join("＋");
+    // 按分値は members(= works の並び順)の添字で計算している。書き戻しも同じ
+    // 基準で引くこと。タップした順の ids で引くと、一覧と違う順に選んだときに
+    // 圃場と按分値の対応がズレる(プレビューと保存値が食い違う)
+    const shareById = new Map(members.map((w, i) => [w.id, shares[i]]));
     const next = works.map(w => {
-      const idx = ids.indexOf(w.id);
-      if (idx < 0) return w;
+      if (!shareById.has(w.id)) return w;
       const f = resolveWork(w);
       return {
         ...w,
         reported: true,
         reportSynced: false,
-        sprayedL: shares[idx],
+        sprayedL: shareById.get(w.id),
         reportAreaA: parseFloat(f.areaA) || "",
         reportMemo: (rep.memo ? rep.memo + " " : "") + "【連続散布 " + names + " 合計" + fmt(totalSprayed, 2) + "L を面積比按分】",
         reportDate: today(),
@@ -1369,30 +1372,43 @@ function App() {
 
   // 農薬使用回数警告(同圃場×同農薬の使用回数をカウント、デフォルト上限3回)
   const chemWarnings = React.useMemo(() => {
-    const counts = {};
-    // 作期開始日より前の記録は数えない(作期ごとに使用回数がリセットされるため)
+    const counts = new Map();
+    // 作期開始日より前の記録は数えない(作期ごとに使用回数がリセットされるため)。
+    // 判定は散布した日(workDate)で行う。reportDate は「実績を入力した日」なので、
+    // 後日まとめて入力すると作期の内外を取り違える
     works.filter(w => w.reported).filter(w => {
       if (!seasonStart) return true;
-      const d = w.reportDate || w.workDate || "";
+      const d = w.workDate || w.reportDate || "";
       return d >= seasonStart;
     }).forEach(w => {
       const f = resolveWork(w);
+      // 圃場は id で数える(圃場名を変えてもカウントが分裂しないように)
+      const fieldKey = w.fieldId != null ? "id:" + w.fieldId : "name:" + f.name;
       (w.chems || []).forEach(c => {
-        const key = f.name + "||" + c.name;
-        counts[key] = (counts[key] || 0) + 1;
+        // 薬剤名は他の集計と同じ NFKC 正規化を通す。半角カナで入力した薬剤が
+        // 別物として数えられ、上限の警告が出ないのを防ぐ
+        const chemName = normalizeChemName(c.name);
+        if (!chemName) return; // 名前のない薬剤は上限を照合できないので数えない
+        const key = fieldKey + "||" + chemName;
+        const hit = counts.get(key);
+        if (hit) hit.count += 1;else counts.set(key, {
+          fieldName: f.name,
+          chemName,
+          count: 1
+        });
       });
     });
     const warnings = [];
-    Object.entries(counts).forEach(([key, count]) => {
-      const [fieldName, chemName] = key.split("||");
-      // 薬剤マスタに登録された総使用回数の上限を使う(未設定なら既定値)
-      const m = chemMaster.find(x => x.name === chemName);
+    counts.forEach(entry => {
+      // 薬剤マスタに登録された総使用回数の上限を使う(未設定なら既定値)。
+      // マスタ側の名前も正規化して突き合わせる
+      const m = chemMaster.find(x => normalizeChemName(x.name) === entry.chemName);
       const limit = m && parseFloat(m.maxUse) > 0 ? parseFloat(m.maxUse) : CHEM_LIMIT_DEFAULT;
-      if (count >= limit - 1) {
+      if (entry.count >= limit - 1) {
         warnings.push({
-          fieldName,
-          chemName,
-          count,
+          fieldName: entry.fieldName,
+          chemName: entry.chemName,
+          count: entry.count,
           limit
         });
       }
@@ -6223,9 +6239,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.28",
+    ver: "v8.29",
     date: "2026-08",
     isNew: true,
+    notes: ["🐞 まとめ散布(連続散布)の面積比按分で、圃場と散布量の組み合わせが入れ替わる不具合を修正。一覧の並びと違う順に圃場をタップして選ぶと、確認画面に出た数字と保存される数字が食い違っていました", "🐞 農薬の使用回数で、半角カナと全角カナの薬剤名が別の薬剤として数えられ、上限の警告が出ないことがある不具合を修正", "🐞 圃場名を変更すると、その圃場の農薬使用回数が変更前と変更後に分かれて数えられる不具合を修正(圃場の登録そのもので数えるようにしました)", "🐞 農薬使用回数の作期の判定を、実績を入力した日ではなく散布した日で行うように修正。後日まとめて実績を入力したとき、前作期の記録が今作期に混ざっていました"]
+  }, {
+    ver: "v8.28",
+    date: "2026-08",
+    isNew: false,
     notes: ["🗺 地図の「圃場を囲む」を作り直しました。頂点をつかんでも動かせない不具合を修正しています", "🐞 頂点をドラッグしても動かなかった原因を修正。ドラッグ中に頂点そのものが作り直されていたため、つかんだ手から外れていました", "✕ 頂点を1つずつ消せるように。頂点をタップすると「✕」に変わり、もう一度タップで削除します(1回の誤タップでは消えません)。作図パネルからも消せます", "➕ 辺の途中に頂点を足せるように。頂点と頂点の間に出る小さな丸をタップ、またはドラッグすると、その位置に頂点が入ります。四角形以外の複雑な形も囲めます", "↩ 「1つ戻す」が、追加だけでなく移動・削除・挿入も1手ずつ戻せるようになりました(最大50手)", "🐞 スマホでドラッグが途中で中断されたとき(画面のスクロールにブラウザが割り込んだ場合など)、作図中の地図が固まって以後何も反映されなくなる不具合を修正"]
   }, {
     ver: "v8.27",
