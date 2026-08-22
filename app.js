@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.30";
+const APP_VERSION = "v8.31";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -396,7 +396,7 @@ const save = (key, value) => {
   }
 };
 
-// 一意なID発行。Date.now()+乱数だと、コース投入のように同じミリ秒で
+// 一意なID発行。Date.now()+乱数だと、地区からの一括投入のように同じミリ秒で
 // 複数まとめて作るときIDが衝突し、別の圃場を書き換えてしまう事故が起きるため、
 // 必ず前回より大きい値を返すカウンタ方式にしている。
 let __lastId = 0;
@@ -475,7 +475,6 @@ function App() {
   const [chemMaster, setChemMaster] = useState(() => load("tankmix:chemmaster", []));
   const [lastMix, setLastMix] = useState(() => load("tankmix:lastmix", null));
   const [presets, setPresets] = useState(() => load("tankmix:presets", []));
-  const [routes, setRoutes] = useState(() => load("tankmix:routes", []));
   const [crops, setCrops] = useState(() => load("tankmix:crops", []));
   const [workDate, setWorkDate] = useState(today());
   // 作業タブで入力する「この日に使用した薬剤」。{date, chems:[{id,name,form,use,ratio}]}
@@ -596,10 +595,6 @@ function App() {
     setPresets(next);
     save("tankmix:presets", next);
   };
-  const setRoutesSave = next => {
-    setRoutes(next);
-    save("tankmix:routes", next);
-  };
   const setCropsSave = next => {
     setCrops(next);
     save("tankmix:crops", next);
@@ -642,6 +637,7 @@ function App() {
       id: newId(),
       name: data.name,
       crop: data.crop || "",
+      area: (data.area || "").trim(),
       areaA: data.areaA
     };
     setFieldsSave([...fields, f]);
@@ -660,6 +656,7 @@ function App() {
       id: newId(),
       name: data.name,
       crop: data.crop || "",
+      area: (data.area || "").trim(),
       areaA: data.areaA
     }]);
     flash("圃場「" + data.name + "」を登録しました");
@@ -670,6 +667,7 @@ function App() {
       id: newId(),
       name: data.name,
       crop: data.crop || "",
+      area: (data.area || "").trim(),
       areaA: data.areaA,
       polygon: data.polygon,
       center: data.center
@@ -699,6 +697,43 @@ function App() {
     synced: false,
     reportSynced: false
   });
+  // 地区の一覧は圃場から作る。別マスタにすると圃場と食い違って
+  // 陳腐化するため持たない(廃止したコースがそうだった)
+  const areas = React.useMemo(() => {
+    const set = new Set();
+    fields.forEach(f => {
+      const a = (f.area || "").trim();
+      if (a) set.add(a);
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b, "ja"));
+  }, [fields]);
+  // v8.31: コース(routes)を廃止し、そのまとまりを圃場の「地区」へ一度だけ引き継ぐ。
+  // routes のデータ自体は消さず localStorage に残す(戻せるように)。
+  // 既に地区が入っている圃場は上書きしない。
+  React.useEffect(() => {
+    if (localStorage.getItem("tankmix:areamigrated")) return;
+    localStorage.setItem("tankmix:areamigrated", "1");
+    const rs = load("tankmix:routes", []);
+    if (!Array.isArray(rs) || rs.length === 0) return;
+    const byField = new Map();
+    rs.forEach(r => (r.fieldIds || []).forEach(fid => {
+      // 複数のコースに入っていた圃場は、先に出たコース名を採る
+      if (r.name && !byField.has(fid)) byField.set(fid, r.name);
+    }));
+    let n = 0;
+    const next = fields.map(f => {
+      if ((f.area || "").trim() || !byField.has(f.id)) return f;
+      n++;
+      return {
+        ...f,
+        area: byField.get(f.id)
+      };
+    });
+    if (n > 0) {
+      setFieldsSave(next);
+      flash("コースを地区として引き継ぎました(" + n + "圃場)");
+    }
+  }, []);
   const addWork = fieldId => {
     const f = fields.find(x => x.id === fieldId);
     if (!f) return;
@@ -709,6 +744,25 @@ function App() {
     setWorksSave([...works, makeWork(f)]);
     flash("「" + f.name + "」を" + dateLabel(workDate) + "のリストに追加しました");
   };
+  // 地区などから複数の圃場をまとめてこの日のリストへ入れる。
+  // 1件ずつ addWork を呼ぶと古い works を元に上書きし合って1件しか入らないため、必ずまとめて処理する。
+  const addWorks = fieldIds => {
+    const exists = new Set(works.filter(w => w.workDate === workDate && !w.reported).map(w => w.fieldId));
+    const add = [];
+    (fieldIds || []).forEach(id => {
+      if (exists.has(id)) return;
+      const f = fields.find(x => x.id === id);
+      if (!f) return;
+      exists.add(id);
+      add.push(makeWork(f));
+    });
+    if (add.length === 0) {
+      flash("追加できる圃場がありません(すべてこの日のリストにあります)");
+      return;
+    }
+    setWorksSave([...works, ...add]);
+    flash(add.length + "圃場を" + dateLabel(workDate) + "のリストに追加しました");
+  };
   const removeWork = id => setWorksSave(works.filter(w => w.id !== id));
   // 複数の作業をまとめて外す(選択削除・一括削除用)。
   // 1件ずつremoveWorkを呼ぶと古いworksを元に上書きし合って1件しか消えないため、必ずまとめて処理する。
@@ -717,70 +771,6 @@ function App() {
     if (set.size === 0) return;
     setWorksSave(works.filter(w => !set.has(w.id)));
     flash(set.size + "件をこの日のリストから外しました");
-  };
-
-  // ══ 圃場コース(ルート・プリセット) ══
-  // 現在の作業リスト(この日ぶん)をコースとして保存
-  const saveRouteFromToday = () => {
-    const day = works.filter(w => w.workDate === workDate && !w.reported);
-    if (day.length === 0) {
-      flash("この日の作業リストが空です");
-      return;
-    }
-    const name = prompt("コース名を入力してください(例:月曜ルート)", "");
-    if (!name) return;
-    const fieldIds = day.map(w => w.fieldId).filter(id => fields.some(f => f.id === id));
-    if (fieldIds.length === 0) {
-      flash("登録できる圃場がありません");
-      return;
-    }
-    setRoutesSave([{
-      id: Date.now(),
-      name: name.trim(),
-      fieldIds
-    }, ...routes]);
-    flash("コース「" + name.trim() + "」を保存しました(" + fieldIds.length + "圃場)");
-  };
-  // 任意の圃場IDリストからコースを作成
-  const createRoute = (name, fieldIds) => {
-    if (!name || fieldIds.length === 0) return;
-    setRoutesSave([{
-      id: Date.now(),
-      name,
-      fieldIds
-    }, ...routes]);
-    flash("コース「" + name + "」を保存しました");
-  };
-  const deleteRoute = id => setRoutesSave(routes.filter(r => r.id !== id));
-  const renameRoute = (id, name) => setRoutesSave(routes.map(r => r.id === id ? {
-    ...r,
-    name
-  } : r));
-  const updateRoute = (id, name, fieldIds) => setRoutesSave(routes.map(r => r.id === id ? {
-    ...r,
-    name: name || r.name,
-    fieldIds
-  } : r));
-
-  // コースを選んだ日の作業リストへ一括投入(順番を保持、重複はスキップ)
-  const applyRoute = routeId => {
-    const route = routes.find(r => r.id === routeId);
-    if (!route) return;
-    let added = 0;
-    let skipped = 0;
-    const toAdd = [];
-    route.fieldIds.forEach(fid => {
-      const f = fields.find(x => x.id === fid);
-      if (!f) return;
-      if (works.some(w => w.workDate === workDate && w.fieldId === fid && !w.reported)) {
-        skipped++;
-        return;
-      }
-      toAdd.push(makeWork(f));
-      added++;
-    });
-    if (toAdd.length > 0) setWorksSave([...works, ...toAdd]);
-    flash("コースを投入:" + added + "圃場追加" + (skipped > 0 ? "(" + skipped + "件は既存)" : ""));
   };
 
   // 1圃場ぶんの薬量 = 予定薬液量 ÷ 希釈倍率
@@ -1276,7 +1266,8 @@ function App() {
       works,
       chemMaster,
       presets,
-      routes,
+      // コース機能は廃止したが、旧データを共有の往復で消さないようそのまま乗せる
+      routes: load("tankmix:routes", []),
       crops,
       savedAt: new Date().toISOString(),
       by: recorder
@@ -1311,7 +1302,7 @@ function App() {
         if (arr(data.works)) setWorksSave(data.works);
         if (arr(data.chemMaster)) setChemMasterSave(data.chemMaster);
         if (arr(data.presets)) setPresetsSave(data.presets);
-        if (arr(data.routes)) setRoutesSave(data.routes);
+        if (arr(data.routes)) save("tankmix:routes", data.routes);
         if (arr(data.crops)) setCropsSave(data.crops);
         flash("☁ 読み込みました(" + (data.by || "?") + " が " + (data.savedAt || "").slice(0, 16).replace("T", " ") + " に保存)");
       } catch {
@@ -1575,8 +1566,8 @@ function App() {
     removeWorks,
     reorderWork,
     upsertField,
-    routes,
-    applyRoute,
+    areas,
+    addWorks,
     applyRatePerDay,
     submitReport,
     submitGroupReport,
@@ -1614,12 +1605,7 @@ function App() {
     upsertField,
     deleteField,
     addFieldOnly,
-    routes,
-    saveRouteFromToday,
-    createRoute,
-    deleteRoute,
-    renameRoute,
-    updateRoute,
+    areas,
     resolveWork,
     works,
     workDate,
@@ -1638,6 +1624,10 @@ function App() {
   }), tab === "map" && /*#__PURE__*/React.createElement(MapTabRouter, {
     fields,
     addFieldWithPolygon,
+    areas,
+    works,
+    workDate,
+    areaUnitKey,
     crops,
     addCrop,
     flash,
@@ -2053,9 +2043,7 @@ function WorkTab(p) {
     areaA: ""
   });
   const [ratePerDay, setRatePerDay] = useState("");
-  // 圃場の追加方法:"route"=コースから一括 / "field"=圃場を1つずつ選ぶ
-  // コースが未登録の端末では最初から「圃場を選んで」を開いておく
-  const [addMode, setAddMode] = useState(() => p.routes.length > 0 ? "route" : "field");
+  const [zoneFilter, setZoneFilter] = useState(""); // 圃場を追加するときの地区の絞り込み
   const [dayChemsOpen, setDayChemsOpen] = useState(false);
   // 実績入力済みの行は1行に畳む。開いている行のIDを1つだけ保持する
   const [openRowId, setOpenRowId] = useState(null);
@@ -2195,7 +2183,8 @@ function WorkTab(p) {
   };
   // 「圃場を選んで」追加するときの候補。検索が空なら登録済みの全圃場を出す
   // (打たなくてもタップだけで追加できるように)
-  const results = query.trim() ? p.fields.filter(f => f.name.includes(query.trim()) || (f.crop || "").includes(query.trim())) : p.fields;
+  // 検索と地区の絞り込みは重ねがけできる(「大津地区の中から探す」ができるように)
+  const results = (query.trim() ? p.fields.filter(f => f.name.includes(query.trim()) || (f.crop || "").includes(query.trim())) : p.fields).filter(f => !zoneFilter || (f.area || "").trim() === zoneFilter);
   const orderInToday = fieldId => {
     const idx = dayList.findIndex(w => w.fieldId === fieldId);
     return idx >= 0 ? idx + 1 : 0;
@@ -2646,42 +2635,34 @@ function WorkTab(p) {
     style: S.prepBlock
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "圃場を追加"), /*#__PURE__*/React.createElement("div", {
-    style: S.segWrap
+  }, "圃場を追加"), /*#__PURE__*/React.createElement(React.Fragment, null, (p.areas || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 6,
+      marginBottom: 8
+    }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setAddMode("route"),
+    onClick: () => setZoneFilter(""),
     style: {
-      ...S.seg,
-      ...(addMode === "route" ? S.segOn : {})
+      ...S.cropPickChip,
+      ...(zoneFilter === "" ? S.cropPickChipOn : {})
     }
-  }, "🚜 コースから"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setAddMode("field"),
+  }, "すべて"), p.areas.map(a => /*#__PURE__*/React.createElement("button", {
+    key: a,
+    onClick: () => setZoneFilter(zoneFilter === a ? "" : a),
     style: {
-      ...S.seg,
-      ...(addMode === "field" ? S.segOn : {})
+      ...S.cropPickChip,
+      ...(zoneFilter === a ? S.cropPickChipOn : {})
     }
-  }, "🌾 圃場を選んで")), addMode === "route" ? /*#__PURE__*/React.createElement(React.Fragment, null, p.routes.length === 0 ? /*#__PURE__*/React.createElement("p", {
-    style: S.empty
-  }, "まだ圃場コースがありません。", /*#__PURE__*/React.createElement("br", null), "プリセットタブの🚜コースで、よく回る順番を登録できます。") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("select", {
-    value: "",
-    onChange: e => {
-      if (e.target.value) p.applyRoute(Number(e.target.value));
-    },
+  }, a))), zoneFilter && results.length > 0 && /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.addWorks(results.map(f => f.id)),
     style: {
-      ...S.planSelect,
-      marginBottom: 0
+      ...S.smallPrimary,
+      width: "100%",
+      marginBottom: 8
     }
-  }, /*#__PURE__*/React.createElement("option", {
-    value: ""
-  }, "\u25BC コースを選んでこの日へ投入"), p.routes.map(r => /*#__PURE__*/React.createElement("option", {
-    key: r.id,
-    value: r.id
-  }, "🚜 ", r.name, "(", r.fieldIds.length, "圃場)"))), /*#__PURE__*/React.createElement("p", {
-    style: {
-      ...S.note,
-      marginTop: 8
-    }
-  }, "コースを選ぶと、登録した順番のままこの日のリストへまとめて入ります。コースの作成・編集は「プリセット」タブで行えます。"))) : /*#__PURE__*/React.createElement(React.Fragment, null, p.fields.length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }, "＋ 「", zoneFilter, "」の", results.length, "圃場をまとめて追加"), p.fields.length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "まだ圃場が登録されていません。", /*#__PURE__*/React.createElement("br", null), "プリセットタブの🌾圃場で登録してください。") : /*#__PURE__*/React.createElement(React.Fragment, null, p.fields.length > 4 && /*#__PURE__*/React.createElement("input", {
     value: query,
@@ -2726,7 +2707,7 @@ function WorkTab(p) {
       ...S.note,
       marginTop: 8
     }
-  }, "タップした順にこの日のリストへ追加されます。圃場の登録・編集は「プリセット」タブで行えます。")))))), /*#__PURE__*/React.createElement("section", {
+  }, "タップした順にこの日のリストへ追加されます。地区を選ぶとまとめて追加できます。圃場の登録・編集は「プリセット」タブで行えます。")))))), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -3286,7 +3267,7 @@ function WorkProgress(p) {
 
 // ═══════════════════ 長押しドラッグで並べ替える共通処理 ═══════════════════
 // attr で指定した data属性を持つ行を探し、指を離した位置の行へ移動する。
-// 作業タブの圃場並べ替えと、プリセットタブのコース順の並べ替えで共用している。
+// 作業タブの圃場並べ替えで使う。
 function startDragReorder(e, id, attr, o) {
   e.preventDefault();
   o.setDragId(id);
@@ -3994,6 +3975,7 @@ function FieldEditModal(p) {
     [k]: v
   });
   const crops = p.crops || [];
+  const areas = p.areas || [];
   const canSave = p.mf.name.trim().length > 0;
   return /*#__PURE__*/React.createElement("div", {
     style: S.modalOverlay,
@@ -4060,7 +4042,39 @@ function FieldEditModal(p) {
     onChange: e => set("areaA", e.target.value),
     style: S.midInput,
     className: "num"
-  })), /*#__PURE__*/React.createElement("p", {
+  })), /*#__PURE__*/React.createElement("label", {
+    style: {
+      ...S.areaField,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "地区(任意)"), /*#__PURE__*/React.createElement("input", {
+    value: p.mf.area || "",
+    placeholder: "例:大津地区",
+    list: "arealist-edit",
+    onChange: e => set("area", e.target.value),
+    style: S.fieldInput
+  })), /*#__PURE__*/React.createElement("datalist", {
+    id: "arealist-edit"
+  }, areas.map(a => /*#__PURE__*/React.createElement("option", {
+    key: a,
+    value: a
+  }))), areas.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 6,
+      marginTop: 8
+    }
+  }, areas.map(a => /*#__PURE__*/React.createElement("button", {
+    key: a,
+    onClick: () => set("area", a),
+    style: {
+      ...S.cropPickChip,
+      ...((p.mf.area || "") === a ? S.cropPickChipOn : {})
+    }
+  }, a))), /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "保存すると、作業タブに入っているこの圃場の名前・面積も同時に更新されます。"), /*#__PURE__*/React.createElement("div", {
     style: {
@@ -4081,57 +4095,23 @@ function FieldEditModal(p) {
 }
 
 // ═══════════════════ 薬剤タブ ═══════════════════
-// ═══════════════════ プリセットタブ(圃場・コース・薬剤) ═══════════════════
+// ═══════════════════ プリセットタブ(圃場・薬剤) ═══════════════════
 function PresetTab(p) {
-  const [sub, setSub] = useState("field"); // field | route | chem
+  const [sub, setSub] = useState("field"); // field | chem
   // 圃場フォーム(新規登録用。編集は下のポップアップで行う)
   const [fName, setFName] = useState("");
   const [fCrop, setFCrop] = useState("");
   const [fArea, setFArea] = useState("");
+  const [fZone, setFZone] = useState(""); // 地区
   const [fq, setFq] = useState("");
   // 圃場編集ポップアップ(編集対象のID。nullなら閉じている)
   const [editId, setEditId] = useState(null);
   const [mf, setMf] = useState({
     name: "",
     crop: "",
+    area: "",
     areaA: ""
   });
-  // コース作成・編集
-  const [routeBuildMode, setRouteBuildMode] = useState(false);
-  const [routeName, setRouteName] = useState("");
-  const [routePicks, setRoutePicks] = useState([]);
-  const [routeEditId, setRouteEditId] = useState(null);
-  const [routeQ, setRouteQ] = useState(""); // 追加できる圃場の検索
-  // コース順のドラッグ並べ替え
-  const [rDragId, setRDragId] = useState(null);
-  const [rDragOverId, setRDragOverId] = useState(null);
-  const [rDragPos, setRDragPos] = useState(null);
-  const rDragRef = useRef(null);
-  const reorderPick = (fromId, toId) => {
-    const from = routePicks.indexOf(fromId);
-    const to = routePicks.indexOf(toId);
-    if (from < 0 || to < 0 || from === to) return;
-    const next = [...routePicks];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    setRoutePicks(next);
-  };
-  const onPickHandleDown = (e, id) => startDragReorder(e, id, "data-pick-id", {
-    ref: rDragRef,
-    setDragId: setRDragId,
-    setDragOverId: setRDragOverId,
-    setDragPos: setRDragPos,
-    onDrop: reorderPick
-  });
-  const addPick = fid => setRoutePicks(routePicks.includes(fid) ? routePicks : [...routePicks, fid]);
-  const removePick = fid => setRoutePicks(routePicks.filter(x => x !== fid));
-  const closeRouteBuild = () => {
-    setRouteBuildMode(false);
-    setRouteEditId(null);
-    setRoutePicks([]);
-    setRouteName("");
-    setRouteQ("");
-  };
   // 薬剤編集
   const [editChem, setEditChem] = useState(null);
   const [ec, setEc] = useState({
@@ -4158,7 +4138,20 @@ function PresetTab(p) {
     setNName("");
     setNMax("");
   };
-  const fieldList = fq.trim() ? p.fields.filter(f => f.name.includes(fq.trim()) || (f.crop || "").includes(fq.trim())) : p.fields;
+  const fieldList = fq.trim() ? p.fields.filter(f => f.name.includes(fq.trim()) || (f.crop || "").includes(fq.trim()) || (f.area || "").includes(fq.trim())) : p.fields;
+  // 地区ごとにまとめて見出しを付ける。地区なしは末尾の「未分類」へ
+  const fieldGroups = React.useMemo(() => {
+    const map = new Map();
+    fieldList.forEach(f => {
+      const key = (f.area || "").trim() || "未分類";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(f);
+    });
+    return Array.from(map.entries()).map(e => ({
+      name: e[0],
+      items: e[1]
+    })).sort((a, b) => a.name === "未分類" ? 1 : b.name === "未分類" ? -1 : a.name.localeCompare(b.name, "ja"));
+  }, [fieldList]);
   // 編集対象の圃場(マスタから消えていたらポップアップは閉じた扱いにする)
   const editField = editId != null ? p.fields.find(f => f.id === editId) : null;
   const ncq = normalizeChemName(cq);
@@ -4171,11 +4164,13 @@ function PresetTab(p) {
     p.addFieldOnly({
       name: fName.trim(),
       crop: cropName,
+      area: fZone.trim(),
       areaA: parseFloat(fArea) || ""
     });
     setFName("");
     setFCrop("");
     setFArea("");
+    // 地区は残す。同じ地区の圃場を連続で登録することが多いため
   };
   // 編集ポップアップを開く(一覧のその場で開くので、画面上部まで戻る必要がない)
   const startEdit = f => {
@@ -4183,6 +4178,7 @@ function PresetTab(p) {
     setMf({
       name: f.name,
       crop: f.crop || "",
+      area: f.area || "",
       areaA: String(f.areaA || "")
     });
   };
@@ -4196,13 +4192,14 @@ function PresetTab(p) {
     p.upsertField({
       name: mf.name.trim(),
       crop: cropName,
+      area: (mf.area || "").trim(),
       areaA: parseFloat(mf.areaA) || ""
     }, editId);
     setEditId(null);
   };
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.subTabWrap
-  }, [["field", "🌾 圃場"], ["route", "🚜 コース"], ["chem", "🧪 薬剤"]].map(t => /*#__PURE__*/React.createElement("button", {
+  }, [["field", "🌾 圃場"], ["chem", "🧪 薬剤"]].map(t => /*#__PURE__*/React.createElement("button", {
     key: t[0],
     onClick: () => setSub(t[0]),
     style: {
@@ -4214,6 +4211,7 @@ function PresetTab(p) {
     mf: mf,
     setMf: setMf,
     crops: p.crops,
+    areas: p.areas,
     onCancel: closeEdit,
     onSave: saveEdit
   }), /*#__PURE__*/React.createElement("section", {
@@ -4252,7 +4250,39 @@ function PresetTab(p) {
     onChange: e => setFArea(e.target.value),
     style: S.midInput,
     className: "num"
-  })), p.crops.length > 0 && /*#__PURE__*/React.createElement("div", {
+  })), /*#__PURE__*/React.createElement("label", {
+    style: {
+      ...S.areaField,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "地区(任意)"), /*#__PURE__*/React.createElement("input", {
+    value: fZone,
+    placeholder: "例:大津地区",
+    list: "arealist",
+    onChange: e => setFZone(e.target.value),
+    style: S.fieldInput
+  })), /*#__PURE__*/React.createElement("datalist", {
+    id: "arealist"
+  }, (p.areas || []).map(a => /*#__PURE__*/React.createElement("option", {
+    key: a,
+    value: a
+  }))), (p.areas || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 6,
+      marginTop: 8
+    }
+  }, p.areas.map(a => /*#__PURE__*/React.createElement("button", {
+    key: a,
+    onClick: () => setFZone(a),
+    style: {
+      ...S.cropPickChip,
+      ...(fZone === a ? S.cropPickChipOn : {})
+    }
+  }, a))), p.crops.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexWrap: "wrap",
@@ -4281,7 +4311,7 @@ function PresetTab(p) {
     style: S.cardLabel
   }, "登録済み圃場(", p.fields.length, "件)"), p.fields.length > 4 && /*#__PURE__*/React.createElement("input", {
     value: fq,
-    placeholder: "🔍 圃場名・作物名で検索",
+    placeholder: "🔍 圃場名・作物名・地区で検索",
     onChange: e => setFq(e.target.value),
     style: {
       ...S.fieldInput,
@@ -4289,7 +4319,14 @@ function PresetTab(p) {
     }
   }), p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "まだ圃場が登録されていません。上のフォームから登録してください。"), fieldList.map(f => /*#__PURE__*/React.createElement("div", {
+  }, "まだ圃場が登録されていません。上のフォームから登録してください。"), fieldGroups.map(g => /*#__PURE__*/React.createElement(React.Fragment, {
+    key: "zone:" + g.name
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.zoneHead
+  }, g.name, /*#__PURE__*/React.createElement("span", {
+    style: S.zoneCount,
+    className: "num"
+  }, g.items.length, "圃場")), g.items.map(f => /*#__PURE__*/React.createElement("div", {
     key: f.id,
     style: S.listItem
   }, /*#__PURE__*/React.createElement("div", {
@@ -4310,237 +4347,7 @@ function PresetTab(p) {
       if (confirm("圃場「" + f.name + "」を削除しますか？\n(過去の記録は残ります)")) p.deleteField(f.id);
     },
     style: S.smallDanger
-  }, "削除"))))), sub === "route" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
-    style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      flexWrap: "wrap",
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "圃場コース(", p.routes.length, "件)"), !routeBuildMode && /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      setRouteBuildMode(true);
-      // 編集対象を必ず解除する。残っていると新規作成が既存コースの上書きになってしまう
-      setRouteEditId(null);
-      setRoutePicks([]);
-      setRouteName("");
-      setRouteQ("");
-    },
-    style: S.smallPrimary
-  }, "＋ 新規作成")), routeBuildMode ? /*#__PURE__*/React.createElement("div", {
-    style: S.settingsBox
-  }, rDragPos && rDragId != null && dragChip(rDragPos, (p.fields.find(x => x.id === rDragId) || {
-    name: ""
-  }).name), /*#__PURE__*/React.createElement("div", {
-    style: S.smallLabel
-  }, "コース名"), /*#__PURE__*/React.createElement("input", {
-    value: routeName,
-    placeholder: "コース名(例:月曜ルート)",
-    onChange: e => setRouteName(e.target.value),
-    style: {
-      ...S.fieldInput,
-      marginTop: 6
-    }
-  }), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.smallLabel,
-      marginTop: 14
-    }
-  }, "コースの順番(", routePicks.length, "件)"), routePicks.length === 0 ? /*#__PURE__*/React.createElement("p", {
-    style: {
-      ...S.memoLine,
-      marginTop: 6
-    }
-  }, "下の「追加できる圃場」から回る順にタップして入れてください。") : /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 6
-    }
-  }, routePicks.map((fid, i) => {
-    const f = p.fields.find(x => x.id === fid);
-    return /*#__PURE__*/React.createElement("div", {
-      key: fid,
-      "data-pick-id": fid,
-      style: {
-        ...S.routeRow,
-        ...(rDragId === fid ? {
-          opacity: 0.35,
-          border: "2px dashed #B9C3B4"
-        } : {}),
-        ...(rDragOverId === fid && rDragId !== fid ? {
-          outline: "2.5px solid #2E7D4F",
-          outlineOffset: -2
-        } : {})
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: S.routeNum,
-      className: "num"
-    }, i + 1), /*#__PURE__*/React.createElement("span", {
-      style: {
-        flex: 1,
-        minWidth: 0,
-        fontWeight: 700
-      }
-    }, f ? f.name + (f.crop ? "(" + f.crop + ")" : "") : "(削除済の圃場)"), f && f.areaA ? /*#__PURE__*/React.createElement("span", {
-      style: S.tdSub,
-      className: "num"
-    }, fmt(parseFloat(f.areaA), 2), "a") : null, /*#__PURE__*/React.createElement("span", {
-      onPointerDown: e => onPickHandleDown(e, fid),
-      onTouchStart: e => onPickHandleDown(e, fid),
-      style: S.dragHandle,
-      title: "ドラッグで並べ替え",
-      "aria-label": "並べ替え"
-    }, "\u28ff"), /*#__PURE__*/React.createElement("button", {
-      onClick: () => removePick(fid),
-      style: {
-        ...S.smallDanger,
-        padding: "8px 12px"
-      },
-      "aria-label": "コースから外す"
-    }, "外す"));
-  })), routePicks.length > 1 && /*#__PURE__*/React.createElement("p", {
-    style: {
-      ...S.note,
-      marginTop: 8
-    }
-  }, "右の\u28ffマークを長押ししてドラッグすると、回る順番を入れ替えられます。"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.smallLabel,
-      marginTop: 16
-    }
-  }, "追加できる圃場"), p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
-    style: {
-      ...S.memoLine,
-      marginTop: 6
-    }
-  }, "先に「🌾 圃場」タブで圃場を登録してください。"), (() => {
-    const rest = p.fields.filter(f => !routePicks.includes(f.id));
-    const q = routeQ.trim();
-    const list = q ? rest.filter(f => f.name.includes(q) || (f.crop || "").includes(q)) : rest;
-    return /*#__PURE__*/React.createElement(React.Fragment, null, rest.length > 4 && /*#__PURE__*/React.createElement("input", {
-      value: routeQ,
-      placeholder: "🔍 圃場名・作物名で検索",
-      onChange: e => setRouteQ(e.target.value),
-      style: {
-        ...S.fieldInput,
-        marginTop: 6
-      }
-    }), p.fields.length > 0 && rest.length === 0 && /*#__PURE__*/React.createElement("p", {
-      style: {
-        ...S.memoLine,
-        marginTop: 6
-      }
-    }, "すべての圃場をコースに入れました。"), q && list.length === 0 && rest.length > 0 && /*#__PURE__*/React.createElement("p", {
-      style: {
-        ...S.memoLine,
-        marginTop: 6
-      }
-    }, "該当する圃場がありません。"), /*#__PURE__*/React.createElement("div", {
-      style: {
-        marginTop: 6,
-        maxHeight: 260,
-        overflowY: "auto"
-      }
-    }, list.map(f => /*#__PURE__*/React.createElement("div", {
-      key: f.id,
-      onClick: () => addPick(f.id),
-      style: S.pickRow
-    }, /*#__PURE__*/React.createElement("span", {
-      style: S.pickNum
-    }, "\uFF0B"), /*#__PURE__*/React.createElement("span", {
-      style: {
-        flex: 1,
-        minWidth: 0
-      }
-    }, f.name, f.crop ? "(" + f.crop + ")" : ""), f.areaA ? /*#__PURE__*/React.createElement("span", {
-      style: S.tdSub,
-      className: "num"
-    }, fmt(parseFloat(f.areaA), 2), "a") : null))));
-  })(), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.btnRow,
-      marginTop: 14
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: closeRouteBuild,
-    style: S.secondaryBtn
-  }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      if (routeName.trim() && routePicks.length > 0) {
-        if (routeEditId) p.updateRoute(routeEditId, routeName.trim(), routePicks);else p.createRoute(routeName.trim(), routePicks);
-        closeRouteBuild();
-      }
-    },
-    disabled: !routeName.trim() || routePicks.length === 0,
-    style: {
-      ...S.primaryBtn,
-      opacity: routeName.trim() && routePicks.length > 0 ? 1 : 0.4
-    }
-  }, routeEditId ? "コースを更新" : "コース保存", "(", routePicks.length, ")"))) : /*#__PURE__*/React.createElement(React.Fragment, null, p.routes.length === 0 && /*#__PURE__*/React.createElement("p", {
-    style: S.empty
-  }, "まだコースがありません。", /*#__PURE__*/React.createElement("br", null), "「＋ 新規作成」でよく回る圃場をまとめて登録できます。"), p.routes.map(r => {
-    const totalArea = r.fieldIds.reduce((s, fid) => {
-      const f = p.fields.find(x => x.id === fid);
-      return s + (f ? parseFloat(f.areaA) || 0 : 0);
-    }, 0);
-    return /*#__PURE__*/React.createElement("div", {
-      key: r.id,
-      style: {
-        ...S.record,
-        marginBottom: 10
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: S.recordHead
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        minWidth: 0
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: S.recordField
-    }, "🚜 ", r.name), /*#__PURE__*/React.createElement("div", {
-      style: S.listSub,
-      className: "num"
-    }, r.fieldIds.length, "圃場 ／ 合計 ", dispArea(totalArea, p.areaUnitKey), " ", areaSuffix(p.areaUnitKey))), /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        gap: 6,
-        flexShrink: 0
-      }
-    }, /*#__PURE__*/React.createElement("button", {
-      onClick: () => {
-        setRouteBuildMode(true);
-        setRouteEditId(r.id);
-        setRouteName(r.name);
-        setRoutePicks([...r.fieldIds]);
-        setRouteQ("");
-      },
-      style: {
-        ...S.smallSecondary,
-        padding: "6px 12px"
-      }
-    }, "編集"), /*#__PURE__*/React.createElement("button", {
-      onClick: () => {
-        if (confirm("コース「" + r.name + "」を削除しますか？")) p.deleteRoute(r.id);
-      },
-      style: {
-        ...S.smallDanger,
-        padding: "6px 12px"
-      }
-    }, "削除"))), /*#__PURE__*/React.createElement("div", {
-      style: S.recordBody
-    }, /*#__PURE__*/React.createElement("div", {
-      style: S.listSub
-    }, r.fieldIds.map(fid => {
-      const f = p.fields.find(x => x.id === fid);
-      return f ? f.name : "(削除済)";
-    }).join(" → "))));
-  }), /*#__PURE__*/React.createElement("p", {
-    style: S.note
-  }, "コースの呼び出しは「作業・記録」タブの「圃場を追加」→「🚜 コースから」で行います。")))), sub === "chem" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+  }, "削除"))))))), sub === "chem" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -4765,6 +4572,151 @@ function loadGoogleMaps(apiKey) {
 }
 
 // ═══════════════════ 地図タブ ルーター(Leaflet/Google切替) ═══════════════════
+// 地図の圃場を「その日の作業状況」で塗り分ける。
+// 未予定はグレーにしてある。ここを赤にすると、今日たまたま回らない圃場まで
+// 警告のように見えてしまい、本当に見たい「予定あり/済み」が埋もれるため。
+const FIELD_STATUS = {
+  none: {
+    stroke: "#6B7A8C",
+    fill: "#B9C4CF",
+    label: "未予定"
+  },
+  plan: {
+    stroke: "#1E5FA8",
+    fill: "#64A6F0",
+    label: "予定あり"
+  },
+  done: {
+    stroke: "#2E7D4F",
+    fill: "#7ED957",
+    label: "散布済み"
+  }
+};
+// その日の作業リストから、圃場IDごとの状態を作る。
+// 同じ圃場に複数の記録がある日は「済み」を優先する。
+const buildFieldStatus = (works, workDate) => {
+  const m = {};
+  (works || []).forEach(w => {
+    if (w.workDate !== workDate || w.fieldId == null) return;
+    if (w.reported) m[w.fieldId] = "done";else if (m[w.fieldId] !== "done") m[w.fieldId] = "plan";
+  });
+  return m;
+};
+// 地図の下に出す凡例
+const mapLegend = () => /*#__PURE__*/React.createElement("div", {
+  style: S.legendRow
+}, ["none", "plan", "done"].map(k => /*#__PURE__*/React.createElement("span", {
+  key: k,
+  style: S.legendItem
+}, /*#__PURE__*/React.createElement("span", {
+  style: {
+    ...S.legendSwatch,
+    background: FIELD_STATUS[k].fill,
+    borderColor: FIELD_STATUS[k].stroke
+  }
+}), FIELD_STATUS[k].label)));
+
+// 地図タブの圃場一覧。Google版・Leaflet版で中身が同じなので共通化してある。
+// 地区で折りたたみ、検索で絞り込み、チェックで地図の表示/非表示を切り替える。
+// 圃場が数百件になっても、開いている地区のぶんしか縦に伸びない。
+function MapFieldList(p) {
+  const [q, setQ] = React.useState("");
+  const [closed, setClosed] = React.useState([]); // 閉じている地区名
+  const hidden = p.hidden || [];
+  const list = q.trim() ? p.fields.filter(f => f.name.includes(q.trim()) || (f.crop || "").includes(q.trim()) || (f.area || "").includes(q.trim())) : p.fields;
+  const groups = React.useMemo(() => {
+    const m = new Map();
+    list.forEach(f => {
+      const k = (f.area || "").trim() || "未分類";
+      if (!m.has(k)) m.set(k, []);
+      m.get(k).push(f);
+    });
+    return Array.from(m.entries()).map(e => ({
+      name: e[0],
+      items: e[1]
+    })).sort((a, b) => a.name === "未分類" ? 1 : b.name === "未分類" ? -1 : a.name.localeCompare(b.name, "ja"));
+  }, [list]);
+  // 検索中は畳まない(探しているものが隠れると意味がないため)
+  const isOpen = name => !!q.trim() || closed.indexOf(name) < 0;
+  const toggleZone = name => setClosed(closed.indexOf(name) < 0 ? [...closed, name] : closed.filter(x => x !== name));
+  const setZoneVisible = (items, visible) => {
+    const ids = items.map(f => f.id);
+    p.setHidden(visible ? hidden.filter(id => ids.indexOf(id) < 0) : Array.from(new Set([...hidden, ...ids])));
+  };
+  if (p.fields.length === 0) return /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "まだ地図上の圃場がありません。", /*#__PURE__*/React.createElement("br", null), "「✏ 圃場を囲む」で登録できます。");
+  return /*#__PURE__*/React.createElement(React.Fragment, null, p.fields.length > 4 && /*#__PURE__*/React.createElement("input", {
+    value: q,
+    placeholder: "🔍 圃場名・作物名・地区で検索",
+    onChange: e => setQ(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginBottom: 8
+    }
+  }), q.trim() && list.length === 0 && /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "該当する圃場がありません。"), groups.map(g => {
+    const open = isOpen(g.name);
+    const shownCount = g.items.filter(f => hidden.indexOf(f.id) < 0).length;
+    return /*#__PURE__*/React.createElement(React.Fragment, {
+      key: "zone:" + g.name
+    }, /*#__PURE__*/React.createElement("div", {
+      style: S.zoneHead
+    }, /*#__PURE__*/React.createElement("button", {
+      onClick: () => toggleZone(g.name),
+      style: S.zoneToggle
+    }, open ? "▼ " : "▶ ", g.name, /*#__PURE__*/React.createElement("span", {
+      style: S.zoneCount,
+      className: "num"
+    }, " ", g.items.length, "圃場")), /*#__PURE__*/React.createElement("button", {
+      onClick: () => setZoneVisible(g.items, shownCount === 0),
+      style: S.zoneEye,
+      title: "この地区を地図に表示/非表示"
+    }, shownCount === 0 ? "🚫 非表示" : "👁 表示中")), open && g.items.map(f => {
+      const st = FIELD_STATUS[p.status[f.id] || "none"];
+      const off = hidden.indexOf(f.id) >= 0;
+      return /*#__PURE__*/React.createElement("div", {
+        key: f.id,
+        style: {
+          ...S.listItem,
+          opacity: off ? 0.45 : 1
+        }
+      }, /*#__PURE__*/React.createElement("span", {
+        style: {
+          ...S.legendSwatch,
+          background: st.fill,
+          borderColor: st.stroke,
+          flexShrink: 0
+        },
+        title: st.label
+      }), /*#__PURE__*/React.createElement("div", {
+        style: {
+          flex: 1,
+          minWidth: 0
+        }
+      }, /*#__PURE__*/React.createElement("div", {
+        style: S.listTitle
+      }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
+        style: S.listSub,
+        className: "num"
+      }, fmt(polygonAreaA(f.polygon), 2), " a ／ ", st.label)), /*#__PURE__*/React.createElement("button", {
+        onClick: () => p.setHidden(off ? hidden.filter(id => id !== f.id) : [...hidden, f.id]),
+        style: S.smallSecondary,
+        title: "地図での表示を切り替え"
+      }, off ? "🚫" : "👁"), /*#__PURE__*/React.createElement("button", {
+        onClick: () => p.onFocus(f),
+        style: S.smallSecondary
+      }, "地図で見る"), /*#__PURE__*/React.createElement("a", {
+        href: naviUrl(f.center || polygonCenter(f.polygon)),
+        target: "_blank",
+        rel: "noopener noreferrer",
+        style: S.naviBtn
+      }, "🚗 ナビ"));
+    }));
+  }));
+}
+
 function MapTabRouter(p) {
   if (p.mapEngine === "google") {
     if (!p.gmapKey) {
@@ -4802,6 +4754,11 @@ function GoogleMapTab(p) {
   const [drawPts, setDrawPts] = React.useState([]);
   const [newName, setNewName] = React.useState("");
   const [newCrop, setNewCrop] = React.useState("");
+  const [newZone, setNewZone] = React.useState(""); // 作図した圃場の地区
+  const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
+  const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
+  // その日の作業状況。作業タブでの追加・実績入力がそのまま塗り分けに反映される
+  const fieldStatus = React.useMemo(() => buildFieldStatus(p.works, p.workDate), [p.works, p.workDate]);
   const [gpsOn, setGpsOn] = React.useState(false);
   const [mapType, setMapType] = React.useState("hybrid"); // hybrid=衛星+地名, roadmap=地図のみ
   const drawingRef = React.useRef(false);
@@ -4962,15 +4919,17 @@ function GoogleMapTab(p) {
     const showLabel = zoom >= LABEL_MIN_ZOOM;
     p.fields.forEach(f => {
       if (!f.polygon || f.polygon.length < 3) return;
+      if (hidden.indexOf(f.id) >= 0) return;
+      const st = FIELD_STATUS[fieldStatus[f.id] || "none"];
       const path = f.polygon.map(pt => ({
         lat: pt[0],
         lng: pt[1]
       }));
       const poly = new g.Polygon({
         paths: path,
-        strokeColor: "#2E7D4F",
+        strokeColor: st.stroke,
         strokeWeight: 2,
-        fillColor: "#7ED957",
+        fillColor: st.fill,
         fillOpacity: 0.35,
         map: mapRef.current,
         clickable: true
@@ -5003,7 +4962,7 @@ function GoogleMapTab(p) {
         fieldOverlaysRef.current.push(label);
       }
     });
-  }, [ready, p.fields, zoom]);
+  }, [ready, p.fields, zoom, fieldStatus, hidden]);
 
   // 作図中の頂点・線を再描画
   React.useEffect(() => {
@@ -5177,6 +5136,7 @@ function GoogleMapTab(p) {
     resetDrawState();
     setNewName("");
     setNewCrop("");
+    setNewZone("");
   };
   // 追加・移動・削除・挿入をまとめて1手ずつ戻す
   const undoPt = () => {
@@ -5201,6 +5161,7 @@ function GoogleMapTab(p) {
     p.addFieldWithPolygon({
       name: newName.trim(),
       crop: newCrop.trim(),
+      area: newZone.trim(),
       areaA,
       polygon: drawPts,
       center
@@ -5208,6 +5169,14 @@ function GoogleMapTab(p) {
     if (newCrop.trim()) p.addCrop(newCrop.trim());
     cancelDraw();
   };
+  // display:none の間はサイズを取れないので、地図に戻したら測り直させる
+  React.useEffect(() => {
+    if (listOnly || !mapRef.current || !window.google) return;
+    const t = setTimeout(() => {
+      if (mapRef.current) window.google.maps.event.trigger(mapRef.current, "resize");
+    }, 60);
+    return () => clearTimeout(t);
+  }, [listOnly]);
   const toggleGps = () => {
     if (!mapRef.current || !window.google) return;
     if (gpsOn) {
@@ -5310,10 +5279,30 @@ function GoogleMapTab(p) {
   }, "Google マップを読み込んでいます…"), status === "error" && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "Google マップを読み込めませんでした。APIキーやインターネット接続を確認してください。"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.segWrap,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setListOnly(false),
+    style: {
+      ...S.seg,
+      ...(listOnly ? {} : S.segOn)
+    }
+  }, "🗺 地図"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setListOnly(true),
+    style: {
+      ...S.seg,
+      ...(listOnly ? S.segOn : {})
+    }
+  }, "📋 一覧")), /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
-    style: S.mapBox,
+    style: listOnly ? {
+      ...S.mapBox,
+      display: "none"
+    } : S.mapBox,
     "data-map-box": ""
-  }), drawing && /*#__PURE__*/React.createElement("div", {
+  }), !listOnly && mapLegend(), drawing && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.settingsBox,
       marginTop: 12
@@ -5377,6 +5366,20 @@ function GoogleMapTab(p) {
   }, p.crops.map(c => /*#__PURE__*/React.createElement("option", {
     key: c,
     value: c
+  }))), /*#__PURE__*/React.createElement("input", {
+    value: newZone,
+    placeholder: "地区(任意)",
+    list: "arealist-map",
+    onChange: e => setNewZone(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 8
+    }
+  }), /*#__PURE__*/React.createElement("datalist", {
+    id: "arealist-map"
+  }, (p.areas || []).map(a => /*#__PURE__*/React.createElement("option", {
+    key: a,
+    value: a
   }))), /*#__PURE__*/React.createElement("button", {
     onClick: saveDraw,
     disabled: drawPts.length < 3 || !newName.trim() || drawCrossed,
@@ -5391,23 +5394,13 @@ function GoogleMapTab(p) {
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "地図に登録された圃場(", polyFields.length, "件)"), polyFields.length === 0 && /*#__PURE__*/React.createElement("p", {
-    style: S.empty
-  }, "まだ地図上の圃場がありません。", /*#__PURE__*/React.createElement("br", null), "「✏ 圃場を囲む」で登録できます。"), polyFields.map(f => /*#__PURE__*/React.createElement("div", {
-    key: f.id,
-    style: S.listItem
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.listTitle
-  }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
-    style: S.listSub,
-    className: "num"
-  }, fmt(polygonAreaA(f.polygon), 2), " a")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
+  }, "地図に登録された圃場(", polyFields.length, "件)"), /*#__PURE__*/React.createElement(MapFieldList, {
+    fields: polyFields,
+    status: fieldStatus,
+    hidden: hidden,
+    setHidden: setHidden,
+    onFocus: f => {
+      setListOnly(false);
       if (mapRef.current && f.center) {
         mapRef.current.setCenter({
           lat: f.center[0],
@@ -5415,14 +5408,8 @@ function GoogleMapTab(p) {
         });
         mapRef.current.setZoom(17);
       }
-    },
-    style: S.smallSecondary
-  }, "地図で見る"), /*#__PURE__*/React.createElement("a", {
-    href: naviUrl(f.center || polygonCenter(f.polygon)),
-    target: "_blank",
-    rel: "noopener noreferrer",
-    style: S.naviBtn
-  }, "🚗 ナビ")))));
+    }
+  })));
 }
 
 function LeafletMapTab(p) {
@@ -5439,6 +5426,11 @@ function LeafletMapTab(p) {
   const [drawPts, setDrawPts] = React.useState([]);
   const [newName, setNewName] = React.useState("");
   const [newCrop, setNewCrop] = React.useState("");
+  const [newZone, setNewZone] = React.useState(""); // 作図した圃場の地区
+  const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
+  const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
+  // その日の作業状況。作業タブでの追加・実績入力がそのまま塗り分けに反映される
+  const fieldStatus = React.useMemo(() => buildFieldStatus(p.works, p.workDate), [p.works, p.workDate]);
   const [gpsOn, setGpsOn] = React.useState(false);
   const [zoom, setZoom] = React.useState(15);
   const [tileMode, setTileMode] = React.useState("photo"); // "photo" | "map"
@@ -5613,10 +5605,12 @@ function LeafletMapTab(p) {
     const showLabel = zoom >= LABEL_MIN_ZOOM;
     p.fields.forEach(f => {
       if (!f.polygon || f.polygon.length < 3) return;
+      if (hidden.indexOf(f.id) >= 0) return;
+      const st = FIELD_STATUS[fieldStatus[f.id] || "none"];
       const poly = L.polygon(f.polygon, {
-        color: "#2E7D4F",
+        color: st.stroke,
         weight: 2,
-        fillColor: "#7ED957",
+        fillColor: st.fill,
         fillOpacity: 0.35
       }).addTo(grp);
       if (showLabel) {
@@ -5631,7 +5625,7 @@ function LeafletMapTab(p) {
         p.onPickField && p.onPickField(f);
       });
     });
-  }, [ready, p.fields, zoom]);
+  }, [ready, p.fields, zoom, fieldStatus, hidden]);
 
   // 作図中ポリゴンの再描画
   React.useEffect(() => {
@@ -5749,6 +5743,7 @@ function LeafletMapTab(p) {
     resetDrawState();
     setNewName("");
     setNewCrop("");
+    setNewZone("");
   };
   // 追加・移動・削除・挿入をまとめて1手ずつ戻す
   const undoPt = () => {
@@ -5773,6 +5768,7 @@ function LeafletMapTab(p) {
     p.addFieldWithPolygon({
       name: newName.trim(),
       crop: newCrop.trim(),
+      area: newZone.trim(),
       areaA,
       polygon: drawPts,
       center
@@ -5780,6 +5776,13 @@ function LeafletMapTab(p) {
     if (newCrop.trim()) p.addCrop(newCrop.trim());
     cancelDraw();
   };
+
+  // display:none の間はサイズを取れないので、地図に戻したら測り直させる
+  React.useEffect(() => {
+    if (listOnly || !mapRef.current) return;
+    const t = setTimeout(() => mapRef.current && mapRef.current.invalidateSize(), 60);
+    return () => clearTimeout(t);
+  }, [listOnly]);
 
   // 現在地表示
   const toggleGps = () => {
@@ -5872,10 +5875,30 @@ function LeafletMapTab(p) {
   }, "やめる"))), !window.L && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "地図ライブラリを読み込めませんでした。オンラインで開き直してください。"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.segWrap,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setListOnly(false),
+    style: {
+      ...S.seg,
+      ...(listOnly ? {} : S.segOn)
+    }
+  }, "🗺 地図"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setListOnly(true),
+    style: {
+      ...S.seg,
+      ...(listOnly ? S.segOn : {})
+    }
+  }, "📋 一覧")), /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
-    style: S.mapBox,
+    style: listOnly ? {
+      ...S.mapBox,
+      display: "none"
+    } : S.mapBox,
     "data-map-box": ""
-  }), drawing && /*#__PURE__*/React.createElement("div", {
+  }), !listOnly && mapLegend(), drawing && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.settingsBox,
       marginTop: 12
@@ -5939,6 +5962,20 @@ function LeafletMapTab(p) {
   }, p.crops.map(c => /*#__PURE__*/React.createElement("option", {
     key: c,
     value: c
+  }))), /*#__PURE__*/React.createElement("input", {
+    value: newZone,
+    placeholder: "地区(任意)",
+    list: "arealist-map",
+    onChange: e => setNewZone(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 8
+    }
+  }), /*#__PURE__*/React.createElement("datalist", {
+    id: "arealist-map"
+  }, (p.areas || []).map(a => /*#__PURE__*/React.createElement("option", {
+    key: a,
+    value: a
   }))), /*#__PURE__*/React.createElement("button", {
     onClick: saveDraw,
     disabled: drawPts.length < 3 || !newName.trim() || drawCrossed,
@@ -5953,34 +5990,16 @@ function LeafletMapTab(p) {
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "地図に登録された圃場(", polyFields.length, "件)"), polyFields.length === 0 && /*#__PURE__*/React.createElement("p", {
-    style: S.empty
-  }, "まだ地図上の圃場がありません。", /*#__PURE__*/React.createElement("br", null), "「✏ 圃場を囲む」で登録できます。"), polyFields.map(f => /*#__PURE__*/React.createElement("div", {
-    key: f.id,
-    style: S.listItem
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      minWidth: 0
+  }, "地図に登録された圃場(", polyFields.length, "件)"), /*#__PURE__*/React.createElement(MapFieldList, {
+    fields: polyFields,
+    status: fieldStatus,
+    hidden: hidden,
+    setHidden: setHidden,
+    onFocus: f => {
+      setListOnly(false);
+      if (mapRef.current && f.center) mapRef.current.setView(f.center, 16);
     }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.listTitle
-  }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
-    style: S.listSub,
-    className: "num"
-  }, fmt(polygonAreaA(f.polygon), 2), " a")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      if (mapRef.current && f.center) {
-        mapRef.current.setView(f.center, 16);
-      }
-    },
-    style: S.smallSecondary
-  }, "地図で見る"), /*#__PURE__*/React.createElement("a", {
-    href: naviUrl(f.center || polygonCenter(f.polygon)),
-    target: "_blank",
-    rel: "noopener noreferrer",
-    style: S.naviBtn
-  }, "🚗 ナビ")))));
+  })));
 }
 
 // 設定タブの各カードで使う、開閉できる見出し(タップで展開/折りたたみ)
@@ -6273,13 +6292,13 @@ function SettingsTab(p) {
     desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、プリセットタブに登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。このタブはタンク1杯分を計算するための電卓です。圃場への薬剤の適用は「作業・記録」タブの「この日に使用した薬剤」で行います。何度も使う組み合わせは「⭐プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます。上限は薬剤ごとにプリセットタブの🧪薬剤で登録でき、未登録の薬剤は既定3回です。設定タブの「農薬の使用回数」で作期の開始日を設定すると、その日以降の実績だけを数えます(作期が変わったら日付を更新するとカウントがやり直しになります)。"
   }, {
     title: "🚁 作業・記録タブ",
-    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。「🚜 コースから」を選ぶとプルダウンからコースを選んで登録順のまま一括投入でき、「🌾 圃場を選んで」を選ぶと登録済みの圃場が一覧で出るのでタップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
+    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。登録済みの圃場が一覧で出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 地図タブ",
-    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をタップまたはドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
+    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をタップまたはドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。圃場は作業日の状況で塗り分けられます(グレー=未予定、青=予定あり、緑=散布済み。地図の下に凡例が出ます)。作業タブでその日のリストに入れたり実績を入力したりすると、すぐ色が変わります。地図の下の一覧は地区ごとに折りたためます。見出しの「👁 表示中」を押すとその地区を地図から一時的に消せるので、隣り合った地区が重なって見づらいときに使えます(端末には保存されず、タブを離れると元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。上の「📋 一覧」を押すと地図を隠して一覧を画面いっぱいに広げられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
   }, {
     title: "📋 プリセットタブ",
-    desc: "圃場マスタ(🌾)・圃場コース(🚜)・薬剤プリセット(🧪)の3つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積のみを登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」→「🌾 圃場を選んで」から追加します。🚜コースはよく回る圃場の順番を登録したもので、作業タブのプルダウンから一括投入できます。コースの編集画面は上が「コースの順番」、下が「追加できる圃場」に分かれています。下のリストをタップすると順番の最後に追加され、順番リストの各行では⣿マークを長押ししてドラッグで順番を入れ替えたり、「外す」でコースから抜いたりできます。🧪薬剤サブタブは、薬剤名・種類・剤型を登録しておく単純な名前帳です(希釈倍率は散布水量で変わるため持ちません)。登録しておくと、作業タブの「📋 登録薬剤から追加」で名前・種類・剤型をまとめて呼び出せます。「総使用回数の上限」も登録でき、農薬使用回数の警告に使われます(未登録なら既定3回)。作業タブで使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
+    desc: "圃場マスタ(🌾)・薬剤プリセット(🧪)の2つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積・地区を登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。「地区」は圃場をまとめるための任意の名前で、一覧の見出し・地図タブの折りたたみ・作業タブの一括追加のすべてに使われます。空欄のままなら「未分類」にまとまります。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」から追加します。回る順番は、追加したあと作業リストで⣿マークをドラッグして並べ替えます(累計薬液量とタンク補給の位置もその並びで計算し直されます)。🧪薬剤サブタブは、薬剤名・種類・剤型を登録しておく単純な名前帳です(希釈倍率は散布水量で変わるため持ちません)。登録しておくと、作業タブの「📋 登録薬剤から追加」で名前・種類・剤型をまとめて呼び出せます。「総使用回数の上限」も登録でき、農薬使用回数の警告に使われます(未登録なら既定3回)。作業タブで使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
   }, {
     title: "⚙ 設定タブ",
     desc: "面積(a/ha/反/町)と薬量(L/mL/kg/g)の表示単位を切り替えられます。データは常にa・Lで保存され、表示だけ変換されます。作物マスタの管理もここで行います。「散布タンク」では散布車の水タンクの容量を設定でき、作業タブの補給の目印に使われます。送信先URL(GASのウェブアプリURL)は一度設定すれば保存されます。GASを再デプロイするときは「デプロイを管理→編集→新しいバージョン」を使うとURLが変わりません。チームコードを使って複数端末間でデータを共有できます。このガイドとバージョン履歴もここで確認できます。"
@@ -6309,9 +6328,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.30",
+    ver: "v8.31",
     date: "2026-08",
     isNew: true,
+    notes: ["🌾 圃場に「地区」を登録できるようにしました。プリセットの圃場一覧・地図タブの一覧が地区ごとの見出しでまとまり、圃場が増えても探しやすくなります", "🚁 作業タブの「圃場を追加」に地区のボタンを追加。地区で絞り込んで「まとめて追加」を押すと、その地区の圃場を一度にこの日のリストへ入れられます", "🗺 地図の圃場を作業日の状況で塗り分けるようにしました(グレー=未予定、青=予定あり、緑=散布済み)。地図の下に凡例が出ます", "🗺 地図タブの一覧を地区ごとに折りたためるようにし、検索欄を追加。地区ごと・圃場ごとに地図の表示/非表示も切り替えられます", "🗺 「📋 一覧」ボタンで地図を隠し、一覧を画面いっぱいに表示できるようにしました", "🚜 圃場コースを廃止しました。役割は「地区でまとめる」と「作業リストの並べ替え」に引き継がれています。登録済みのコース名は圃場の地区として自動で引き継がれ、元のコースのデータも端末に残してあります", "🐞 コース保存時にIDが重複しうる不具合がありましたが、コースの廃止にともない解消しました"]
+  }, {
+    ver: "v8.30",
+    date: "2026-08",
     notes: ["🗺 圃場を囲むときに線が交差していると警告を出し、そのままでは登録できないようにしました。ねじれた形は面積が実際よりはるかに小さく計算され(交点が真ん中なら0a)、その面積が予定薬液量やAgriNoteの転記にそのまま流れていました", "🧮 作業タブの集計バーの「合計薬量」を「合計薬液量」に改名し、集計もAgriNote転記と同じ基準(実績があれば実散布量)に揃えました。これまでは実績を入力した後も予定量で足していたため、転記画面の数字と合いませんでした", "📋 AgriNoteのまとめ方に剤型を加えました。同じ薬剤名・同じ倍率でも水和剤(kg)と乳剤(mL)は単位が違うため、1つにまとめると先に出た方の単位に引きずられていました", "🧪 薬剤マスタの名前の照合を、農薬使用回数と同じ全角・半角の統一ルールに揃えました。半角カナで登録すると同じ薬剤が二重に登録される・剤型が引き継がれない・検索で見つからない、が直ります", "📤 CSV出力で、圃場名や備考にカンマ・改行が入っていると列がずれる不具合を修正", "🐞 まとめ散布で記録したとき、個別に入力していた古いフライト内訳が残って実散布量と食い違う不具合を修正", "☁ 共有データの読み込みで、壊れた形のデータを取り込んでアプリが動かなくなることがないようにしました"]
   }, {
     ver: "v8.29",
@@ -7777,6 +7800,69 @@ const S = {
     fontSize: 15,
     color: "#8a3f2c",
     fontWeight: 600
+  },
+  legendRow: {
+    display: "flex",
+    flexWrap: "wrap",
+    gap: 12,
+    marginTop: 8,
+    padding: "6px 2px"
+  },
+  legendItem: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 6,
+    fontSize: 12,
+    color: "#5a6b7d",
+    fontWeight: 600
+  },
+  legendSwatch: {
+    display: "inline-block",
+    width: 14,
+    height: 14,
+    borderRadius: 4,
+    border: "2px solid",
+    boxSizing: "border-box"
+  },
+  zoneToggle: {
+    flex: 1,
+    minWidth: 0,
+    textAlign: "left",
+    background: "transparent",
+    border: "none",
+    padding: 0,
+    font: "inherit",
+    color: "inherit",
+    cursor: "pointer"
+  },
+  zoneEye: {
+    flexShrink: 0,
+    background: "#fff",
+    border: "1px solid #d7dee7",
+    borderRadius: 7,
+    padding: "3px 9px",
+    fontSize: 12,
+    color: "#5a6b7d",
+    cursor: "pointer"
+  },
+  zoneHead: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    marginTop: 14,
+    marginBottom: 2,
+    padding: "6px 10px",
+    background: "#EEF3F8",
+    borderRadius: 8,
+    fontSize: 13,
+    fontWeight: 700,
+    color: "#41576e"
+  },
+  zoneCount: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: "#7a8ca0"
   },
   drawWarn: {
     marginTop: 8,
