@@ -2040,6 +2040,7 @@ function WorkTab(p) {
   const [ef, setEf] = useState({
     name: "",
     crop: "",
+    area: "",
     areaA: ""
   });
   const [ratePerDay, setRatePerDay] = useState("");
@@ -2167,6 +2168,7 @@ function WorkTab(p) {
     setEf({
       name: f.name,
       crop: f.crop || "",
+      area: master.area || "",
       areaA: String(f.areaA || "")
     });
   };
@@ -2177,6 +2179,7 @@ function WorkTab(p) {
     p.upsertField({
       name: ef.name.trim(),
       crop: cropName,
+      area: (ef.area || "").trim(),
       areaA: parseFloat(ef.areaA) || ""
     }, editingFieldId);
     setEditingFieldId(null);
@@ -2184,7 +2187,10 @@ function WorkTab(p) {
   // 「圃場を選んで」追加するときの候補。検索が空なら登録済みの全圃場を出す
   // (打たなくてもタップだけで追加できるように)
   // 検索と地区の絞り込みは重ねがけできる(「大津地区の中から探す」ができるように)
-  const results = (query.trim() ? p.fields.filter(f => f.name.includes(query.trim()) || (f.crop || "").includes(query.trim())) : p.fields).filter(f => !zoneFilter || (f.area || "").trim() === zoneFilter);
+  // 絞り込んでいた地区が(圃場の編集で)なくなったら、絞り込みを解除した扱いにする。
+  // そうしないと候補が0件のまま、解除するボタンも消えて戻せなくなる
+  const activeZone = zoneFilter && (p.areas || []).indexOf(zoneFilter) >= 0 ? zoneFilter : "";
+  const results = (query.trim() ? p.fields.filter(f => f.name.includes(query.trim()) || (f.crop || "").includes(query.trim())) : p.fields).filter(f => !activeZone || (f.area || "").trim() === activeZone);
   const orderInToday = fieldId => {
     const idx = dayList.findIndex(w => w.fieldId === fieldId);
     return idx >= 0 ? idx + 1 : 0;
@@ -2205,6 +2211,7 @@ function WorkTab(p) {
     mf: ef,
     setMf: setEf,
     crops: p.crops,
+    areas: p.areas,
     onCancel: () => setEditingFieldId(null),
     onSave: saveEditField
   }), reportingWork && /*#__PURE__*/React.createElement(ReportModal, {
@@ -2646,23 +2653,23 @@ function WorkTab(p) {
     onClick: () => setZoneFilter(""),
     style: {
       ...S.cropPickChip,
-      ...(zoneFilter === "" ? S.cropPickChipOn : {})
+      ...(activeZone === "" ? S.cropPickChipOn : {})
     }
   }, "すべて"), p.areas.map(a => /*#__PURE__*/React.createElement("button", {
     key: a,
-    onClick: () => setZoneFilter(zoneFilter === a ? "" : a),
+    onClick: () => setZoneFilter(activeZone === a ? "" : a),
     style: {
       ...S.cropPickChip,
-      ...(zoneFilter === a ? S.cropPickChipOn : {})
+      ...(activeZone === a ? S.cropPickChipOn : {})
     }
-  }, a))), zoneFilter && results.length > 0 && /*#__PURE__*/React.createElement("button", {
+  }, a))), activeZone && results.length > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => p.addWorks(results.map(f => f.id)),
     style: {
       ...S.smallPrimary,
       width: "100%",
       marginBottom: 8
     }
-  }, "＋ 「", zoneFilter, "」の", results.length, "圃場をまとめて追加"), p.fields.length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }, "＋ 「", activeZone, "」の", results.length, "圃場をまとめて追加"), p.fields.length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "まだ圃場が登録されていません。", /*#__PURE__*/React.createElement("br", null), "プリセットタブの🌾圃場で登録してください。") : /*#__PURE__*/React.createElement(React.Fragment, null, p.fields.length > 4 && /*#__PURE__*/React.createElement("input", {
     value: query,
@@ -5302,7 +5309,7 @@ function GoogleMapTab(p) {
       display: "none"
     } : S.mapBox,
     "data-map-box": ""
-  }), !listOnly && mapLegend(), drawing && /*#__PURE__*/React.createElement("div", {
+  }), !listOnly && polyFields.length > 0 && mapLegend(), drawing && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.settingsBox,
       marginTop: 12
@@ -5898,7 +5905,7 @@ function LeafletMapTab(p) {
       display: "none"
     } : S.mapBox,
     "data-map-box": ""
-  }), !listOnly && mapLegend(), drawing && /*#__PURE__*/React.createElement("div", {
+  }), !listOnly && polyFields.length > 0 && mapLegend(), drawing && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.settingsBox,
       marginTop: 12
