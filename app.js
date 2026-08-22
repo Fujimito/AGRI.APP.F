@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.29";
+const APP_VERSION = "v8.30";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -203,6 +203,34 @@ const polygonAreaA = latlngs => {
   }
   const areaM2 = Math.abs(sum * R * R / 2);
   return areaM2 / 100; // 1a = 100㎡
+};
+// 2つの線分が交わるか(端点で触れているだけは交差とみなさない)。
+// 緯度経度をそのまま平面座標として扱う。1枚の圃場程度の範囲では歪みより
+// 「交差しているか否か」の判定が変わることはない。
+const segIntersects = (a1, a2, b1, b2) => {
+  const cross = (o, p1, p2) => (p1[1] - o[1]) * (p2[0] - o[0]) - (p1[0] - o[0]) * (p2[1] - o[1]);
+  const d1 = cross(b1, b2, a1),
+    d2 = cross(b1, b2, a2),
+    d3 = cross(a1, a2, b1),
+    d4 = cross(a1, a2, b2);
+  return (d1 > 0 && d2 < 0 || d1 < 0 && d2 > 0) && (d3 > 0 && d4 < 0 || d3 < 0 && d4 > 0);
+};
+// ポリゴンの辺どうしが交差しているか(蝶ネクタイ形などのねじれ)。
+// polygonAreaA は符号付き面積の合計なので、ねじれた図形では正負が打ち消し合い、
+// 実際よりはるかに小さい値(交点が中央なら 0)を返す。その面積は
+// 予定薬液量(面積/10 x 散布量)や AgriNote 転記にそのまま流れるため、
+// 登録前にここで検出して止める。
+const polygonSelfIntersects = pts => {
+  if (!Array.isArray(pts) || pts.length < 4) return false;
+  const n = pts.length;
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      // 隣り合う辺は端点を共有するので除外する(最後の辺と最初の辺も隣同士)
+      if (j === i + 1 || i === 0 && j === n - 1) continue;
+      if (segIntersects(pts[i], pts[(i + 1) % n], pts[j], pts[(j + 1) % n])) return true;
+    }
+  }
+  return false;
 };
 // ポリゴンの重心(中心座標)
 const polygonCenter = latlngs => {
@@ -789,7 +817,9 @@ function App() {
   } : c));
   // 薬剤名を登録済みマスタから選んだときは種類・剤型も引き継ぐ
   const setDayChemName = (id, name) => {
-    const m = chemMaster.find(x => x.name === name);
+    // 名前の照合は正規化してから。半角カナで打った名前が全角カナで登録された
+    // マスタに当たらず、剤型・種類が引き継がれない取りこぼしを防ぐ
+    const m = chemMaster.find(x => normalizeChemName(x.name) === normalizeChemName(name));
     setDayChems(dayChems.map(c => c.id === id ? m ? {
       ...c,
       name,
@@ -949,7 +979,9 @@ function App() {
     [k]: v
   } : c));
   const updateChemName = (id, name) => {
-    const m = chemMaster.find(x => x.name === name);
+    // 名前の照合は正規化してから。半角カナで打った名前が全角カナで登録された
+    // マスタに当たらず、剤型・種類が引き継がれない取りこぼしを防ぐ
+    const m = chemMaster.find(x => normalizeChemName(x.name) === normalizeChemName(name));
     setChems(chems.map(c => c.id === id ? m ? {
       ...c,
       name,
@@ -969,7 +1001,8 @@ function App() {
     let next = [...chemMaster];
     list.forEach(c => {
       if (!c.name || c.name === "(無名)") return;
-      const i = next.findIndex(x => x.name === c.name);
+      // 同上。半角カナ違いで同じ薬剤が二重登録されるのを防ぐ
+      const i = next.findIndex(x => normalizeChemName(x.name) === normalizeChemName(c.name));
       const item = {
         name: c.name,
         form: c.form,
@@ -986,7 +1019,7 @@ function App() {
   const addChemMaster = data => {
     const name = (data.name || "").trim();
     if (!name) return false;
-    const exists = chemMaster.some(c => c.name === name);
+    const exists = chemMaster.some(c => normalizeChemName(c.name) === normalizeChemName(name));
     upsertChemMaster([{
       name,
       form: data.form,
@@ -1067,6 +1100,9 @@ function App() {
         reported: true,
         reportSynced: false,
         sprayedL: shareById.get(w.id),
+        // まとめ散布に圃場ごとのフライト内訳は無い。個別入力していた記録を
+        // まとめ散布で上書きしたとき、古い内訳が実散布量と食い違って残るのを防ぐ
+        flights: [],
         reportAreaA: parseFloat(f.areaA) || "",
         reportMemo: (rep.memo ? rep.memo + " " : "") + "【連続散布 " + names + " 合計" + fmt(totalSprayed, 2) + "L を面積比按分】",
         reportDate: today(),
@@ -1268,12 +1304,15 @@ function App() {
     if (j && j.ok && j.payload) {
       try {
         const data = JSON.parse(j.payload);
-        if (data.fields) setFieldsSave(data.fields);
-        if (data.works) setWorksSave(data.works);
-        if (data.chemMaster) setChemMasterSave(data.chemMaster);
-        if (data.presets) setPresetsSave(data.presets);
-        if (data.routes) setRoutesSave(data.routes);
-        if (data.crops) setCropsSave(data.crops);
+        // 受け取った中身は配列である前提のコードが多い。壊れた形のまま入れると
+        // 以後アプリ全体が落ちるので、配列になっているものだけ差し替える
+        const arr = v => Array.isArray(v);
+        if (arr(data.fields)) setFieldsSave(data.fields);
+        if (arr(data.works)) setWorksSave(data.works);
+        if (arr(data.chemMaster)) setChemMasterSave(data.chemMaster);
+        if (arr(data.presets)) setPresetsSave(data.presets);
+        if (arr(data.routes)) setRoutesSave(data.routes);
+        if (arr(data.crops)) setCropsSave(data.crops);
         flash("☁ 読み込みました(" + (data.by || "?") + " が " + (data.savedAt || "").slice(0, 16).replace("T", " ") + " に保存)");
       } catch {
         flash("データの解釈に失敗しました");
@@ -1351,13 +1390,21 @@ function App() {
     // 末尾のゼロ落としは stripTrailingZeros に任せる。以前は小数点の有無を見ずに
     // 削っていたため、桁数0で呼ぶと "100" が "1" になる取り違えが起きえた。
     const plain = (n, d = 2) => isFinite(n) && n !== "" ? stripTrailingZeros(Number(n).toFixed(d)) : "";
+    // 圃場名や備考にカンマ・改行・引用符が入っても列がずれないよう、CSV の
+    // 決まりどおり二重引用符で囲む。以前は備考だけカンマを空白に潰していたため、
+    // 圃場名に「A圃場,西」のような名前を付けると列が1つ増えて崩れていた
+    const csvCell = v => {
+      const t = v === null || v === undefined ? "" : String(v);
+      return /["\r\n,]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+    };
     const head = "散布日,圃場,作物,面積(a),薬剤数,薬剤内容,総量(L),水量(L),実散布量(L),フライト数,フライト内訳,状態,報告日,備考\n";
     const body = works.map(w => {
       const f = resolveWork(w);
-      const chemsStr = w.chems.map(c => c.name + "(" + useLabel(c.use) + "・" + formLabel(c.form) + "・" + c.ratio + "倍・" + Math.round(c.ml) + "mL)").join(" / ");
+      const chems = w.chems || []; // 移行データや共有データには薬剤欄が無いことがある
+      const chemsStr = chems.map(c => c.name + "(" + useLabel(c.use) + "・" + formLabel(c.form) + "・" + c.ratio + "倍・" + (isFinite(c.ml) ? Math.round(c.ml) : 0) + "mL)").join(" / ");
       const flights = w.flights || [];
       const flightStr = flights.length > 1 ? flights.map(fl => plain(fl, 1) + "L").join(" + ") : "";
-      return [w.workDate, f.name, f.crop || "", plain(parseFloat(w.reportAreaA || f.areaA), 2), w.chems.length, chemsStr, plain(w.totalL), plain(w.waterMl / 1000, 3), w.reported ? plain(w.sprayedL) : "", w.reported ? flights.length || (w.reported ? 1 : "") : "", flightStr, w.reported ? "散布済" : "調合のみ", w.reportDate || "", (w.reportMemo || w.memo || "").replace(/[,\n]/g, " ")].join(",");
+      return [w.workDate, f.name, f.crop || "", plain(parseFloat(w.reportAreaA || f.areaA), 2), chems.length, chemsStr, plain(w.totalL), plain(w.waterMl / 1000, 3), w.reported ? plain(w.sprayedL) : "", w.reported ? flights.length || 1 : "", flightStr, w.reported ? "散布済" : "調合のみ", w.reportDate || "", w.reportMemo || w.memo || ""].map(csvCell).join(",");
     }).join("\n");
     const blob = new Blob(["\uFEFF" + head + body], {
       type: "text/csv;charset=utf-8"
@@ -2057,10 +2104,12 @@ function WorkTab(p) {
     setDragPos,
     onDrop: p.reorderWork
   });
-  // 集計バーは「圃場数・合計面積・合計薬量」なので、実績入力済みも含めた
+  // 集計バーは「圃場数・合計面積・合計薬液量」なので、実績入力済みも含めた
   // その日のリスト全体で集計する(見出しの「合計」と中身を一致させる)
   const sumArea = dayList.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
-  const sumLiters = dayList.reduce((s, w) => s + (w.totalL > 0 ? w.totalL : parseFloat(w.plannedL) || 0), 0);
+  // AgriNote 転記やタンク補給の計算と同じ sprayVolumeL を使う。
+  // 以前は実績入力後も予定量を足していたため、転記画面の数字と合わなかった
+  const sumLiters = dayList.reduce((s, w) => s + sprayVolumeL(w), 0);
   const openReport = w => {
     const f = p.resolveWork(w);
     setReportingId(w.id);
@@ -2254,7 +2303,7 @@ function WorkTab(p) {
     style: S.totalsUnit
   }, " ", volSuffix(p.volUnitKey))), /*#__PURE__*/React.createElement("div", {
     style: S.totalsLabel
-  }, "合計薬量"))), needsRateWarning && /*#__PURE__*/React.createElement("div", {
+  }, "合計薬液量"))), needsRateWarning && /*#__PURE__*/React.createElement("div", {
     style: S.rateWarnBand,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("span", null, "⚠"), /*#__PURE__*/React.createElement("span", null, "本日の投下量(L/10a)が未入力の圃場があります。下の欄に入力して「面積から一括計算」を押してください。")), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
@@ -2746,7 +2795,7 @@ function WorkTab(p) {
     }
   }, "🗑 この日をすべて外す"))), dayList.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "この日の作業はまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "上の「圃場を検索」で追加するか、プリセットタブで圃場を登録してください。"), dayList.length > 1 && !groupMode && /*#__PURE__*/React.createElement("p", {
+  }, "この日の作業はまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "上の「⚙ 今日の準備」→「圃場を追加」で追加するか、プリセットタブで圃場を登録してください。"), dayList.length > 1 && !groupMode && /*#__PURE__*/React.createElement("p", {
     style: {
       ...S.note,
       marginTop: 0,
@@ -3320,7 +3369,9 @@ function dragChip(pos, label) {
 // 調合タブの薬剤欄にそのまま入れる。倍率は入った後でも書き換えられる。
 function ChemPickModal(p) {
   const [q, setQ] = useState("");
-  const list = q.trim() ? p.chemMaster.filter(c => c.name.includes(q.trim()) || useLabel(c.use).includes(q.trim())) : p.chemMaster;
+  // 絞り込みも正規化して突き合わせる(半角カナで打っても全角カナの登録に当たる)
+  const nq = normalizeChemName(q);
+  const list = nq ? p.chemMaster.filter(c => normalizeChemName(c.name).includes(nq) || useLabel(c.use).includes(nq)) : p.chemMaster;
   return /*#__PURE__*/React.createElement("div", {
     style: S.modalOverlay,
     className: "no-print",
@@ -3509,7 +3560,9 @@ function buildAgriGroups(works, resolveWork) {
       form: c.form,
       ratio: parseFloat(c.ratio)
     }));
-    const mixKey = mix.map(c => c.name + "@" + c.ratio).sort().join("|");
+    // 剤型も鍵に含める。同名・同倍率でも水和剤(kg)と乳剤(mL)では
+    // 転記する単位が違うので、まとめると先に出た方の単位に引きずられる
+    const mixKey = mix.map(c => c.name + "@" + c.ratio + "@" + (c.form || "")).sort().join("|");
     const groupKey = work.workDate + "##" + mixKey;
     let group = groups.get(groupKey);
     if (!group) {
@@ -4108,7 +4161,8 @@ function PresetTab(p) {
   const fieldList = fq.trim() ? p.fields.filter(f => f.name.includes(fq.trim()) || (f.crop || "").includes(fq.trim())) : p.fields;
   // 編集対象の圃場(マスタから消えていたらポップアップは閉じた扱いにする)
   const editField = editId != null ? p.fields.find(f => f.id === editId) : null;
-  const chemList = cq.trim() ? p.chemMaster.filter(c => c.name.includes(cq.trim())) : p.chemMaster;
+  const ncq = normalizeChemName(cq);
+  const chemList = ncq ? p.chemMaster.filter(c => normalizeChemName(c.name).includes(ncq)) : p.chemMaster;
   // 新規登録(このカードは登録専用。編集はポップアップで行う)
   const submitField = () => {
     if (!fName.trim()) return;
@@ -4755,6 +4809,7 @@ function GoogleMapTab(p) {
   const LABEL_MIN_ZOOM = 17;
   const [zoom, setZoom] = React.useState(15);
   const drawArea = polygonAreaA(drawPts);
+  const drawCrossed = polygonSelfIntersects(drawPts);
   const [selPt, setSelPt] = React.useState(-1); // 選択中の頂点。-1=未選択
   const [histLen, setHistLen] = React.useState(0); // 「1つ戻す」の有効判定に使う
   const selPtRef = React.useRef(-1);
@@ -5136,6 +5191,11 @@ function GoogleMapTab(p) {
   };
   const saveDraw = () => {
     if (drawPts.length < 3 || !newName.trim()) return;
+    // ねじれたまま登録すると面積が実際より小さく出るので、ここで止める
+    if (polygonSelfIntersects(drawPts)) {
+      p.flash && p.flash("線が交差しています。頂点を動かしてねじれを直してください");
+      return;
+    }
     const center = polygonCenter(drawPts);
     const areaA = Math.round(polygonAreaA(drawPts) * 100) / 100;
     p.addFieldWithPolygon({
@@ -5263,7 +5323,9 @@ function GoogleMapTab(p) {
   }, "地図をタップして圃場の角を順に打ちます(3点以上)。頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "タップかドラッグ"), "すると頂点を足せます。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
     className: "num"
-  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawArea, 2)), " a"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
+  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawCrossed ? 0 : drawArea, 2)), " a"), drawCrossed && /*#__PURE__*/React.createElement("div", {
+    style: S.drawWarn
+  }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。頂点をドラッグしてねじれを直すか、「↩ 1つ戻す」で戻してください。"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
     style: S.selPtRow
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -5317,14 +5379,14 @@ function GoogleMapTab(p) {
     value: c
   }))), /*#__PURE__*/React.createElement("button", {
     onClick: saveDraw,
-    disabled: drawPts.length < 3 || !newName.trim(),
+    disabled: drawPts.length < 3 || !newName.trim() || drawCrossed,
     style: {
       ...S.primaryBtn,
       width: "100%",
       marginTop: 10,
-      opacity: drawPts.length >= 3 && newName.trim() ? 1 : 0.4
+      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
     }
-  }, "この圃場を登録(", fmt(drawArea, 2), " a)"))), /*#__PURE__*/React.createElement("section", {
+  }, drawCrossed ? "⚠ 線の交差を直してください" : "この圃場を登録(" + fmt(drawArea, 2) + " a)"))), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -5383,6 +5445,7 @@ function LeafletMapTab(p) {
   const drawingRef = React.useRef(false);
   const drawPtsRef = React.useRef([]);
   const drawArea = polygonAreaA(drawPts);
+  const drawCrossed = polygonSelfIntersects(drawPts);
   const LABEL_MIN_ZOOM = 17;
   const [selPt, setSelPt] = React.useState(-1); // 選択中の頂点。-1=未選択
   const [histLen, setHistLen] = React.useState(0); // 「1つ戻す」の有効判定に使う
@@ -5700,6 +5763,11 @@ function LeafletMapTab(p) {
   };
   const saveDraw = () => {
     if (drawPts.length < 3 || !newName.trim()) return;
+    // ねじれたまま登録すると面積が実際より小さく出るので、ここで止める
+    if (polygonSelfIntersects(drawPts)) {
+      p.flash && p.flash("線が交差しています。頂点を動かしてねじれを直してください");
+      return;
+    }
     const center = polygonCenter(drawPts);
     const areaA = Math.round(polygonAreaA(drawPts) * 100) / 100;
     p.addFieldWithPolygon({
@@ -5817,7 +5885,9 @@ function LeafletMapTab(p) {
   }, "地図をタップして圃場の角を順に打ちます(3点以上)。頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "タップかドラッグ"), "すると頂点を足せます。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
     className: "num"
-  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawArea, 2)), " a"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
+  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawCrossed ? 0 : drawArea, 2)), " a"), drawCrossed && /*#__PURE__*/React.createElement("div", {
+    style: S.drawWarn
+  }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。頂点をドラッグしてねじれを直すか、「↩ 1つ戻す」で戻してください。"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
     style: S.selPtRow
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -5871,14 +5941,14 @@ function LeafletMapTab(p) {
     value: c
   }))), /*#__PURE__*/React.createElement("button", {
     onClick: saveDraw,
-    disabled: drawPts.length < 3 || !newName.trim(),
+    disabled: drawPts.length < 3 || !newName.trim() || drawCrossed,
     style: {
       ...S.primaryBtn,
       width: "100%",
       marginTop: 10,
-      opacity: drawPts.length >= 3 && newName.trim() ? 1 : 0.4
+      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
     }
-  }, "この圃場を登録(", fmt(drawArea, 2), " a)"))), /*#__PURE__*/React.createElement("section", {
+  }, drawCrossed ? "⚠ 線の交差を直してください" : "この圃場を登録(" + fmt(drawArea, 2) + " a)"))), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -6239,9 +6309,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.29",
+    ver: "v8.30",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 圃場を囲むときに線が交差していると警告を出し、そのままでは登録できないようにしました。ねじれた形は面積が実際よりはるかに小さく計算され(交点が真ん中なら0a)、その面積が予定薬液量やAgriNoteの転記にそのまま流れていました", "🧮 作業タブの集計バーの「合計薬量」を「合計薬液量」に改名し、集計もAgriNote転記と同じ基準(実績があれば実散布量)に揃えました。これまでは実績を入力した後も予定量で足していたため、転記画面の数字と合いませんでした", "📋 AgriNoteのまとめ方に剤型を加えました。同じ薬剤名・同じ倍率でも水和剤(kg)と乳剤(mL)は単位が違うため、1つにまとめると先に出た方の単位に引きずられていました", "🧪 薬剤マスタの名前の照合を、農薬使用回数と同じ全角・半角の統一ルールに揃えました。半角カナで登録すると同じ薬剤が二重に登録される・剤型が引き継がれない・検索で見つからない、が直ります", "📤 CSV出力で、圃場名や備考にカンマ・改行が入っていると列がずれる不具合を修正", "🐞 まとめ散布で記録したとき、個別に入力していた古いフライト内訳が残って実散布量と食い違う不具合を修正", "☁ 共有データの読み込みで、壊れた形のデータを取り込んでアプリが動かなくなることがないようにしました"]
+  }, {
+    ver: "v8.29",
+    date: "2026-08",
     notes: ["🐞 まとめ散布(連続散布)の面積比按分で、圃場と散布量の組み合わせが入れ替わる不具合を修正。一覧の並びと違う順に圃場をタップして選ぶと、確認画面に出た数字と保存される数字が食い違っていました", "🐞 農薬の使用回数で、半角カナと全角カナの薬剤名が別の薬剤として数えられ、上限の警告が出ないことがある不具合を修正", "🐞 圃場名を変更すると、その圃場の農薬使用回数が変更前と変更後に分かれて数えられる不具合を修正(圃場の登録そのもので数えるようにしました)", "🐞 農薬使用回数の作期の判定を、実績を入力した日ではなく散布した日で行うように修正。後日まとめて実績を入力したとき、前作期の記録が今作期に混ざっていました"]
   }, {
     ver: "v8.28",
@@ -7702,6 +7776,17 @@ const S = {
     borderRadius: 9,
     fontSize: 15,
     color: "#8a3f2c",
+    fontWeight: 600
+  },
+  drawWarn: {
+    marginTop: 8,
+    padding: "10px 14px",
+    background: "#FFF3CD",
+    border: "1.5px solid #E0A800",
+    borderRadius: 9,
+    fontSize: 14,
+    lineHeight: 1.5,
+    color: "#7a5200",
     fontWeight: 600
   },
   naviBtn: {
