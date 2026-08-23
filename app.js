@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.39";
+const APP_VERSION = "v8.40";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -4848,6 +4848,14 @@ function GoogleMapTab(p) {
   const drawOverlaysRef = React.useRef([]); // 作図中の頂点マーカー・線
   const gpsMarkerRef = React.useRef(null);
   const [status, setStatus] = React.useState("loading"); // loading | ready | error
+  // Googleマップの読み込みをやり直した回数。Googleの地図は毎回ネットから
+  // 取り直す必要があり(オフラインでは動かない)、電波の弱い圃場では起動時の
+  // 1回目が失敗しやすい。失敗したまま固定されないよう、やり直せるようにする。
+  const [loadAttempt, setLoadAttempt] = React.useState(0);
+  const retryLoad = () => {
+    setStatus("loading");
+    setLoadAttempt(n => n + 1);
+  };
   const [ready, setReady] = React.useState(false);
   const [drawing, setDrawing] = React.useState(false);
   const [drawPts, setDrawPts] = React.useState([]);
@@ -4958,7 +4966,8 @@ function GoogleMapTab(p) {
     };
   }, [drawing]);
 
-  // Google Maps APIを読み込んで地図を初期化
+  // Google Maps APIを読み込んで地図を初期化。
+  // loadAttempt が増えると読み込みからやり直す(mapRef があれば作り直さない)
   React.useEffect(() => {
     let cancelled = false;
     loadGoogleMaps(p.gmapKey).then(() => {
@@ -5004,7 +5013,20 @@ function GoogleMapTab(p) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [loadAttempt]);
+
+  // 失敗したあとの自動やり直し。圃場に着いて電波が入ったとき、地図タブに
+  // 戻ってきたときに、利用者が何もしなくても復帰できるようにする。
+  React.useEffect(() => {
+    if (status !== "error") return;
+    if (p.active !== false) retryLoad();
+  }, [p.active]);
+  React.useEffect(() => {
+    if (status !== "error") return;
+    const onOnline = () => retryLoad();
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, [status]);
 
   // 地図タイプ切替
   React.useEffect(() => {
@@ -5407,9 +5429,22 @@ function GoogleMapTab(p) {
     }
   }), status === "loading" && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "Google マップを読み込んでいます…"), status === "error" && /*#__PURE__*/React.createElement("p", {
-    style: S.empty
-  }, "Google マップを読み込めませんでした。APIキーやインターネット接続を確認してください。"), /*#__PURE__*/React.createElement("div", {
+  }, "Google マップを読み込んでいます…"), status === "error" && /*#__PURE__*/React.createElement("div", {
+    style: S.settingsBox
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      ...S.empty,
+      marginBottom: 10
+    }
+  }, "Google マップを読み込めませんでした。", /*#__PURE__*/React.createElement("br", null), "Google の地図は開くたびに通信が必要で、電波の弱い場所では失敗します。電波のある場所で「再読み込み」を押すか、電波がないところでは無料地図をご利用ください。"), /*#__PURE__*/React.createElement("div", {
+    style: S.btnRow
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: retryLoad,
+    style: S.smallPrimary
+  }, "🔄 再読み込み"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.setTab("settings"),
+    style: S.smallSecondary
+  }, "⚙ 設定タブへ"))), /*#__PURE__*/React.createElement("div", {
     ref: mapWrapRef,
     style: listOnly ? {
       ...S.mapWrap,
@@ -6471,9 +6506,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.39",
+    ver: "v8.40",
     date: "2026-08",
     isNew: true,
+    notes: ["🐞 Googleマップの読み込みに1回失敗すると、アプリを開き直すか設定で地図を切り替え直すまで復帰できなかった不具合を修正しました", "🔄 読み込みに失敗したときに「再読み込み」ボタンを出すようにしました", "📶 電波が戻ったときと、地図タブに戻ってきたときに自動で読み込みをやり直します", "Googleの地図は開くたびに通信が必要なことを、エラー画面で説明するようにしました(電波のない場所では無料地図をお使いください)"]
+  }, {
+    ver: "v8.39",
+    date: "2026-08",
+    isNew: false,
     notes: ["🗺 一度開いた地図を、他のタブへ移っても残しておくようにしました。タブを行き来しても地図が作り直されないので、戻ったときの表示が速くなり、見ていた場所・拡大率もそのまま保たれます", "💰 Googleマップを使う場合、地図を作るたびに課金対象(Map load)になります。この変更で、アプリを開いている間は原則1回だけになります", "地図タブを一度も開かなければ地図は読み込まれません", "地区の非表示はタブを離れても保たれるようになりました(アプリを開き直すと元に戻ります)"]
   }, {
     ver: "v8.38",
