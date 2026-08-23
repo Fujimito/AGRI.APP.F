@@ -14,6 +14,8 @@ manifest.json                 … PWAマニフェスト(ホーム画面追加用
 sw.js                         … Service Worker(オフラインキャッシュ)
 icon-192.png / icon-512.png   … アプリアイコン
 apple-touch-icon.png          … iPhone用アイコン
+chemdb.json                   … 農薬登録データ(登録番号・名称検索用)
+tools/selftest.cjs            … 計算部分の自己テスト(配布物ではない)
 ```
 
 ## GitHub Pagesでの公開手順
@@ -58,6 +60,20 @@ git push -u origin main
 2. **sw.js の1行目 `CACHE_VERSION` の数字を上げる**(例: tankmix-v1 → tankmix-v2)
    ※これを忘れると各端末に古いキャッシュが残り続けます
 3. 各端末では、オンライン状態で一度開き直すと新版に切り替わります
+
+### 変更したら自己テストを流す
+
+app.js の計算部分(面積・薬液量・タンク補給・アグリノートの
+まとめ方・薬剤検索など)を Node で直接動かして確かめられます。
+
+```
+node tools/selftest.cjs
+```
+
+配布する app.js そのものを読み込んで検証するので、テストのために
+本体を分割する必要はありません。`app.js` と `sw.js` の版数が
+そろっているかもここで確認します。
+プッシュ前に流して、全項目が成功することを確かめてください。
 
 ## Googleスプレッドシート連携(記録の自動集約)
 

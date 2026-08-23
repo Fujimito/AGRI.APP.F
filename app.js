@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.37";
+const APP_VERSION = "v8.38";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -128,9 +128,14 @@ const useLabel = k => (USES.find(u => u.key === k) || {}).label || "";
 const fmt = (n, d = 1) => !isFinite(n) ? "—" : n % 1 === 0 ? n.toLocaleString("ja-JP") : n.toLocaleString("ja-JP", {
   maximumFractionDigits: d
 });
-const fmtL = ml => (ml / 1000).toLocaleString("ja-JP", {
-  maximumFractionDigits: 3
-});
+// mL を L にして表示する。共有データから来た作業には水量が入っていないことが
+// あり、そのまま割ると画面に「水 NaN L」と出てしまうので fmt と同じ扱いにする。
+const fmtL = ml => {
+  const l = ml / 1000;
+  return !isFinite(l) ? "—" : l.toLocaleString("ja-JP", {
+    maximumFractionDigits: 3
+  });
+};
 
 // ── 単位系 ──
 // 内部データは常に a(面積)・L(液量)で保持し、表示時のみ変換する
@@ -237,9 +242,12 @@ const polygonCenter = latlngs => {
   if (!Array.isArray(latlngs) || latlngs.length === 0) return null;
   let lat = 0,
     lng = 0;
+  // 数値に直してから足す。文字列のまま + すると連結されてしまい、
+  // 中心が実在しない場所になって「ナビ」が見当違いの所へ案内する。
+  // polygonAreaA は引き算なので自動で数値化されており、そちらと挙動を揃える。
   latlngs.forEach(p => {
-    lat += p[0];
-    lng += p[1];
+    lat += Number(p[0]);
+    lng += Number(p[1]);
   });
   return [lat / latlngs.length, lng / latlngs.length];
 };
@@ -4653,8 +4661,18 @@ function AddressSearchBox(p) {
         p.flash && p.flash("「" + query + "」が見つかりませんでした");
         return;
       }
-      const [lng, lat] = list[0].geometry.coordinates;
-      p.onFound(lat, lng);
+      // 住所検索はあいまい一致なので、打った文字と違う場所に飛ぶことがある。
+      // どこに移動したのかを必ず知らせないと、利用者は地図の見た目だけでは
+      // 目的地に来たのか判断できず、そのまま別の場所で圃場を囲んでしまう。
+      const hit = list[0];
+      const coords = hit && hit.geometry && hit.geometry.coordinates;
+      if (!Array.isArray(coords) || !isFinite(coords[0]) || !isFinite(coords[1])) {
+        p.flash && p.flash("「" + query + "」の位置を取得できませんでした");
+        return;
+      }
+      const title = hit.properties && hit.properties.title;
+      p.onFound(coords[1], coords[0]);
+      p.flash && p.flash("📍 " + (title || query) + " へ移動しました" + (list.length > 1 ? "(候補 " + list.length + "件の先頭)" : ""));
     } catch (e) {
       p.flash && p.flash("住所検索に失敗しました(オンライン環境で試してください)");
     } finally {
@@ -6432,9 +6450,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.37",
+    ver: "v8.38",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 住所検索で移動したとき、どこに移動したのかを画面に出すようにしました。住所検索はあいまい一致なので、打った文字と違う場所に飛んでも気づけないおそれがあったためです", "🐞 共有データから読み込んだ記録に水量が入っていないとき、記録欄に「水 NaN L」と出ていた不具合を修正(「—」表示になります)", "🧪 計算部分の自己テスト(86項目)を tools/selftest.cjs に追加しました。面積・薬液量・タンク補給・転記のまとめ方などを、配布する app.js そのままに対して検証できます"]
+  }, {
+    ver: "v8.37",
+    date: "2026-08",
+    isNew: false,
     notes: ["🗺 地図タブに住所・地名で検索して移動できる欄を追加しました。国土地理院の住所検索を使うのでAPIキー不要で、無料地図・Googleマップのどちらでも使えます"]
   }, {
     ver: "v8.36",
