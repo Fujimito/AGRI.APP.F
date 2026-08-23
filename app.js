@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.38";
+const APP_VERSION = "v8.39";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -466,6 +466,14 @@ migrate();
 // ═══════════════════ メイン ═══════════════════
 function App() {
   const [tab, setTab] = useState("calc");
+  // 地図タブは一度開いたら、他のタブへ移っても display:none で残しておく。
+  // Googleマップは地図を作り直すたびに課金対象(Map load)になるため、タブを
+  // 行き来するだけで回数が増えないようにする。無料地図でも再読み込みが減る。
+  // 一度も開いていないうちは作らない(開かない人に地図を読み込ませないため)。
+  const [mapMounted, setMapMounted] = useState(false);
+  useEffect(() => {
+    if (tab === "map") setMapMounted(true);
+  }, [tab]);
   const [toast, setToast] = useState("");
   const [mode, setMode] = useState("direct");
   const [totalL, setTotalL] = useState("10");
@@ -1609,7 +1617,11 @@ function App() {
     addCrop,
     areaUnitKey,
     volUnitKey
-  }), tab === "map" && /*#__PURE__*/React.createElement(MapTabRouter, {
+  }), mapMounted && /*#__PURE__*/React.createElement("div", {
+    style: tab === "map" ? undefined : {
+      display: "none"
+    }
+  }, /*#__PURE__*/React.createElement(MapTabRouter, {
     fields,
     addFieldWithPolygon,
     areas,
@@ -1618,8 +1630,11 @@ function App() {
     flash,
     mapEngine,
     gmapKey,
-    setTab
-  }), tab === "settings" && /*#__PURE__*/React.createElement(SettingsTab, {
+    setTab,
+    // 表示中かどうか。隠れている間は大きさを測れないので採寸を止め、
+    // 戻ってきたときに測り直させる
+    active: tab === "map"
+  })), tab === "settings" && /*#__PURE__*/React.createElement(SettingsTab, {
     areaUnitKey,
     setAreaUnitKey,
     volUnitKey,
@@ -4602,14 +4617,16 @@ const FIELD_COLOR = {
 // これをやらないと画面をスクロールしないと地図の下半分が見えない。
 // Google版・Leaflet版で手順が同じなので共通化してある。違うのは
 // 「大きさが変わった」と地図に伝える呼び出しだけなので resize で受け取る。
-function useMapHeightFit(mapWrapRef, listOnly, drawing, ready, fullMap, resize) {
+function useMapHeightFit(mapWrapRef, hidden, drawing, ready, fullMap, resize) {
   // resize は描画のたびに作り直される関数なので、依存配列には入れずrefで最新を見る
   const resizeRef = React.useRef(resize);
   resizeRef.current = resize;
   React.useLayoutEffect(() => {
     const fit = () => {
       const el = mapWrapRef.current;
-      if (!el || listOnly) return;
+      // 隠れている間(一覧表示中・他のタブを見ている間)は大きさを測れない。
+      // 測ると0になって高さが潰れるので、表示に戻るまで何もしない。
+      if (!el || hidden) return;
       const nav = document.querySelector("nav");
       const navH = nav ? nav.getBoundingClientRect().height : 0;
       if (fullMap) {
@@ -4640,7 +4657,7 @@ function useMapHeightFit(mapWrapRef, listOnly, drawing, ready, fullMap, resize) 
       window.removeEventListener("resize", fit);
       window.removeEventListener("orientationchange", fit);
     };
-  }, [listOnly, drawing, ready, fullMap]);
+  }, [hidden, drawing, ready, fullMap]);
 }
 
 // 住所・地名を入力すると国土地理院の住所検索API(APIキー不要・全国対応)で座標を調べ、
@@ -5255,17 +5272,19 @@ function GoogleMapTab(p) {
     if (newCrop.trim()) p.addCrop(newCrop.trim());
     cancelDraw();
   };
-  useMapHeightFit(mapWrapRef, listOnly, drawing, ready, fullMap, () => {
+  // 一覧表示中と、他のタブを見ている間はどちらも display:none で隠れている
+  const mapHidden = listOnly || p.active === false;
+  useMapHeightFit(mapWrapRef, mapHidden, drawing, ready, fullMap, () => {
     if (mapRef.current && window.google) window.google.maps.event.trigger(mapRef.current, "resize");
   });
   // display:none の間はサイズを取れないので、地図に戻したら測り直させる
   React.useEffect(() => {
-    if (listOnly || !mapRef.current || !window.google) return;
+    if (mapHidden || !mapRef.current || !window.google) return;
     const t = setTimeout(() => {
       if (mapRef.current) window.google.maps.event.trigger(mapRef.current, "resize");
     }, 60);
     return () => clearTimeout(t);
-  }, [listOnly]);
+  }, [mapHidden]);
   const toggleGps = () => {
     if (!mapRef.current || !window.google) return;
     if (gpsOn) {
@@ -5885,15 +5904,17 @@ function LeafletMapTab(p) {
     cancelDraw();
   };
 
-  useMapHeightFit(mapWrapRef, listOnly, drawing, ready, fullMap, () => {
+  // 一覧表示中と、他のタブを見ている間はどちらも display:none で隠れている
+  const mapHidden = listOnly || p.active === false;
+  useMapHeightFit(mapWrapRef, mapHidden, drawing, ready, fullMap, () => {
     if (mapRef.current) mapRef.current.invalidateSize();
   });
   // display:none の間はサイズを取れないので、地図に戻したら測り直させる
   React.useEffect(() => {
-    if (listOnly || !mapRef.current) return;
+    if (mapHidden || !mapRef.current) return;
     const t = setTimeout(() => mapRef.current && mapRef.current.invalidateSize(), 60);
     return () => clearTimeout(t);
-  }, [listOnly]);
+  }, [mapHidden]);
 
   // 現在地表示
   const toggleGps = () => {
@@ -6417,7 +6438,7 @@ function SettingsTab(p) {
     desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。登録済みの圃場が一覧で出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。計算式は圃場ごとに「面積÷10×投下量」で、調合タブの「面積から計算」とまったく同じ式・同じ端数処理(0.01L単位)です。投下量の欄の下に出る「対象◯圃場 ／ 合計◯a → ◯L」は、実際に書き換わる圃場だけを、書き換わる値そのもので合計した予告なので、押した結果と必ず一致します(実績を入力済みの圃場は上書きされません)。集計バーの「合計薬液量」は、実績を入力した圃場だけ実散布量に切り替わるため、まだ実績のない状態の予定合計とは差が出ます。実績が何圃場ぶん混ざっているかは「実績 ◯/◯圃場」で分かります。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(データベースのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 地図タブ",
-    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をタップまたはドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとデータベースの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。「🔍 住所・地名を入力して地図を移動」に住所や地名を入れると、その場所へ地図がジャンプします(国土地理院の住所検索を使うためAPIキー不要で、無料地図・Googleマップの両方で使えます)。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。登録済みの圃場は蛍光イエローで表示されます。衛星写真の上でも地図タイルの上でも埋もれず、中の作物が見えるように塗りは薄めで輪郭を強くしてあります。拡大すると圃場名・作物名・面積の札が出ます。地図は画面の縦幅いっぱいに自動で広がるので、スクロールせずに全体を見られます。「⛶」を押すと見出しやタブバーも隠して完全な全画面になり、「✕ 全画面をやめる」で戻ります。圃場の一覧は上の「📋 一覧」に切り替えると出ます。一覧は地区ごとに折りたためて検索もでき、見出しの「👁 表示中」を押すとその地区を地図から一時的に消せます(端末には保存されず、タブを離れると元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
+    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をタップまたはドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとデータベースの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。「🔍 住所・地名を入力して地図を移動」に住所や地名を入れると、その場所へ地図がジャンプします(国土地理院の住所検索を使うためAPIキー不要で、無料地図・Googleマップの両方で使えます)。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。登録済みの圃場は蛍光イエローで表示されます。衛星写真の上でも地図タイルの上でも埋もれず、中の作物が見えるように塗りは薄めで輪郭を強くしてあります。拡大すると圃場名・作物名・面積の札が出ます。地図は画面の縦幅いっぱいに自動で広がるので、スクロールせずに全体を見られます。「⛶」を押すと見出しやタブバーも隠して完全な全画面になり、「✕ 全画面をやめる」で戻ります。圃場の一覧は上の「📋 一覧」に切り替えると出ます。一覧は地区ごとに折りたためて検索もでき、見出しの「👁 表示中」を押すとその地区を地図から一時的に消せます(端末には保存されないので、アプリを開き直すと元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
   }, {
     title: "📋 データベースタブ",
     desc: "圃場マスタ(🌾)・薬剤プリセット(🧪)の2つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積・地区を登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。「地区」は圃場をまとめるための任意の名前で、一覧の見出し・地図タブの折りたたみ・作業タブの一括追加のすべてに使われます。空欄のままなら「未分類」にまとまります。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」から追加します。回る順番は、追加したあと作業リストで⣿マークをドラッグして並べ替えます(累計薬液量とタンク補給の位置もその並びで計算し直されます)。🧪薬剤サブタブは、薬剤名・種類・剤型を登録しておく単純な名前帳です(希釈倍率は散布水量で変わるため持ちません)。登録しておくと、作業タブの「📋 登録薬剤から追加」で名前・種類・剤型をまとめて呼び出せます。「総使用回数の上限」も登録でき、農薬使用回数の警告に使われます(未登録なら既定3回)。作業タブで使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
@@ -6450,9 +6471,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.38",
+    ver: "v8.39",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 一度開いた地図を、他のタブへ移っても残しておくようにしました。タブを行き来しても地図が作り直されないので、戻ったときの表示が速くなり、見ていた場所・拡大率もそのまま保たれます", "💰 Googleマップを使う場合、地図を作るたびに課金対象(Map load)になります。この変更で、アプリを開いている間は原則1回だけになります", "地図タブを一度も開かなければ地図は読み込まれません", "地区の非表示はタブを離れても保たれるようになりました(アプリを開き直すと元に戻ります)"]
+  }, {
+    ver: "v8.38",
+    date: "2026-08",
+    isNew: false,
     notes: ["🗺 住所検索で移動したとき、どこに移動したのかを画面に出すようにしました。住所検索はあいまい一致なので、打った文字と違う場所に飛んでも気づけないおそれがあったためです", "🐞 共有データから読み込んだ記録に水量が入っていないとき、記録欄に「水 NaN L」と出ていた不具合を修正(「—」表示になります)", "🧪 計算部分の自己テスト(86項目)を tools/selftest.cjs に追加しました。面積・薬液量・タンク補給・転記のまとめ方などを、配布する app.js そのままに対して検証できます"]
   }, {
     ver: "v8.37",
