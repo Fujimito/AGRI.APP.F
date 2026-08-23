@@ -20,14 +20,8 @@
   button { touch-action: manipulation; }
   /* スマホ向けリセット */
   input, select, textarea { font-size: 16px; } /* iOS自動ズーム防止 */
-  @media (min-width: 768px) {
-    /* タブレット・PC：地図を縦幅いっぱいに拡大 */
-    [data-map-box] { height: calc(100dvh - 180px) !important; max-height: none !important; }
-  }
-  @media (min-width: 1024px) {
-    /* デスクトップ：さらに大きく */
-    [data-map-box] { height: calc(100dvh - 160px) !important; }
-  }
+  /* 地図の高さは app.js が画面の残り全部を実測して入れる。
+     ここで !important を付けると、その実測値が効かなくなるので指定しない。 */
   @media print {
     .no-print, nav { display: none !important; }
     body { background: #fff; }
