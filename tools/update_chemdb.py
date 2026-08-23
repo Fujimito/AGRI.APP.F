@@ -6,11 +6,27 @@ chemdb.json 更新スクリプト
 FAMIC(農林水産消費安全技術センター)が公開する「農薬登録情報ダウンロード」の
 基本部CSVを取得し、アプリ用の軽量JSON(chemdb.json)を再生成する。
 
-  出典: https://www.acis.famic.go.jp/ddata/index2.htm  (公的情報)
+  出典: https://www.acis.famic.go.jp/ddata/index2.htm
   更新: 原則として月初。月1回程度このスクリプトを実行して差し替える運用を想定。
+
+  ⚠ 出力した chemdb.json はリポジトリにコミットしないこと。
+    FAMICの利用規約 (https://www.famic.go.jp/docs/rule/) は
+    「無断で改変を行うことはできない」「許可なく商業目的での利用を禁止」と
+    している。このスクリプトが作る chemdb.json は列を抜き出して変換した
+    加工物なので、公開リポジトリに同梱して配布する形は取らない。
+    そのため chemdb.json は .gitignore に入れてある。
+
+  ★このファイルの用途は「Googleドライブにアップロードするためのファイルを作ること」。
+    生成 → 自分のGoogleドライブにアップロード → ファイルIDを Apps Script の
+    スクリプトプロパティ CHEMDB_FILE_ID に設定 → アプリの設定タブ「農薬データ」から
+    各端末に取り込む、という流れになる(README「農薬データの取り込み」を参照)。
+    手元で生成して自分たちで使うぶんと、公開配布は別の話である点に注意。
 
 使い方(リポジトリ直下で):
     python tools/update_chemdb.py
+
+出力先はリポジトリ直下の chemdb.json だが、これは置き場所として都合がよいだけで、
+配布物ではない。コミットせず、Googleドライブへのアップロード用として扱うこと。
 
 依存: 標準ライブラリのみ(Python 3.8+)。
 """

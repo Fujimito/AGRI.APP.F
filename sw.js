@@ -1,6 +1,6 @@
 // 薬液調合ノート — Service Worker(完全オフライン対応)
 // 更新を配布するときは CACHE_VERSION の数字を上げてください
-const CACHE_VERSION = "tankmix-v8.41";
+const CACHE_VERSION = "tankmix-v8.44";
 
 const ASSETS = [
   "./",
@@ -14,7 +14,9 @@ const ASSETS = [
   "./icon-192.png",
   "./icon-512.png",
   "./apple-touch-icon.png",
-  "./chemdb.json",
+  // chemdb.json はもう同梱していない(FAMICの利用規約により再配布しない)。
+  // 各利用者が自分のGoogleドライブに置き、設定タブから取り込んで
+  // IndexedDBに保存する。よってService Workerのキャッシュ対象ではない。
 ];
 
 // インストール時に全ファイルをキャッシュ。
@@ -46,6 +48,12 @@ self.addEventListener("activate", (e) => {
 // キャッシュ優先(圏外でも動作)、裏でネット更新があれば次回反映
 self.addEventListener("fetch", (e) => {
   if (e.request.method !== "GET") return;
+  // 他サイトへの通信はキャッシュせず素通しする。
+  // ここを通すと、国土地理院の住所検索(msearch.gsi.go.jp)や
+  // GASの接続テスト(script.google.com)の応答まで保存され、
+  // 以後ずっと同じ古い結果が返り続ける(検索し直しても変わらない)。
+  // 地図タイルはブラウザのHTTPキャッシュに任せれば十分。
+  if (new URL(e.request.url).origin !== self.location.origin) return;
   e.respondWith(
     caches.match(e.request).then((cached) => {
       const fetched = fetch(e.request)

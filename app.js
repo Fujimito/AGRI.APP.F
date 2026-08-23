@@ -15,7 +15,12 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.41";
+const APP_VERSION = "v8.44";
+// GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
+// 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
+// ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
+// 正しいURLを保存できずアプリが使えなくなるほうが害が大きいため、警告に留める。
+const GAS_URL_RE = /^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/;
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -500,6 +505,10 @@ function App() {
   const [recorder, setRecorderState] = useState(() => localStorage.getItem("tankmix:recorder") || "");
   const [teamCode, setTeamCodeState] = useState(() => localStorage.getItem("tankmix:teamcode") || "");
   const [syncing, setSyncing] = useState(false);
+  // 農薬データ(IndexedDB)の状態。null = 未取り込み、{count, savedAt} = 取り込み済み
+  const [chemDbInfo, setChemDbInfo] = useState(null);
+  const [chemDbBusy, setChemDbBusy] = useState(false); // 取り込み中(ボタンの二重押し防止)
+  const [chemDbProgress, setChemDbProgress] = useState(""); // 例: "3/4 パート"
   const syncingRef = useRef(false);
   const abortRef = useRef(false);
   const [syncProgress, setSyncProgress] = useState({
@@ -516,6 +525,15 @@ function App() {
   // 作期の開始日。この日以降の実績だけを農薬使用回数としてカウントする
   const [seasonStart, setSeasonStartState] = useState(() => localStorage.getItem("tankmix:seasonstart") || new Date().getFullYear() + "-01-01");
   const [mapEngine, setMapEngineState] = useState(() => localStorage.getItem("tankmix:mapengine") || "leaflet");
+  // 共有パスワード。GAS側のスクリプトプロパティ SHARED_SECRET と同じ文字列を入れる。
+  // これが合わないとGASが記録を受け付けない(GAS側が未設定なら従来どおり通る)
+  const [authKey, setAuthKeyState] = useState(() => localStorage.getItem("tankmix:authkey") || "");
+  const gasUrlWarnRef = useRef(null); // 送信先URLの形の警告を、入力が止まってから出すためのタイマー
+  const authErrRef = useRef(false); // 共有パスワード違いを検出したか(後続の一般的な失敗メッセージで上書きしないため)
+  const setAuthKey = v => {
+    setAuthKeyState(v);
+    localStorage.setItem("tankmix:authkey", v.trim());
+  };
   const [gmapKey, setGmapKeyState] = useState(() => localStorage.getItem("tankmix:gmapkey") || "");
   const [gmapKeyInput, setGmapKeyInput] = useState(() => localStorage.getItem("tankmix:gmapkey") || "");
   const setMapEngine = v => {
@@ -552,7 +570,7 @@ function App() {
   // 端末のtankmix:データをすべて消去(端末譲渡・売却前などに使用)。
   // 誤タップで即実行されないよう、確認ダイアログに加えて「消去」と入力させる二段階の確認にしている
   const eraseAllData = () => {
-    if (!confirm("この端末に保存されているデータ(圃場・作業記録・APIキーなど)をすべて消去します。\n送信済みの記録はスプレッドシート側に残ります。\nこの操作は取り消せません。よろしいですか？")) return;
+    if (!confirm("この端末に保存されているデータ(圃場・作業記録・APIキー・共有パスワードなど)をすべて消去します。\n送信済みの記録はスプレッドシート側に残ります。\nこの操作は取り消せません。よろしいですか？")) return;
     const input = prompt("最終確認です。よろしければ下の欄に「消去」と入力してください。");
     if (input === null) return;
     if (input.trim() !== "消去") {
@@ -580,8 +598,14 @@ function App() {
     localStorage.setItem("tankmix:tankcap", s);
   };
   const setGasUrl = v => {
+    const t = v.trim();
     setGasUrlState(v);
-    localStorage.setItem("tankmix:gasurl", v.trim());
+    localStorage.setItem("tankmix:gasurl", t);
+    // 打っている途中の文字列は当然一致しないので、入力が止まってから判定する
+    if (gasUrlWarnRef.current) clearTimeout(gasUrlWarnRef.current);
+    gasUrlWarnRef.current = setTimeout(() => {
+      if (t && !GAS_URL_RE.test(t)) flash("⚠ Apps ScriptのURLの形ではありません。送信先を確認してください(誤ったURLだと記録が第三者のサーバーへ送られます)");
+    }, 1200);
   };
   const setRecorder = v => {
     setRecorderState(v);
@@ -1135,6 +1159,12 @@ function App() {
   const post = async (body, retries = 2) => {
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
     if (!url) return null;
+    // 共有パスワードは全ての送信に乗せる。GAS側で SHARED_SECRET が未設定なら
+    // 空文字でも従来どおり通るので、設定していない人の運用は変わらない
+    const withAuth = {
+      ...body,
+      auth: (localStorage.getItem("tankmix:authkey") || "").trim()
+    };
     for (let attempt = 0; attempt <= retries; attempt++) {
       try {
         const res = await fetch(url, {
@@ -1142,9 +1172,15 @@ function App() {
           headers: {
             "Content-Type": "text/plain;charset=utf-8"
           },
-          body: JSON.stringify(body)
+          body: JSON.stringify(withAuth)
         });
         const j = await res.json();
+        // パスワード違いは何度送っても同じなので、リトライせずその場で知らせる
+        if (j && j.error === "auth") {
+          authErrRef.current = true;
+          flash("共有パスワードが違います。設定タブの「共有パスワード」を確認してください");
+          return j;
+        }
         if (j) return j;
       } catch (e) {/* リトライへ */}
       if (attempt < retries) await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
@@ -1156,6 +1192,7 @@ function App() {
     if (!url || syncingRef.current) return;
     syncingRef.current = true;
     abortRef.current = false;
+    authErrRef.current = false;
     setSyncing(true);
     let current = load("tankmix:works", []);
     // 送信対象は「作業日で選んでいる日」の未送信ぶんだけ。
@@ -1234,7 +1271,8 @@ function App() {
       done: 0,
       total: 0
     });
-    if (aborted) flash(sent + "件送信して中止しました。残りは後で送信できます");else if (sent > 0) flash(sent + "件を送信しました" + (failed ? "(一部失敗・再試行してください)" : ""));else if (failed) flash("送信に失敗しました。電波とURLを確認してください");
+    // パスワード違いは post() が既に案内済み。ここで一般的な失敗文言に上書きしない
+    if (authErrRef.current) {/* 何も出さない */} else if (aborted) flash(sent + "件送信して中止しました。残りは後で送信できます");else if (sent > 0) flash(sent + "件を送信しました" + (failed ? "(一部失敗・再試行してください)" : ""));else if (failed) flash("送信に失敗しました。電波とURLを確認してください");
   };
   const abortSync = () => {
     abortRef.current = true;
@@ -1245,11 +1283,16 @@ function App() {
       flash("URLを入力してください");
       return;
     }
+    // つながったかどうかとは別に、送信先がGASのURLの形かどうかも伝える。
+    // 形が違えばGoogle以外のサーバーへ記録を送っている可能性がある
+    const urlWarn = GAS_URL_RE.test(url) ? "" : "／⚠ Apps ScriptのURLの形ではありません。送信先を確認してください";
     flash("接続を確認中…");
     try {
       const res = await fetch(url);
       const j = await res.json();
-      flash(j && j.ok ? "✅ 接続OK！" : "応答が不正です。URLを確認してください");
+      // GASのdoGetが返す secured で、共有パスワードが設定済みかどうかが分かる。
+      // 未設定だとURLを知っている人は誰でも書き込めてしまうので、そこまで伝える
+      if (j && j.ok && j.secured === false) flash("✅ 接続OK(ただし共有パスワード未設定：URLを知る人は誰でも記録を書き込めます)" + urlWarn);else flash((j && j.ok ? "✅ 接続OK！" : "応答が不正です。URLを確認してください") + urlWarn);
     } catch {
       flash("❌ 接続できません。URLとデプロイ設定を確認してください");
     }
@@ -1283,7 +1326,7 @@ function App() {
       payload
     }, 2);
     setSyncing(false);
-    if (j && j.ok) flash("☁ 共有データを保存しました(" + fields.length + "圃場)");else if (j && j.error) flash("保存失敗:" + j.error + "。GASを最新版に更新してください");else flash("保存に失敗しました。URLとGASの更新・デプロイを確認してください");
+    if (j && j.error === "auth") {/* post() が案内済み */} else if (j && j.ok) flash("☁ 共有データを保存しました(" + fields.length + "圃場)");else if (j && j.error) flash("保存失敗:" + j.error + "。GASを最新版に更新してください");else flash("保存に失敗しました。URLとGASの更新・デプロイを確認してください");
   };
   const cloudLoad = async () => {
     if (!teamCode.trim()) {
@@ -1315,8 +1358,84 @@ function App() {
       }
     } else if (j && j.ok) {
       flash("このチームコードの共有データはまだありません");
-    } else {
+    } else if (!(j && j.error === "auth")) {
+      // パスワード違いは post() が案内済み
       flash("読み込みに失敗しました");
+    }
+  };
+  // ── 農薬データの取り込み(GAS経由・分割受信) ──
+  // 起動時に、取り込み済みかどうかだけ確認して設定タブの表示に使う
+  useEffect(() => {
+    let alive = true;
+    chemDbMeta().then(m => {
+      if (alive) setChemDbInfo(m);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const importChemDb = async () => {
+    const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
+    if (!url) {
+      flash("先に「送信・共有設定」で送信先URLを設定してください");
+      return;
+    }
+    if (chemDbBusy) return; // 二重押し防止(ボタン側でも disabled にしている)
+    setChemDbBusy(true);
+    setChemDbProgress("接続中…");
+    try {
+      // part 0 から順に受け取って連結する。総パート数は最初の応答で分かる。
+      let text = "";
+      let part = 0;
+      let total = 1;
+      while (part < total) {
+        const j = await post({
+          type: "chemdbLoad",
+          part,
+          size: 250000
+        }, 2);
+        if (!j) throw new Error("送信先につながりません");
+        if (j.error === "auth") return; // 案内は post() が出している
+        if (!j.ok) throw new Error(j.error === "chemdb not found" ? "Googleドライブに chemdb.json が見つかりません。スクリプトプロパティ CHEMDB_FILE_ID を確認してください" : j.error || "取得に失敗しました");
+        total = Math.max(1, Number(j.total) || 1);
+        text += String(j.chunk || "");
+        part++;
+        setChemDbProgress(part + "/" + total + " パート");
+        // 万一 total が壊れた値で返っても、無限に取りに行かないようにする
+        if (part > 100) throw new Error("パート数が多すぎます。GASを最新のCode.gsに更新してください");
+      }
+      // 全部そろってから解釈する。途中まで保存すると、次回「取り込み済み」の顔をして
+      // 中身が欠けたデータで検索することになる
+      const data = JSON.parse(text);
+      if (!Array.isArray(data) || data.length === 0) throw new Error("データの形式が違います");
+      const rec = {
+        data,
+        savedAt: new Date().toISOString(),
+        count: data.length
+      };
+      await chemDbPutRecord(rec);
+      resetChemDbCache();
+      setChemDbInfo({
+        count: rec.count,
+        savedAt: rec.savedAt
+      });
+      flash("農薬データを取り込みました(" + rec.count.toLocaleString() + "件)");
+    } catch (e) {
+      flash("取り込みに失敗しました:" + (e && e.message ? e.message : e));
+    } finally {
+      setChemDbBusy(false);
+      setChemDbProgress("");
+    }
+  };
+  const deleteChemDb = async () => {
+    if (!confirm("この端末に取り込んだ農薬データを削除します。\n農薬の検索ができなくなります(取り込み直せば戻ります)。よろしいですか？")) return;
+    try {
+      await chemDbDeleteRecord();
+      resetChemDbCache();
+      setChemDbInfo(null);
+      flash("農薬データを削除しました");
+    } catch (e) {
+      flash("削除に失敗しました");
     }
   };
   const savePreset = () => {
@@ -1389,8 +1508,12 @@ function App() {
     // 圃場名や備考にカンマ・改行・引用符が入っても列がずれないよう、CSV の
     // 決まりどおり二重引用符で囲む。以前は備考だけカンマを空白に潰していたため、
     // 圃場名に「A圃場,西」のような名前を付けると列が1つ増えて崩れていた
+    // 圃場名や備考が「=」「+」などで始まると、Excelがそれを数式として計算してしまう
+    // (=1+1 が 2 になるだけでなく、外部を呼び出す式を書かれると危ない)。
+    // 先頭にアポストロフィを足すと Excel は文字列として扱うので、必ず前置する
     const csvCell = v => {
-      const t = v === null || v === undefined ? "" : String(v);
+      let t = v === null || v === undefined ? "" : String(v);
+      if (/^[=+\-@\t\r\n]/.test(t)) t = "'" + t;
       return /["\r\n,]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
     };
     const head = "散布日,圃場,作物,面積(a),薬剤数,薬剤内容,総量(L),水量(L),実散布量(L),フライト数,フライト内訳,状態,報告日,備考\n";
@@ -1647,10 +1770,17 @@ function App() {
     setRecorder,
     teamCode,
     setTeamCode,
+    authKey,
+    setAuthKey,
     testConnection,
     cloudSave,
     cloudLoad,
     syncing,
+    chemDbInfo,
+    chemDbBusy,
+    chemDbProgress,
+    importChemDb,
+    deleteChemDb,
     crops,
     addCrop,
     deleteCrop,
@@ -3767,7 +3897,9 @@ function AgriNoteModal(p) {
     style: S.cardLabel
   }, "📋 アグリノート転記"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "「同じ日 × 同じ調合」でまとめた1グループが、AgriNote の1レコードに対応します。⧉ で数値をコピーして貼り付けてください。使用量 = 散布液量 ÷ 希釈倍数(AgriNote と同じ式)。単位は剤型からの推定です。"), groups.length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }, "「同じ日 × 同じ調合」でまとめた1グループが、AgriNote の1レコードに対応します。⧉ で数値をコピーして貼り付けてください。使用量 = 散布液量 ÷ 希釈倍数(AgriNote と同じ式)。単位は剤型からの推定です。"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "アグリノートはウォーターセル株式会社の商標です。本アプリは同社とは関係ありません。"), groups.length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "薬剤が入力された記録がありません。") : groups.map(groupCard), /*#__PURE__*/React.createElement("button", {
     onClick: p.onCancel,
@@ -3780,28 +3912,96 @@ function AgriNoteModal(p) {
 }
 
 // ═══════════════════ 農薬登録番号での検索 → 薬剤マスタ登録 ═══════════════════
-// FAMICの農薬登録情報(基本部)を chemdb.json として同梱し、登録番号・農薬名・
-// 成分名で検索して、その場で薬剤マスタ(プリセット)に登録できるようにする。
-// データは公的情報(FAMIC 農薬登録情報ダウンロード)のスナップショット。
-// chemdb.json の1件は {n:登録番号, nm:農薬名, u:用途キー, f:剤型キー, ig:有効成分, mk:登録者}。
+// FAMICの農薬登録情報(基本部)を使い、登録番号・農薬名・成分名で検索して、
+// その場で薬剤マスタ(プリセット)に登録できるようにする。
+//
+// ⚠ データはアプリに同梱していない。FAMICの利用規約
+//   (https://www.famic.go.jp/docs/rule/) が「無断で改変を行うことはできない」
+//   「許可なく商業目的での利用を禁止」としており、列を抜き出してJSONに変換した
+//   加工物を公開リポジトリで再配布する形は取れないと判断したため。
+//   代わりに、各利用者が tools/update_chemdb.py で自分の chemdb.json を作り、
+//   自分のGoogleドライブに置き、自分のApps Script(Code.gs の chemdbLoad)経由で
+//   端末に取り込む。取り込んだデータはこの端末の IndexedDB に入る。
+//
+// 1件は {n:登録番号, nm:農薬名, u:用途キー, f:剤型キー, ig:有効成分, mk:登録者}。
 // 容量を抑えるためキー名を短くしてある。生成は tools/update_chemdb.py。
 const CHEM_SEARCH_LIMIT = 200; // 一度に表示する検索結果の上限
+
+// ── 農薬データの保存先(IndexedDB) ──
+// 約940KBある。localStorage に入れると作業記録・圃場・プリセットと合わせて
+// 5MB の上限に近づき、記録の保存が静かに失敗する事故につながる。
+// 使うのはキー1つだけなので、汎用ライブラリは足さず最小のラッパで済ませる。
+const CHEMDB_DB_NAME = "tankmix";
+const CHEMDB_STORE = "chemdb";
+const CHEMDB_KEY = "current"; // 保存する値は {data:[...], savedAt:ISO文字列, count:件数}
+function chemDbOpen() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === "undefined" || !indexedDB) {
+      reject(new Error("この端末ではIndexedDBが使えません"));
+      return;
+    }
+    const req = indexedDB.open(CHEMDB_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(CHEMDB_STORE)) db.createObjectStore(CHEMDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("IndexedDBを開けません"));
+    // プライベートブラウジングなどで許可待ちのまま固まることがある。
+    // 開けないまま画面が「読み込み中…」で止まらないよう、失敗として扱う。
+    req.onblocked = () => reject(new Error("IndexedDBを開けません"));
+  });
+}
+function chemDbTx(mode, run) {
+  return chemDbOpen().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(CHEMDB_STORE, mode);
+    const req = run(tx.objectStore(CHEMDB_STORE));
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("IndexedDBの操作に失敗しました"));
+    tx.oncomplete = () => db.close();
+  }));
+}
+const chemDbGetRecord = () => chemDbTx("readonly", s => s.get(CHEMDB_KEY));
+const chemDbPutRecord = rec => chemDbTx("readwrite", s => s.put(rec, CHEMDB_KEY));
+const chemDbDeleteRecord = () => chemDbTx("readwrite", s => s.delete(CHEMDB_KEY));
+
 let chemDbCache = null;
 let chemDbLoading = null;
+// 取り込み・削除のあとに呼ぶ。メモリ上の写しを捨てて、次の検索で読み直させる
+function resetChemDbCache() {
+  chemDbCache = null;
+  chemDbLoading = null;
+}
+// 未取り込みであることを、通信エラー等と区別できるようにする印
+const CHEMDB_NOT_IMPORTED = "chemdb-not-imported";
 function loadChemDb() {
   if (chemDbCache) return Promise.resolve(chemDbCache);
-  if (!chemDbLoading) chemDbLoading = fetch("chemdb.json").then(res => {
-    if (!res.ok) throw new Error("農薬データの取得に失敗しました");
-    return res.json();
-  }).then(data => {
-    chemDbCache = data;
-    return data;
+  if (!chemDbLoading) chemDbLoading = chemDbGetRecord().then(rec => {
+    if (!rec || !Array.isArray(rec.data) || rec.data.length === 0) {
+      const e = new Error("農薬データが取り込まれていません");
+      e.code = CHEMDB_NOT_IMPORTED;
+      throw e;
+    }
+    chemDbCache = rec.data;
+    return rec.data;
   }).catch(err => {
-    // 失敗した Promise を残すと、オンラインに戻っても二度と読み込めなくなる
+    // 失敗した Promise を残すと、取り込んだあとも二度と読めなくなる
     chemDbLoading = null;
     throw err;
   });
   return chemDbLoading;
+}
+// 設定タブの状態表示用。本体(data)を読まずに件数と日付だけ欲しいところだが、
+// IndexedDB は値の一部だけを取り出せないので、結局まるごと読む。
+// 開くのは設定タブを表示したときの1回だけなので、これで足りる。
+function chemDbMeta() {
+  return chemDbGetRecord().then(rec => {
+    if (!rec || !Array.isArray(rec.data) || rec.data.length === 0) return null;
+    return {
+      count: rec.count || rec.data.length,
+      savedAt: rec.savedAt || ""
+    };
+  }).catch(() => null);
 }
 
 // chemdb.json は「登録番号 × 有効成分」で行が分かれているため、同じ登録番号が
@@ -3960,7 +4160,7 @@ function ChemSearchModal(p) {
     }
   }, "絞り込み　", filterCheck(byNo, setByNo, "登録番号"), filterCheck(byName, setByName, "農薬名"), filterCheck(byIngredient, setByIngredient, "成分名")), loadFailed ? /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "農薬データを読み込めませんでした。オンラインで一度アプリを開くと、以降はオフラインでも使えます。") : !chemDb ? /*#__PURE__*/React.createElement("p", {
+  }, "農薬データが取り込まれていません。設定タブの「農薬データ」から取り込んでください。") : !chemDb ? /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "農薬データを読み込み中…") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
     style: S.note
@@ -3988,7 +4188,15 @@ function ChemSearchModal(p) {
       fontWeight: 700,
       color: isRegistered(chem) ? "#16a34a" : "#2563eb"
     }
-  }, isRegistered(chem) ? "✓登録済" : "＋登録")))), /*#__PURE__*/React.createElement("button", {
+  }, isRegistered(chem) ? "✓登録済" : "＋登録")))), /*#__PURE__*/React.createElement("p", {
+    // 出典はコード内のコメントだけでなく、データを使う画面に常時出しておく
+    style: {
+      ...S.note,
+      marginTop: 14,
+      borderTop: "1px solid #e2e8e4",
+      paddingTop: 10
+    }
+  }, "出典: 独立行政法人農林水産消費安全技術センター(FAMIC)「農薬登録情報ダウンロード」を加工して作成。農薬名は各社の商標または登録商標です。取り込んであるのは特定時点のデータで、登録情報は変わります。使用前に必ずラベルを確認してください。"), /*#__PURE__*/React.createElement("button", {
     onClick: p.onCancel,
     style: {
       ...S.secondaryBtn,
@@ -4660,6 +4868,44 @@ function useMapHeightFit(mapWrapRef, hidden, drawing, ready, fullMap, resize) {
   }, [hidden, drawing, ready, fullMap]);
 }
 
+// 頂点をドラッグしている最中の「面積 X a」を、指を離す前から追従させる。
+// ドラッグ中に setDrawPts を呼ぶと再描画effectが走って掴んでいるマーカーごと
+// 作り直されてしまう(だから既存コードは draggingRef で再描画を抑えている)。
+// そこで線・面と同じやり方で、Reactの状態は触らずDOMを直接書き換える。
+// 指を離すと dragend → setDrawPts → 再描画 で React が同じ値を書き直すので、
+// ここで書いた文字列と最終的な表示は一致する(fmt の呼び方を揃えてあるため)。
+// Google版・Leaflet版で手順がまったく同じなので共通化してある。
+function useLiveAreaReadout(drawPtsRef) {
+  const areaRef = React.useRef(null); // 「面積 ○ a」の数字を出している <strong>
+  const warnRef = React.useRef(null); // 「⚠ 線が交差しています」の行
+  const rafRef = React.useRef(0); // 予約済みの requestAnimationFrame のID(0=なし)
+  // drag はマウス/指の移動のたびに飛んでくるので、そのつど面積と交差判定を
+  // 計算するとカクつく。1フレーム1回に間引き、多重予約はIDの有無で弾く。
+  const refreshAreaReadout = () => {
+    if (rafRef.current) return;
+    rafRef.current = requestAnimationFrame(() => {
+      rafRef.current = 0;
+      const pts = drawPtsRef.current;
+      const crossed = polygonSelfIntersects(pts);
+      // 交差しているときに 0 を出すのは React 側の描画と同じ規則。
+      // ここだけ実面積を出すと、指を離した瞬間に 0 へ飛んで見える。
+      if (areaRef.current) areaRef.current.textContent = fmt(crossed ? 0 : polygonAreaA(pts), 2);
+      // 警告行は常に描画しておき、表示/非表示だけを切り替える。
+      // ドラッグ中に React に生成させることはできないため。
+      if (warnRef.current) warnRef.current.style.display = crossed ? "" : "none";
+    });
+  };
+  // 作図をやめた・タブを離れたときに予約が残ると、消えたDOMを触りにいく
+  React.useEffect(() => () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+  }, []);
+  return {
+    areaRef,
+    warnRef,
+    refreshAreaReadout
+  };
+}
+
 // 住所・地名を入力すると国土地理院の住所検索API(APIキー不要・全国対応)で座標を調べ、
 // 地図をその場所へ移動する。Google版・無料地図版のどちらでも同じ結果になるよう、
 // 検索処理そのものは共通化し、地図を動かす部分だけを onFound で受け取る。
@@ -4887,6 +5133,12 @@ function GoogleMapTab(p) {
   const dragBeforeRef = React.useRef(null); // ドラッグ開始時の頂点配列(履歴に積む「変更前」)
   const drawLineRef = React.useRef(null); // 作図中の線。ドラッグ中に直接書き換える
   const drawFillRef = React.useRef(null); // 作図中の面。同上
+  // 面積表示もドラッグ中はDOMを直接書き換えて追従させる(線・面と同じ理由)
+  const {
+    areaRef,
+    warnRef,
+    refreshAreaReadout
+  } = useLiveAreaReadout(drawPtsRef);
   // 頂点編集を1手として確定する。履歴には「変更前」を積む
   const commitPts = (next, opt) => {
     const o = opt || {};
@@ -4940,7 +5192,7 @@ function GoogleMapTab(p) {
       setDrawPts(same);
     }
   };
-  // ドラッグ中に線と面だけを追従させる(マーカーは作り直さない)
+  // ドラッグ中に線・面・面積表示を追従させる(マーカーは作り直さない)
   const refreshDrawShapes = () => {
     const pts = drawPtsRef.current;
     const toLL = a => ({
@@ -4949,6 +5201,8 @@ function GoogleMapTab(p) {
     });
     if (drawLineRef.current) drawLineRef.current.setPath((pts.length >= 3 ? [...pts, pts[0]] : pts).map(toLL));
     if (drawFillRef.current) drawFillRef.current.setPaths(pts.map(toLL));
+    // 頂点・中点ハンドルの drag は全部ここを通るので、面積表示の追従もここで済ませる
+    refreshAreaReadout();
   };
   // dragend を取りこぼしてもドラッグ状態が残らないようにする保険。
   // スマホではブラウザがスクロールを引き取って pointercancel で終わることがあり、
@@ -5471,8 +5725,17 @@ function GoogleMapTab(p) {
   }, "地図をタップして圃場の角を順に打ちます(3点以上)。頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "タップかドラッグ"), "すると頂点を足せます。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
     className: "num"
-  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawCrossed ? 0 : drawArea, 2)), " a"), drawCrossed && /*#__PURE__*/React.createElement("div", {
-    style: S.drawWarn
+  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", {
+    ref: areaRef
+  }, fmt(drawCrossed ? 0 : drawArea, 2)), " a"),
+  // 警告行は drawCrossed で出し分けず常に置いておき、display だけを切り替える。
+  // ドラッグ中は React を動かせないので、無い要素は出しようがないため。
+  /*#__PURE__*/React.createElement("div", {
+    ref: warnRef,
+    style: {
+      ...S.drawWarn,
+      display: drawCrossed ? "" : "none"
+    }
   }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。頂点をドラッグしてねじれを直すか、「↩ 1つ戻す」で戻してください。"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
     style: S.selPtRow
   }, /*#__PURE__*/React.createElement("div", {
@@ -5610,6 +5873,12 @@ function LeafletMapTab(p) {
   const dragBeforeRef = React.useRef(null); // ドラッグ開始時の頂点配列(履歴に積む「変更前」)
   const drawLineRef = React.useRef(null); // 作図中の線。ドラッグ中に直接書き換える
   const drawFillRef = React.useRef(null); // 作図中の面。同上
+  // 面積表示もドラッグ中はDOMを直接書き換えて追従させる(線・面と同じ理由)
+  const {
+    areaRef,
+    warnRef,
+    refreshAreaReadout
+  } = useLiveAreaReadout(drawPtsRef);
   // 頂点編集を1手として確定する。履歴には「変更前」を積む
   const commitPts = (next, opt) => {
     const o = opt || {};
@@ -5663,11 +5932,13 @@ function LeafletMapTab(p) {
       setDrawPts(same);
     }
   };
-  // ドラッグ中に線と面だけを追従させる(マーカーは作り直さない)
+  // ドラッグ中に線・面・面積表示を追従させる(マーカーは作り直さない)
   const refreshDrawShapes = () => {
     const pts = drawPtsRef.current;
     if (drawLineRef.current) drawLineRef.current.setLatLngs(pts.length >= 3 ? [...pts, pts[0]] : pts);
     if (drawFillRef.current) drawFillRef.current.setLatLngs(pts);
+    // 頂点・中点ハンドルの drag は全部ここを通るので、面積表示の追従もここで済ませる
+    refreshAreaReadout();
   };
   // dragend を取りこぼしてもドラッグ状態が残らないようにする保険。
   // スマホではブラウザがスクロールを引き取って pointercancel で終わることがあり、
@@ -5692,10 +5963,13 @@ function LeafletMapTab(p) {
       attr: "地理院タイル",
       maxNative: 18
     },
+    // 道路・地名は国土地理院の標準地図を使う。以前は OpenStreetMap のタイルサーバーを
+    // 直接読んでいたが、OSMF の Tile Usage Policy が一般配布アプリからの継続的な利用
+    // (systematic/heavy use)を認めていないため差し替えた。航空写真と同じ配信元になる
     map: {
-      url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-      attr: "© <a href='https://www.openstreetmap.org/copyright'>OpenStreetMap</a> contributors",
-      maxNative: 19
+      url: "https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png",
+      attr: "地理院タイル",
+      maxNative: 18
     }
   };
 
@@ -6087,8 +6361,17 @@ function LeafletMapTab(p) {
   }, "地図をタップして圃場の角を順に打ちます(3点以上)。頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "タップかドラッグ"), "すると頂点を足せます。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
     className: "num"
-  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", null, fmt(drawCrossed ? 0 : drawArea, 2)), " a"), drawCrossed && /*#__PURE__*/React.createElement("div", {
-    style: S.drawWarn
+  }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", {
+    ref: areaRef
+  }, fmt(drawCrossed ? 0 : drawArea, 2)), " a"),
+  // 警告行は drawCrossed で出し分けず常に置いておき、display だけを切り替える。
+  // ドラッグ中は React を動かせないので、無い要素は出しようがないため。
+  /*#__PURE__*/React.createElement("div", {
+    ref: warnRef,
+    style: {
+      ...S.drawWarn,
+      display: drawCrossed ? "" : "none"
+    }
   }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。頂点をドラッグしてねじれを直すか、「↩ 1つ戻す」で戻してください。"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
     style: S.selPtRow
   }, /*#__PURE__*/React.createElement("div", {
@@ -6212,12 +6495,15 @@ function SettingsTab(p) {
   // APIキーは肩越しに見られると悪用されるので、既定では伏せて表示する。
   // 打ち間違いの確認ができないと困るので、目のボタンで一時的に出せるようにする。
   const [showKey, setShowKey] = useState(false);
+  const [showAuth, setShowAuth] = useState(false); // 共有パスワードの伏せ字を一時的に外す
   const [openSec, setOpenSec] = useState({});
   const toggleSec = key => setOpenSec(s => ({
     ...s,
     [key]: !s[key]
   }));
   const [openVer, setOpenVer] = useState({});
+  // 農薬データの取り込み状態。例:「6,275件・2026-08-23 取り込み」
+  const chemDbStatus = p.chemDbInfo ? Number(p.chemDbInfo.count || 0).toLocaleString() + "件・" + String(p.chemDbInfo.savedAt || "").slice(0, 10) + " 取り込み" : "未取り込み";
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("表示単位", openSec.unit, () => toggleSec("unit")), openSec.unit && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
@@ -6330,7 +6616,46 @@ function SettingsTab(p) {
     placeholder: "例:jupiter2026",
     style: S.fieldInput,
     autoCapitalize: "off"
-  }))), /*#__PURE__*/React.createElement("button", {
+  }))), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.smallLabel,
+      marginTop: 12
+    }
+  }, "共有パスワード(GASのSHARED_SECRETと同じ文字列)"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      marginTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    // APIキー欄と同じ考え方。type=password で端末に伏せ字を任せる
+    // (自前で●に置き換えると本物の値が消え、空のまま保存する事故になる)
+    type: showAuth ? "text" : "password",
+    value: p.authKey,
+    onChange: e => p.setAuthKey(e.target.value),
+    placeholder: "未設定なら空欄のまま",
+    style: {
+      ...S.fieldInput,
+      flex: 1,
+      fontFamily: "monospace",
+      fontSize: 14
+    },
+    autoComplete: "off",
+    autoCapitalize: "off",
+    autoCorrect: "off",
+    spellCheck: false
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowAuth(v => !v),
+    style: {
+      ...S.smallSecondary,
+      flexShrink: 0
+    },
+    title: showAuth ? "パスワードを隠す" : "パスワードを表示する",
+    "aria-label": showAuth ? "パスワードを隠す" : "パスワードを表示する"
+  }, showAuth ? "🙈" : "👁")), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "GAS側でスクリプトプロパティ SHARED_SECRET を設定していると、同じ文字列を入れた端末だけが記録を書き込めます。設定していない場合は空欄のままで動きます(その場合はURLを知っている人なら誰でも書き込めます)。"), /*#__PURE__*/React.createElement("button", {
     onClick: p.testConnection,
     style: {
       ...S.secondaryBtn,
@@ -6358,7 +6683,40 @@ function SettingsTab(p) {
     }
   }, "☁↓ 共有→端末へ読込")), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "同じチームコードの端末どうしで、圃場・薬剤・作業リストを共有できます(後から保存した内容で上書き)。共有がうまくいかない場合は、GASを最新のCode.gsに更新して再デプロイしてください。"))), /*#__PURE__*/React.createElement("section", {
+  }, "同じチームコードの端末どうしで、圃場・薬剤・作業リストを共有できます(後から保存した内容で上書き)。共有がうまくいかない場合は、GASを最新のCode.gsに更新して再デプロイしてください。共有・送信される内容は、圃場名・作物・面積・圃場の位置情報(地図で囲んだ緯度経度)・地区・薬剤・作業記録・記録者名です。送信先はあなたが設定したGoogleスプレッドシートだけで、このアプリの作者を含む第三者には送信されません。"))), /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, collapsibleHead("農薬データ", openSec.chemdb, () => toggleSec("chemdb")), openSec.chemdb && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "この端末の状態"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 6,
+      fontWeight: 700,
+      color: p.chemDbInfo ? "#166534" : "#92400e"
+    }
+  }, chemDbStatus), /*#__PURE__*/React.createElement("button", {
+    onClick: p.importChemDb,
+    disabled: p.chemDbBusy,
+    style: {
+      ...S.secondaryBtn,
+      width: "100%",
+      marginTop: 12,
+      opacity: p.chemDbBusy ? 0.6 : 1
+    }
+  }, p.chemDbBusy ? "取り込み中… " + (p.chemDbProgress || "") : "⬇ 農薬データを取り込む"), /*#__PURE__*/React.createElement("button", {
+    onClick: p.deleteChemDb,
+    disabled: p.chemDbBusy || !p.chemDbInfo,
+    style: {
+      ...S.smallSecondary,
+      width: "100%",
+      marginTop: 8,
+      padding: "13px 0",
+      opacity: p.chemDbBusy || !p.chemDbInfo ? 0.5 : 1
+    }
+  }, "🗑 取り込んだデータを削除"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "農薬の登録番号・名称・成分での検索に使うデータです。先に上の「送信・共有設定」で送信先URLと共有パスワードを設定してください。取り込みはあなたのGoogleドライブに置いた chemdb.json を、あなたのApps Script経由で受け取ります(設置手順はCode.gsの冒頭に書いてあります)。一度取り込めば、以降は圏外でも検索できます。"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "出典: 独立行政法人農林水産消費安全技術センター(FAMIC)「農薬登録情報ダウンロード」を加工して作成。農薬名は各社の商標または登録商標です。取り込んであるのは特定時点のデータで、登録情報は変わります。使用前に必ずラベルを確認してください。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("地図タブの設定", openSec.map, () => toggleSec("map")), openSec.map && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -6494,7 +6852,7 @@ function SettingsTab(p) {
     desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。登録済みの圃場が一覧で出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。計算式は圃場ごとに「面積÷10×投下量」で、調合タブの「面積から計算」とまったく同じ式・同じ端数処理(0.01L単位)です。投下量の欄の下に出る「対象◯圃場 ／ 合計◯a → ◯L」は、実際に書き換わる圃場だけを、書き換わる値そのもので合計した予告なので、押した結果と必ず一致します(実績を入力済みの圃場は上書きされません)。集計バーの「合計薬液量」は、実績を入力した圃場だけ実散布量に切り替わるため、まだ実績のない状態の予定合計とは差が出ます。実績が何圃場ぶん混ざっているかは「実績 ◯/◯圃場」で分かります。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(データベースのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 地図タブ",
-    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をタップまたはドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとデータベースの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。「🔍 住所・地名を入力して地図を移動」に住所や地名を入れると、その場所へ地図がジャンプします(国土地理院の住所検索を使うためAPIキー不要で、無料地図・Googleマップの両方で使えます)。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。登録済みの圃場は蛍光イエローで表示されます。衛星写真の上でも地図タイルの上でも埋もれず、中の作物が見えるように塗りは薄めで輪郭を強くしてあります。拡大すると圃場名・作物名・面積の札が出ます。地図は画面の縦幅いっぱいに自動で広がるので、スクロールせずに全体を見られます。「⛶」を押すと見出しやタブバーも隠して完全な全画面になり、「✕ 全画面をやめる」で戻ります。圃場の一覧は上の「📋 一覧」に切り替えると出ます。一覧は地区ごとに折りたためて検索もでき、見出しの「👁 表示中」を押すとその地区を地図から一時的に消せます(端末には保存されないので、アプリを開き直すと元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
+    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をタップまたはドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとデータベースの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真と国土地理院の標準地図(道路・地名)を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。「🔍 住所・地名を入力して地図を移動」に住所や地名を入れると、その場所へ地図がジャンプします(国土地理院の住所検索を使うためAPIキー不要で、無料地図・Googleマップの両方で使えます)。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。登録済みの圃場は蛍光イエローで表示されます。衛星写真の上でも地図タイルの上でも埋もれず、中の作物が見えるように塗りは薄めで輪郭を強くしてあります。拡大すると圃場名・作物名・面積の札が出ます。地図は画面の縦幅いっぱいに自動で広がるので、スクロールせずに全体を見られます。「⛶」を押すと見出しやタブバーも隠して完全な全画面になり、「✕ 全画面をやめる」で戻ります。圃場の一覧は上の「📋 一覧」に切り替えると出ます。一覧は地区ごとに折りたためて検索もでき、見出しの「👁 表示中」を押すとその地区を地図から一時的に消せます(端末には保存されないので、アプリを開き直すと元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
   }, {
     title: "📋 データベースタブ",
     desc: "圃場マスタ(🌾)・薬剤プリセット(🧪)の2つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積・地区を登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。「地区」は圃場をまとめるための任意の名前で、一覧の見出し・地図タブの折りたたみ・作業タブの一括追加のすべてに使われます。空欄のままなら「未分類」にまとまります。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」から追加します。回る順番は、追加したあと作業リストで⣿マークをドラッグして並べ替えます(累計薬液量とタンク補給の位置もその並びで計算し直されます)。🧪薬剤サブタブは、薬剤名・種類・剤型を登録しておく単純な名前帳です(希釈倍率は散布水量で変わるため持ちません)。登録しておくと、作業タブの「📋 登録薬剤から追加」で名前・種類・剤型をまとめて呼び出せます。「総使用回数の上限」も登録でき、農薬使用回数の警告に使われます(未登録なら既定3回)。作業タブで使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
@@ -6527,9 +6885,24 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.41",
+    ver: "v8.44",
     date: "2026-08",
     isNew: true,
+    notes: ["🧪 農薬データを、アプリに同梱する形から「設定タブから取り込む」方式に変更しました。設定タブの「農薬データ」→「⬇ 農薬データを取り込む」で、あなたのGoogleドライブに置いたデータをこの端末に取り込みます。一度取り込めば、これまでどおり圏外でも登録番号・農薬名・成分名で検索できます", "取り込んだデータは端末内(IndexedDB)に保存されます。記録や圃場の保存領域とは別なので、これまでの保存データを圧迫しません", "取り込みには送信先URLと共有パスワードの設定が必要です。まだ取り込んでいない状態で農薬検索を開くと、その旨の案内が出ます", "データの準備・設置手順は、同梱の README とCode.gsの冒頭コメントに書いてあります"]
+  }, {
+    ver: "v8.43",
+    date: "2026-08",
+    isNew: false,
+    notes: ["📐 圃場を囲むとき、頂点を動かしている間も面積の数字がその場で変わるようになりました。指を離すまで待たなくてよいので、実際の面積に合わせて形を調整しやすくなります", "辺の中点の丸を引っぱって頂点を足すときも同じように追従します。線が交差した瞬間の警告表示も、指を離す前に出るようになりました"]
+  }, {
+    ver: "v8.42",
+    date: "2026-08",
+    isNew: false,
+    notes: ["🔐 設定タブに「共有パスワード」を追加しました。GAS側に同じ文字列を設定しておくと、その文字列を入れた端末からしか記録を書き込めなくなります(未設定のままでも今までどおり使えます)", "接続テストで共有パスワードが未設定のときは「URLを知る人は誰でも書き込めます」と表示するようにしました", "送信先URLがApps ScriptのURLの形になっていないときに警告を出すようにしました。打ち間違いで別のサーバーへ記録を送ってしまうのを防ぎます(保存自体は止めません)", "🔐 設定タブの共有欄に、実際に送信される項目(圃場名・作物・面積・圃場の位置情報・地区・薬剤・作業記録・記録者名)と、送信先があなたのGoogleスプレッドシートだけであることを明記しました", "📄 CSV書き出しで、圃場名や備考が「=」などで始まっていてもExcelが計算式として扱わないようにしました", "🗺 無料地図の「道路・地名」を国土地理院の標準地図に変更しました。これまで使っていたOpenStreetMapの配信サーバーは、こうしたアプリからの継続利用が認められていないためです。見た目と使い方は変わりません", "📚 農薬検索の画面に、データの出典(FAMIC 農薬登録情報)と「登録情報は変わるので使用前にラベルを確認してください」の注意を常時表示するようにしました", "📋 アグリノート転記の画面に、アグリノートがウォーターセル株式会社の商標である旨を明記しました"]
+  }, {
+    ver: "v8.41",
+    date: "2026-08",
+    isNew: false,
     notes: ["🔒 設定タブの Google Maps APIキーを伏せ字で表示するようにしました。肩越しに見られたり、画面を撮った写真からキーが漏れるのを防ぎます", "👁 目のボタンを押すと一時的に表示できます(打ち間違いの確認用)。設定タブを離れるとまた伏せ字に戻ります"]
   }, {
     ver: "v8.40",

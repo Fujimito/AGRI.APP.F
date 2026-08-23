@@ -1,0 +1,6 @@
+# 農薬登録データ。FAMICの利用規約(https://www.famic.go.jp/docs/rule/)が
+# 無断の改変・転載を認めていないため、このリポジトリでは配布しない。
+# tools/update_chemdb.py で各自が手元に生成し、自分のGoogleドライブに置いて
+# Apps Script経由で取り込む運用にしている(README「農薬データの取り込み」参照)。
+# うっかり `git add .` で再びコミットされるのを防ぐためここに書いている。
+chemdb.json

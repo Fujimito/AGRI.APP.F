@@ -2,6 +2,26 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8" />
+<!-- Content Security Policy。GitHub Pages はレスポンスヘッダを足せないので meta で入れる。
+     読み込み先を、実際に使っている先だけに絞る:
+       script-src  … 同梱JSと、Googleマップ版で読み込むGoogle Maps API
+       img-src     … 地理院タイル(cyberjapandata) と Googleマップの画像
+       connect-src … GASの受信口(script.google.com / script.googleusercontent.com)と
+                     住所検索(msearch.gsi.go.jp)。
+                     Google Maps APIは地図を動かすたびにタイル・経路の情報を
+                     maps.googleapis.com / *.gstatic.com へ取りに行くので、
+                     これを入れないとGoogleマップ版だけが無言で動かなくなる。
+       worker-src  … Google Maps API が blob: の Worker を作るため
+       font-src    … Google Maps API のラベル用フォント(fonts.gstatic.com)
+       frame-ancestors 'none' … 他サイトへの埋め込み禁止(クリックジャッキング対策)
+                     ※meta 経由では無視される(ブラウザが警告を1行出す)。
+                       ヘッダを付けられる配信先へ移したときに効くよう、記述だけ残す。
+     'unsafe-inline' は現状必須。このファイル自身が
+       ・<style> にアプリ全体のリセットCSSと地図の札のスタイルを持っている
+       ・<script> で Service Worker を登録している
+     ため。外部ファイルに切り出せば外せるが、1ファイルで完結する構成を保つため今は残す。
+     なお nonce はGitHub Pages(静的配信)ではリクエストごとに振れないので使えない。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://maps.googleapis.com https://maps.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://cyberjapandata.gsi.go.jp https://*.googleapis.com https://*.gstatic.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://msearch.gsi.go.jp https://maps.googleapis.com https://*.googleapis.com https://*.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="theme-color" content="#2E7D4F" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
