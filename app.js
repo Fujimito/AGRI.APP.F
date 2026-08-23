@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.35";
+const APP_VERSION = "v8.36";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -883,18 +883,6 @@ function App() {
     rememberMix(chemList);
     flash(ids.length === 1 ? "薬剤を適用しました" : ids.length + "圃場に薬剤を適用しました");
   };
-  // 薬剤を1圃場だけに適用
-  const applyChemsToWork = (workId, chemList) => applyChemsToWorks([workId], chemList);
-  // 薬剤をその日の未実施の圃場すべてに一括適用
-  const applyChemsToAll = chemList => {
-    const dayIds = works.filter(w => w.workDate === workDate && !w.reported).map(w => w.id);
-    if (dayIds.length === 0) {
-      flash("この日の作業リストが空です");
-      return;
-    }
-    applyChemsToWorks(dayIds, chemList);
-  };
-
   // 本日の散布投下量(10aあたりL)から、その日の全圃場の予定薬液量を面積に応じて一括計算
   const applyRatePerDay = ratePer10a => {
     const rate = parseFloat(ratePer10a);
@@ -1552,8 +1540,6 @@ function App() {
     mixOrder,
     savePreset,
     chemMaster,
-    resolveWork,
-    works,
     lastMix,
     loadLastMix
   }), tab === "work" && /*#__PURE__*/React.createElement(WorkTab, {
@@ -1580,7 +1566,6 @@ function App() {
     syncProgress,
     abortSync,
     gasUrl,
-    recorder,
     presets,
     lastMix,
     chemMaster,
@@ -1592,9 +1577,7 @@ function App() {
     removeDayChem,
     clearDayChems,
     fillDayChems,
-    applyChemsToWork,
     applyChemsToWorks,
-    applyChemsToAll,
     crops,
     addCrop,
     areaUnitKey,
@@ -1607,9 +1590,6 @@ function App() {
     deleteField,
     addFieldOnly,
     areas,
-    resolveWork,
-    works,
-    workDate,
     chemMaster,
     addChemMaster,
     deleteChemMaster,
@@ -1619,7 +1599,6 @@ function App() {
     deletePreset,
     crops,
     addCrop,
-    deleteCrop,
     areaUnitKey,
     volUnitKey
   }), tab === "map" && /*#__PURE__*/React.createElement(MapTabRouter, {
@@ -2105,7 +2084,10 @@ function WorkTab(p) {
   // 以前は実績入力済みも含む全圃場の面積で概算していたため、押した結果と食い違っていた
   const rateNum = parseFloat(ratePerDay);
   const rateTargets = pendingDayList.filter(w => parseFloat(p.resolveWork(w).areaA) > 0);
-  const rateSkipped = dayList.length - rateTargets.length;
+  // 対象外の理由は「実績入力済み」と「面積未入力」で対処が違うので分けて数える。
+  // まとめて実績扱いにすると、面積を直せば解決することに気づけない
+  const rateSkipReported = dayList.length - pendingDayList.length;
+  const rateSkipNoArea = pendingDayList.length - rateTargets.length;
   const rateArea = rateTargets.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
   const rateTotal = rateTargets.reduce((s, w) => s + plannedLFromArea(p.resolveWork(w).areaA, rateNum), 0);
   const openReport = w => {
@@ -2216,7 +2198,6 @@ function WorkTab(p) {
     },
     onCancel: () => setPickForDay(false)
   }), editingField && /*#__PURE__*/React.createElement(FieldEditModal, {
-    field: editingField,
     mf: ef,
     setMf: setEf,
     crops: p.crops,
@@ -2396,7 +2377,7 @@ function WorkTab(p) {
   }, "面積から一括計算")), parseFloat(ratePerDay) > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.rateHint,
     className: "num"
-  }, "対象 ", rateTargets.length, "圃場 ／ 合計 ", fmt(rateArea, 2), "a → ", fmt(rateTotal, 2), "L", rateSkipped > 0 ? "(実績入力済み " + rateSkipped + "圃場は上書きしません)" : "")), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "対象 ", rateTargets.length, "圃場 ／ 合計 ", fmt(rateArea, 2), "a → ", fmt(rateTotal, 2), "L", rateSkipReported > 0 || rateSkipNoArea > 0 ? "(" + [rateSkipReported > 0 ? "実績入力済み " + rateSkipReported + "圃場は上書きしません" : "", rateSkipNoArea > 0 ? "面積未入力 " + rateSkipNoArea + "圃場は対象外です" : ""].filter(Boolean).join(" ／ ") + ")" : "")), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.prepBlock
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -4235,7 +4216,6 @@ function PresetTab(p) {
       ...(sub === t[0] ? S.subTabOn : {})
     }
   }, t[1]))), sub === "field" && /*#__PURE__*/React.createElement(React.Fragment, null, editField && /*#__PURE__*/React.createElement(FieldEditModal, {
-    field: editField,
     mf: mf,
     setMf: setMf,
     crops: p.crops,
@@ -4608,6 +4588,52 @@ const FIELD_COLOR = {
   fill: "#FFF200",
   opacity: 0.35
 };
+
+// 地図を画面の残り全部に広げる。上に何が積まれているか(見出し・ボタン列・
+// 切替タブ)は状態で変わるので、固定値ではなく実際の位置から測って決める。
+// これをやらないと画面をスクロールしないと地図の下半分が見えない。
+// Google版・Leaflet版で手順が同じなので共通化してある。違うのは
+// 「大きさが変わった」と地図に伝える呼び出しだけなので resize で受け取る。
+function useMapHeightFit(mapWrapRef, listOnly, drawing, ready, fullMap, resize) {
+  // resize は描画のたびに作り直される関数なので、依存配列には入れずrefで最新を見る
+  const resizeRef = React.useRef(resize);
+  resizeRef.current = resize;
+  React.useLayoutEffect(() => {
+    const fit = () => {
+      const el = mapWrapRef.current;
+      if (!el || listOnly) return;
+      const nav = document.querySelector("nav");
+      const navH = nav ? nav.getBoundingClientRect().height : 0;
+      if (fullMap) {
+        // position:fixed で画面全体を覆っているので高さは指定しない
+        el.style.height = "";
+        resizeRef.current();
+        return;
+      }
+      let h = window.innerHeight - el.getBoundingClientRect().top - navH - 14;
+      // 画面がスクロールされていると上端が負になりうるので上限で抑える
+      h = Math.min(h, window.innerHeight - navH - 60);
+      // 作図中は下の操作パネルに手が届くよう、画面の半分ほどに抑える
+      if (drawing) h = Math.min(h, Math.round(window.innerHeight * 0.5));
+      el.style.height = Math.max(240, h) + "px";
+      // カードの下余白などで1画面に収まらないぶんを実測して詰める。
+      // ここまでやらないと数十pxだけ縦スクロールが残る
+      if (!drawing) {
+        const over = document.documentElement.scrollHeight - window.innerHeight;
+        if (over > 0) el.style.height = Math.max(240, h - over) + "px";
+      }
+      resizeRef.current();
+    };
+    fit();
+    // 端末の回転・ブラウザのアドレスバーの出入りでも測り直す
+    window.addEventListener("resize", fit);
+    window.addEventListener("orientationchange", fit);
+    return () => {
+      window.removeEventListener("resize", fit);
+      window.removeEventListener("orientationchange", fit);
+    };
+  }, [listOnly, drawing, ready, fullMap]);
+}
 
 // 地図タブの圃場一覧。Google版・Leaflet版で中身が同じなので共通化してある。
 // 地区で折りたたみ、検索で絞り込み、チェックで地図の表示/非表示を切り替える。
@@ -5157,44 +5183,9 @@ function GoogleMapTab(p) {
     if (newCrop.trim()) p.addCrop(newCrop.trim());
     cancelDraw();
   };
-  // 地図を画面の残り全部に広げる。上に何が積まれているか(見出し・ボタン列・
-  // 切替タブ)は状態で変わるので、固定値ではなく実際の位置から測って決める。
-  // これをやらないと画面をスクロールしないと地図の下半分が見えない。
-  React.useLayoutEffect(() => {
-    const fit = () => {
-      const el = mapWrapRef.current;
-      if (!el || listOnly) return;
-      const nav = document.querySelector("nav");
-      const navH = nav ? nav.getBoundingClientRect().height : 0;
-      if (fullMap) {
-        // position:fixed で画面全体を覆っているので高さは指定しない
-        el.style.height = "";
-        if (mapRef.current && window.google) window.google.maps.event.trigger(mapRef.current, "resize");
-        return;
-      }
-      let h = window.innerHeight - el.getBoundingClientRect().top - navH - 14;
-      // 画面がスクロールされていると上端が負になりうるので上限で抑える
-      h = Math.min(h, window.innerHeight - navH - 60);
-      // 作図中は下の操作パネルに手が届くよう、画面の半分ほどに抑える
-      if (drawing) h = Math.min(h, Math.round(window.innerHeight * 0.5));
-      el.style.height = Math.max(240, h) + "px";
-      // カードの下余白などで1画面に収まらないぶんを実測して詰める。
-      // ここまでやらないと数十pxだけ縦スクロールが残る
-      if (!drawing) {
-        const over = document.documentElement.scrollHeight - window.innerHeight;
-        if (over > 0) el.style.height = Math.max(240, h - over) + "px";
-      }
-      if (mapRef.current && window.google) window.google.maps.event.trigger(mapRef.current, "resize");
-    };
-    fit();
-    // 端末の回転・ブラウザのアドレスバーの出入りでも測り直す
-    window.addEventListener("resize", fit);
-    window.addEventListener("orientationchange", fit);
-    return () => {
-      window.removeEventListener("resize", fit);
-      window.removeEventListener("orientationchange", fit);
-    };
-  }, [listOnly, drawing, ready, fullMap]);
+  useMapHeightFit(mapWrapRef, listOnly, drawing, ready, fullMap, () => {
+    if (mapRef.current && window.google) window.google.maps.event.trigger(mapRef.current, "resize");
+  });
   // display:none の間はサイズを取れないので、地図に戻したら測り直させる
   React.useEffect(() => {
     if (listOnly || !mapRef.current || !window.google) return;
@@ -5812,44 +5803,9 @@ function LeafletMapTab(p) {
     cancelDraw();
   };
 
-  // 地図を画面の残り全部に広げる。上に何が積まれているか(見出し・ボタン列・
-  // 切替タブ)は状態で変わるので、固定値ではなく実際の位置から測って決める。
-  // これをやらないと画面をスクロールしないと地図の下半分が見えない。
-  React.useLayoutEffect(() => {
-    const fit = () => {
-      const el = mapWrapRef.current;
-      if (!el || listOnly) return;
-      const nav = document.querySelector("nav");
-      const navH = nav ? nav.getBoundingClientRect().height : 0;
-      if (fullMap) {
-        // position:fixed で画面全体を覆っているので高さは指定しない
-        el.style.height = "";
-        if (mapRef.current) mapRef.current.invalidateSize();
-        return;
-      }
-      let h = window.innerHeight - el.getBoundingClientRect().top - navH - 14;
-      // 画面がスクロールされていると上端が負になりうるので上限で抑える
-      h = Math.min(h, window.innerHeight - navH - 60);
-      // 作図中は下の操作パネルに手が届くよう、画面の半分ほどに抑える
-      if (drawing) h = Math.min(h, Math.round(window.innerHeight * 0.5));
-      el.style.height = Math.max(240, h) + "px";
-      // カードの下余白などで1画面に収まらないぶんを実測して詰める。
-      // ここまでやらないと数十pxだけ縦スクロールが残る
-      if (!drawing) {
-        const over = document.documentElement.scrollHeight - window.innerHeight;
-        if (over > 0) el.style.height = Math.max(240, h - over) + "px";
-      }
-      if (mapRef.current) mapRef.current.invalidateSize();
-    };
-    fit();
-    // 端末の回転・ブラウザのアドレスバーの出入りでも測り直す
-    window.addEventListener("resize", fit);
-    window.addEventListener("orientationchange", fit);
-    return () => {
-      window.removeEventListener("resize", fit);
-      window.removeEventListener("orientationchange", fit);
-    };
-  }, [listOnly, drawing, ready, fullMap]);
+  useMapHeightFit(mapWrapRef, listOnly, drawing, ready, fullMap, () => {
+    if (mapRef.current) mapRef.current.invalidateSize();
+  });
   // display:none の間はサイズを取れないので、地図に戻したら測り直させる
   React.useEffect(() => {
     if (listOnly || !mapRef.current) return;
@@ -6406,9 +6362,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.35",
+    ver: "v8.36",
     date: "2026-08",
     isNew: true,
+    notes: ["🐞 「面積から一括計算」の予告で、面積が未入力の圃場まで「実績入力済み」として数えていた表示を修正。実績入力済みと面積未入力を分けて出すようになり、ボタンを押した後のメッセージと理由が一致します", "🧹 使われていないコードを整理しました(呼び出されていない薬剤適用の処理2つ、渡されるだけで使われていなかった項目9か所、廃止したコースの見た目の設定、使われていない地図ラベルのCSS)", "🗺 地図の高さを画面に合わせる処理がGoogle版・無料地図版で二重に書かれていたので1つにまとめました。動きは変わりません"]
+  }, {
+    ver: "v8.35",
+    date: "2026-08",
     notes: ["🗺 地図の圃場を1色(蛍光イエロー)に戻しました。登録済みの圃場が地図で分かれば十分なので、作業状況による3色の塗り分けと凡例をやめています", "🗺 地図タブの一覧からも、色見本と「未予定/予定あり/散布済み」の表示を外しました。圃場名と面積だけの見やすい一覧になります", "地区ごとの折りたたみ・検索・表示/非表示の切り替えはそのままです"]
   }, {
     ver: "v8.34",
@@ -7363,31 +7323,6 @@ const S = {
     background: "#EDF5EE",
     border: "1.5px solid #BFE1CC",
     borderRadius: 9
-  },
-  routeRow: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    padding: "8px 10px",
-    marginBottom: 6,
-    background: "#fff",
-    border: "1.5px solid #2E7D4F",
-    borderRadius: 10
-  },
-  routeNum: {
-    width: 30,
-    height: 30,
-    borderRadius: 8,
-    background: "#2E7D4F",
-    color: "#fff",
-    fontSize: 15,
-    fontWeight: 800,
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    flexShrink: 0,
-    WebkitUserSelect: "none",
-    userSelect: "none"
   },
   dayChemRow: {
     padding: "10px 12px",
