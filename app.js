@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.31";
+const APP_VERSION = "v8.32";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -4764,6 +4764,12 @@ function GoogleMapTab(p) {
   const [newZone, setNewZone] = React.useState(""); // 作図した圃場の地区
   const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
+  const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
+  const mapWrapRef = React.useRef(null); // 地図+凡例の枠。高さを実測して決める
+  // 作図はパネルが画面外に出てしまうので、始めたら全画面を解除する
+  React.useEffect(() => {
+    if (drawing) setFullMap(false);
+  }, [drawing]);
   // その日の作業状況。作業タブでの追加・実績入力がそのまま塗り分けに反映される
   const fieldStatus = React.useMemo(() => buildFieldStatus(p.works, p.workDate), [p.works, p.workDate]);
   const [gpsOn, setGpsOn] = React.useState(false);
@@ -5176,6 +5182,44 @@ function GoogleMapTab(p) {
     if (newCrop.trim()) p.addCrop(newCrop.trim());
     cancelDraw();
   };
+  // 地図を画面の残り全部に広げる。上に何が積まれているか(見出し・ボタン列・
+  // 切替タブ)は状態で変わるので、固定値ではなく実際の位置から測って決める。
+  // これをやらないと画面をスクロールしないと地図の下半分が見えない。
+  React.useLayoutEffect(() => {
+    const fit = () => {
+      const el = mapWrapRef.current;
+      if (!el || listOnly) return;
+      const nav = document.querySelector("nav");
+      const navH = nav ? nav.getBoundingClientRect().height : 0;
+      if (fullMap) {
+        // position:fixed で画面全体を覆っているので高さは指定しない
+        el.style.height = "";
+        if (mapRef.current && window.google) window.google.maps.event.trigger(mapRef.current, "resize");
+        return;
+      }
+      let h = window.innerHeight - el.getBoundingClientRect().top - navH - 14;
+      // 画面がスクロールされていると上端が負になりうるので上限で抑える
+      h = Math.min(h, window.innerHeight - navH - 60);
+      // 作図中は下の操作パネルに手が届くよう、画面の半分ほどに抑える
+      if (drawing) h = Math.min(h, Math.round(window.innerHeight * 0.5));
+      el.style.height = Math.max(240, h) + "px";
+      // カードの下余白などで1画面に収まらないぶんを実測して詰める。
+      // ここまでやらないと数十pxだけ縦スクロールが残る
+      if (!drawing) {
+        const over = document.documentElement.scrollHeight - window.innerHeight;
+        if (over > 0) el.style.height = Math.max(240, h - over) + "px";
+      }
+      if (mapRef.current && window.google) window.google.maps.event.trigger(mapRef.current, "resize");
+    };
+    fit();
+    // 端末の回転・ブラウザのアドレスバーの出入りでも測り直す
+    window.addEventListener("resize", fit);
+    window.addEventListener("orientationchange", fit);
+    return () => {
+      window.removeEventListener("resize", fit);
+      window.removeEventListener("orientationchange", fit);
+    };
+  }, [listOnly, drawing, ready, fullMap]);
   // display:none の間はサイズを取れないので、地図に戻したら測り直させる
   React.useEffect(() => {
     if (listOnly || !mapRef.current || !window.google) return;
@@ -5246,16 +5290,29 @@ function GoogleMapTab(p) {
       marginBottom: 8
     }
   }, /*#__PURE__*/React.createElement("div", {
+    style: S.mapSegWrap
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setListOnly(false),
     style: {
-      ...S.cardLabel,
-      marginBottom: 0
+      ...S.mapSeg,
+      ...(listOnly ? {} : S.segOn)
     }
-  }, "圃場マップ(Google)"), /*#__PURE__*/React.createElement("div", {
+  }, "🗺 地図"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setListOnly(true),
+    style: {
+      ...S.mapSeg,
+      ...(listOnly ? S.segOn : {})
+    }
+  }, "📋 一覧")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
     }
-  }, /*#__PURE__*/React.createElement("button", {
+  }, !listOnly && !drawing && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setFullMap(true),
+    style: S.smallSecondary,
+    title: "地図を全画面で見る"
+  }, "⛶"), /*#__PURE__*/React.createElement("button", {
     onClick: toggleGps,
     style: {
       ...S.smallSecondary,
@@ -5286,30 +5343,23 @@ function GoogleMapTab(p) {
   }, "Google マップを読み込んでいます…"), status === "error" && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "Google マップを読み込めませんでした。APIキーやインターネット接続を確認してください。"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.segWrap,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setListOnly(false),
-    style: {
-      ...S.seg,
-      ...(listOnly ? {} : S.segOn)
-    }
-  }, "🗺 地図"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setListOnly(true),
-    style: {
-      ...S.seg,
-      ...(listOnly ? S.segOn : {})
-    }
-  }, "📋 一覧")), /*#__PURE__*/React.createElement("div", {
-    ref: containerRef,
+    ref: mapWrapRef,
     style: listOnly ? {
-      ...S.mapBox,
+      ...S.mapWrap,
       display: "none"
+    } : fullMap ? S.mapWrapFull : S.mapWrap
+  }, /*#__PURE__*/React.createElement("div", {
+    ref: containerRef,
+    style: fullMap ? {
+      ...S.mapBox,
+      borderRadius: 0,
+      border: "none"
     } : S.mapBox,
     "data-map-box": ""
-  }), !listOnly && polyFields.length > 0 && mapLegend(), drawing && /*#__PURE__*/React.createElement("div", {
+  }), polyFields.length > 0 && mapLegend(), fullMap && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setFullMap(false),
+    style: S.mapFullExit
+  }, "✕ 全画面をやめる")), drawing && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.settingsBox,
       marginTop: 12
@@ -5396,7 +5446,7 @@ function GoogleMapTab(p) {
       marginTop: 10,
       opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
     }
-  }, drawCrossed ? "⚠ 線の交差を直してください" : "この圃場を登録(" + fmt(drawArea, 2) + " a)"))), /*#__PURE__*/React.createElement("section", {
+  }, drawCrossed ? "⚠ 線の交差を直してください" : "この圃場を登録(" + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -5436,6 +5486,12 @@ function LeafletMapTab(p) {
   const [newZone, setNewZone] = React.useState(""); // 作図した圃場の地区
   const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
+  const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
+  const mapWrapRef = React.useRef(null); // 地図+凡例の枠。高さを実測して決める
+  // 作図はパネルが画面外に出てしまうので、始めたら全画面を解除する
+  React.useEffect(() => {
+    if (drawing) setFullMap(false);
+  }, [drawing]);
   // その日の作業状況。作業タブでの追加・実績入力がそのまま塗り分けに反映される
   const fieldStatus = React.useMemo(() => buildFieldStatus(p.works, p.workDate), [p.works, p.workDate]);
   const [gpsOn, setGpsOn] = React.useState(false);
@@ -5784,6 +5840,44 @@ function LeafletMapTab(p) {
     cancelDraw();
   };
 
+  // 地図を画面の残り全部に広げる。上に何が積まれているか(見出し・ボタン列・
+  // 切替タブ)は状態で変わるので、固定値ではなく実際の位置から測って決める。
+  // これをやらないと画面をスクロールしないと地図の下半分が見えない。
+  React.useLayoutEffect(() => {
+    const fit = () => {
+      const el = mapWrapRef.current;
+      if (!el || listOnly) return;
+      const nav = document.querySelector("nav");
+      const navH = nav ? nav.getBoundingClientRect().height : 0;
+      if (fullMap) {
+        // position:fixed で画面全体を覆っているので高さは指定しない
+        el.style.height = "";
+        if (mapRef.current) mapRef.current.invalidateSize();
+        return;
+      }
+      let h = window.innerHeight - el.getBoundingClientRect().top - navH - 14;
+      // 画面がスクロールされていると上端が負になりうるので上限で抑える
+      h = Math.min(h, window.innerHeight - navH - 60);
+      // 作図中は下の操作パネルに手が届くよう、画面の半分ほどに抑える
+      if (drawing) h = Math.min(h, Math.round(window.innerHeight * 0.5));
+      el.style.height = Math.max(240, h) + "px";
+      // カードの下余白などで1画面に収まらないぶんを実測して詰める。
+      // ここまでやらないと数十pxだけ縦スクロールが残る
+      if (!drawing) {
+        const over = document.documentElement.scrollHeight - window.innerHeight;
+        if (over > 0) el.style.height = Math.max(240, h - over) + "px";
+      }
+      if (mapRef.current) mapRef.current.invalidateSize();
+    };
+    fit();
+    // 端末の回転・ブラウザのアドレスバーの出入りでも測り直す
+    window.addEventListener("resize", fit);
+    window.addEventListener("orientationchange", fit);
+    return () => {
+      window.removeEventListener("resize", fit);
+      window.removeEventListener("orientationchange", fit);
+    };
+  }, [listOnly, drawing, ready, fullMap]);
   // display:none の間はサイズを取れないので、地図に戻したら測り直させる
   React.useEffect(() => {
     if (listOnly || !mapRef.current) return;
@@ -5844,16 +5938,29 @@ function LeafletMapTab(p) {
       marginBottom: 8
     }
   }, /*#__PURE__*/React.createElement("div", {
+    style: S.mapSegWrap
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setListOnly(false),
     style: {
-      ...S.cardLabel,
-      marginBottom: 0
+      ...S.mapSeg,
+      ...(listOnly ? {} : S.segOn)
     }
-  }, "圃場マップ"), /*#__PURE__*/React.createElement("div", {
+  }, "🗺 地図"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setListOnly(true),
+    style: {
+      ...S.mapSeg,
+      ...(listOnly ? S.segOn : {})
+    }
+  }, "📋 一覧")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
     }
-  }, /*#__PURE__*/React.createElement("button", {
+  }, !listOnly && !drawing && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setFullMap(true),
+    style: S.smallSecondary,
+    title: "地図を全画面で見る"
+  }, "⛶"), /*#__PURE__*/React.createElement("button", {
     onClick: toggleGps,
     style: {
       ...S.smallSecondary,
@@ -5882,30 +5989,23 @@ function LeafletMapTab(p) {
   }, "やめる"))), !window.L && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "地図ライブラリを読み込めませんでした。オンラインで開き直してください。"), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.segWrap,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setListOnly(false),
-    style: {
-      ...S.seg,
-      ...(listOnly ? {} : S.segOn)
-    }
-  }, "🗺 地図"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setListOnly(true),
-    style: {
-      ...S.seg,
-      ...(listOnly ? S.segOn : {})
-    }
-  }, "📋 一覧")), /*#__PURE__*/React.createElement("div", {
-    ref: containerRef,
+    ref: mapWrapRef,
     style: listOnly ? {
-      ...S.mapBox,
+      ...S.mapWrap,
       display: "none"
+    } : fullMap ? S.mapWrapFull : S.mapWrap
+  }, /*#__PURE__*/React.createElement("div", {
+    ref: containerRef,
+    style: fullMap ? {
+      ...S.mapBox,
+      borderRadius: 0,
+      border: "none"
     } : S.mapBox,
     "data-map-box": ""
-  }), !listOnly && polyFields.length > 0 && mapLegend(), drawing && /*#__PURE__*/React.createElement("div", {
+  }), polyFields.length > 0 && mapLegend(), fullMap && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setFullMap(false),
+    style: S.mapFullExit
+  }, "✕ 全画面をやめる")), drawing && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.settingsBox,
       marginTop: 12
@@ -5992,7 +6092,7 @@ function LeafletMapTab(p) {
       marginTop: 10,
       opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
     }
-  }, drawCrossed ? "⚠ 線の交差を直してください" : "この圃場を登録(" + fmt(drawArea, 2) + " a)"))), /*#__PURE__*/React.createElement("section", {
+  }, drawCrossed ? "⚠ 線の交差を直してください" : "この圃場を登録(" + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -6302,7 +6402,7 @@ function SettingsTab(p) {
     desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。登録済みの圃場が一覧で出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(プリセットのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 地図タブ",
-    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をタップまたはドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。圃場は作業日の状況で塗り分けられます(グレー=未予定、青=予定あり、緑=散布済み。地図の下に凡例が出ます)。作業タブでその日のリストに入れたり実績を入力したりすると、すぐ色が変わります。地図の下の一覧は地区ごとに折りたためます。見出しの「👁 表示中」を押すとその地区を地図から一時的に消せるので、隣り合った地区が重なって見づらいときに使えます(端末には保存されず、タブを離れると元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。上の「📋 一覧」を押すと地図を隠して一覧を画面いっぱいに広げられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
+    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をタップまたはドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとプリセットの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真とOpenStreetMapの道路・地名地図を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。圃場は作業日の状況で塗り分けられます(グレー=未予定、青=予定あり、緑=散布済み。地図の下に凡例が出ます)。作業タブでその日のリストに入れたり実績を入力したりすると、すぐ色が変わります。地図は画面の縦幅いっぱいに自動で広がるので、スクロールせずに全体を見られます。「⛶」を押すと見出しやタブバーも隠して完全な全画面になり、「✕ 全画面をやめる」で戻ります。圃場の一覧は上の「📋 一覧」に切り替えると出ます。一覧は地区ごとに折りたためて検索もでき、見出しの「👁 表示中」を押すとその地区を地図から一時的に消せます(端末には保存されず、タブを離れると元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
   }, {
     title: "📋 プリセットタブ",
     desc: "圃場マスタ(🌾)・薬剤プリセット(🧪)の2つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積・地区を登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。「地区」は圃場をまとめるための任意の名前で、一覧の見出し・地図タブの折りたたみ・作業タブの一括追加のすべてに使われます。空欄のままなら「未分類」にまとまります。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」から追加します。回る順番は、追加したあと作業リストで⣿マークをドラッグして並べ替えます(累計薬液量とタンク補給の位置もその並びで計算し直されます)。🧪薬剤サブタブは、薬剤名・種類・剤型を登録しておく単純な名前帳です(希釈倍率は散布水量で変わるため持ちません)。登録しておくと、作業タブの「📋 登録薬剤から追加」で名前・種類・剤型をまとめて呼び出せます。「総使用回数の上限」も登録でき、農薬使用回数の警告に使われます(未登録なら既定3回)。作業タブで使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
@@ -6335,9 +6435,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.31",
+    ver: "v8.32",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 地図が画面の縦幅いっぱいに自動で広がるようになりました。これまでは画面をスクロールしないと地図の下側が見えない状態でした。端末の回転やアドレスバーの出入りにも追従します", "🗺 「⛶」ボタンを追加。見出しもタブバーも隠して地図だけの全画面にできます(「✕ 全画面をやめる」で戻ります)", "🗺 地図を見ているときは下の圃場一覧を出さないようにしました。一覧は「📋 一覧」に切り替えたときだけ出ます", "🗺 「地図／一覧」の切替を見出しの位置に移し、地図に使える高さを広げました"]
+  }, {
+    ver: "v8.31",
+    date: "2026-08",
     notes: ["🌾 圃場に「地区」を登録できるようにしました。プリセットの圃場一覧・地図タブの一覧が地区ごとの見出しでまとまり、圃場が増えても探しやすくなります", "🚁 作業タブの「圃場を追加」に地区のボタンを追加。地区で絞り込んで「まとめて追加」を押すと、その地区の圃場を一度にこの日のリストへ入れられます", "🗺 地図の圃場を作業日の状況で塗り分けるようにしました(グレー=未予定、青=予定あり、緑=散布済み)。地図の下に凡例が出ます", "🗺 地図タブの一覧を地区ごとに折りたためるようにし、検索欄を追加。地区ごと・圃場ごとに地図の表示/非表示も切り替えられます", "🗺 「📋 一覧」ボタンで地図を隠し、一覧を画面いっぱいに表示できるようにしました", "🚜 圃場コースを廃止しました。役割は「地区でまとめる」と「作業リストの並べ替え」に引き継がれています。登録済みのコース名は圃場の地区として自動で引き継がれ、元のコースのデータも端末に残してあります", "🐞 コース保存時にIDが重複しうる不具合がありましたが、コースの廃止にともない解消しました"]
   }, {
     ver: "v8.30",
@@ -7776,11 +7880,59 @@ const S = {
     borderRadius: 8,
     cursor: "pointer"
   },
+  mapWrap: {
+    display: "flex",
+    flexDirection: "column",
+    width: "100%",
+    minHeight: 280 // 高さは実測して JS が入れる。ここは測る前の初期値
+  },
+  // 全画面。タブバー(850)より上に出し、地図だけを見せる
+  mapWrapFull: {
+    position: "fixed",
+    inset: 0,
+    zIndex: 900,
+    display: "flex",
+    flexDirection: "column",
+    background: "#dfe6da",
+    padding: "0 0 env(safe-area-inset-bottom)"
+  },
+  mapFullExit: {
+    position: "fixed",
+    top: "calc(10px + env(safe-area-inset-top))",
+    right: 12,
+    zIndex: 910,
+    background: "rgba(255,255,255,0.94)",
+    border: "1.5px solid #D8E0D2",
+    borderRadius: 10,
+    padding: "8px 12px",
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#1C2B21",
+    boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+    cursor: "pointer"
+  },
+  mapSegWrap: {
+    display: "flex",
+    flex: "0 0 auto",
+    background: "#EDF1EA",
+    borderRadius: 10,
+    padding: 3
+  },
+  mapSeg: {
+    padding: "7px 14px",
+    fontSize: 14,
+    fontWeight: 700,
+    border: "none",
+    background: "transparent",
+    color: "#66756a",
+    borderRadius: 8,
+    cursor: "pointer",
+    whiteSpace: "nowrap"
+  },
   mapBox: {
     width: "100%",
-    height: "calc(100dvh - 220px)",
-    minHeight: 280,
-    maxHeight: "80dvh",
+    flex: 1,
+    minHeight: 0,
     borderRadius: 12,
     overflow: "hidden",
     border: "1.5px solid #D8E0D2",
