@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.40";
+const APP_VERSION = "v8.41";
 // 地図ラベル(LeafletのTooltipはHTML文字列として解釈されるため、
 // 圃場名・作物名に記号が含まれてもタグとして実行されないようエスケープする)
 function escapeHtml(s) {
@@ -6209,6 +6209,9 @@ function collapsibleHead(title, isOpen, onClick) {
 }
 function SettingsTab(p) {
   const [newCrop, setNewCrop] = useState("");
+  // APIキーは肩越しに見られると悪用されるので、既定では伏せて表示する。
+  // 打ち間違いの確認ができないと困るので、目のボタンで一時的に出せるようにする。
+  const [showKey, setShowKey] = useState(false);
   const [openSec, setOpenSec] = useState({});
   const toggleSec = key => setOpenSec(s => ({
     ...s,
@@ -6379,13 +6382,23 @@ function SettingsTab(p) {
     }
   }, "Google マップ")), /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
-  }, "Google Maps APIキー"), /*#__PURE__*/React.createElement("input", {
+  }, "Google Maps APIキー"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      marginTop: 6
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    // type=password にすると端末が伏せ字にしてくれる(自前で● に置き換えると
+    // 本物の値が消えてしまい、保存で空のキーを書き込む事故になる)
+    type: showKey ? "text" : "password",
     value: p.gmapKeyInput,
     onChange: e => p.setGmapKeyInput(e.target.value),
     placeholder: "AIzaSy...",
     style: {
       ...S.fieldInput,
-      marginTop: 6,
+      flex: 1,
       fontFamily: "monospace",
       fontSize: 14
     },
@@ -6394,6 +6407,14 @@ function SettingsTab(p) {
     autoComplete: "off",
     spellCheck: false
   }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowKey(v => !v),
+    style: {
+      ...S.smallSecondary,
+      flexShrink: 0
+    },
+    title: showKey ? "キーを隠す" : "キーを表示する",
+    "aria-label": showKey ? "キーを隠す" : "キーを表示する"
+  }, showKey ? "🙈" : "👁")), /*#__PURE__*/React.createElement("button", {
     onClick: () => p.saveGmapKey(p.gmapKeyInput),
     style: {
       ...S.smallSecondary,
@@ -6506,9 +6527,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.40",
+    ver: "v8.41",
     date: "2026-08",
     isNew: true,
+    notes: ["🔒 設定タブの Google Maps APIキーを伏せ字で表示するようにしました。肩越しに見られたり、画面を撮った写真からキーが漏れるのを防ぎます", "👁 目のボタンを押すと一時的に表示できます(打ち間違いの確認用)。設定タブを離れるとまた伏せ字に戻ります"]
+  }, {
+    ver: "v8.40",
+    date: "2026-08",
+    isNew: false,
     notes: ["🐞 Googleマップの読み込みに1回失敗すると、アプリを開き直すか設定で地図を切り替え直すまで復帰できなかった不具合を修正しました", "🔄 読み込みに失敗したときに「再読み込み」ボタンを出すようにしました", "📶 電波が戻ったときと、地図タブに戻ってきたときに自動で読み込みをやり直します", "Googleの地図は開くたびに通信が必要なことを、エラー画面で説明するようにしました(電波のない場所では無料地図をお使いください)"]
   }, {
     ver: "v8.39",
