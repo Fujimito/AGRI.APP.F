@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.47";
+const APP_VERSION = "v8.48";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -5111,6 +5111,15 @@ function GoogleMapTab(p) {
   const [newCrop, setNewCrop] = React.useState("");
   const [newZone, setNewZone] = React.useState(""); // 作図した圃場の地区
   const [editingFieldId, setEditingFieldId] = React.useState(null); // 既存圃場を編集中ならそのID。nullなら新規作図
+  // 地図タップで頂点を足すかどうか。切れるようにしてあるのは、形を整えている最中に
+  // 地図を触ってしまい、離れた場所に頂点ができて消す作業が発生していたため。
+  // 地図のclickリスナーは初期化時に1回だけ張るので、値はrefでも持って参照する。
+  const [addMode, setAddMode] = React.useState(true);
+  const addModeRef = React.useRef(true);
+  const changeAddMode = v => {
+    addModeRef.current = v;
+    setAddMode(v);
+  };
   const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
@@ -5256,6 +5265,7 @@ function GoogleMapTab(p) {
       mapRef.current = map;
       map.addListener("click", e => {
         if (!drawingRef.current || draggingRef.current) return;
+        if (!addModeRef.current) return; // 「頂点を追加」がOFFのときは地図を触っても増やさない
         // マーカー操作の直後に地図のclickが続くと点が増えてしまうので短時間だけ弾く
         if (Date.now() - lastEditAtRef.current < 400) return;
         commitPts([...drawPtsRef.current, [e.latLng.lat(), e.latLng.lng()]]);
@@ -5374,17 +5384,17 @@ function GoogleMapTab(p) {
             text: sel ? "✕" : String(i + 1),
             color: "#fff",
             fontWeight: "800",
-            fontSize: sel ? "12px" : "10.5px"
+            fontSize: sel ? "11px" : "9px"
           },
           icon: {
             path: g.SymbolPath.CIRCLE,
-            // Leaflet版の .vtx(20px)と見た目を揃える。scaleは半径なので10。
+            // Leaflet版の .vtx(16px)と見た目を揃える。scaleは半径なので8。
             // 大きいと隣の頂点と重なって細かい調整ができない
-            scale: 10,
+            scale: 8,
             fillColor: sel ? "#8a2f1c" : "#C74E36",
             fillOpacity: 1,
             strokeColor: sel ? "#FFD9CF" : "#fff",
-            strokeWeight: 2
+            strokeWeight: 1.5
           }
         });
         let moved = false; // 動かしたときは選択・削除に化けさせない
@@ -5427,8 +5437,8 @@ function GoogleMapTab(p) {
           zIndex: 500,
           icon: {
             path: g.SymbolPath.CIRCLE,
-            // Leaflet版の .vtx-mid(12px)と揃える
-            scale: 6,
+            // Leaflet版の .vtx-mid(9px)と揃える
+            scale: 4.5,
             fillColor: "#C74E36",
             fillOpacity: 0.45,
             strokeColor: "#fff",
@@ -5515,6 +5525,8 @@ function GoogleMapTab(p) {
   const startDraw = () => {
     setDrawing(true);
     drawingRef.current = true;
+    // 新規はまず点を打つところから始まるのでONで開く
+    changeAddMode(true);
     resetDrawState();
   };
   // 既存の圃場ポリゴンをタップしたときの編集開始。頂点・圃場名などを
@@ -5526,6 +5538,9 @@ function GoogleMapTab(p) {
     // 圃場ポリゴンのclickは地図のclickにも伝播する。何もしないと、選択に使った
     // 同じタップが「作図中の地図タップ」として処理され、5点目の頂点が紛れ込む
     lastEditAtRef.current = Date.now();
+    // 既存の圃場は「形を整えに来た」場面なので、追加はOFFで開く。
+    // ONのままだと地図に触れるたびに離れた場所へ頂点ができ、消す作業が発生する
+    changeAddMode(false);
     resetDrawState();
     const pts = (f.polygon || []).map(pt => [pt[0], pt[1]]);
     drawPtsRef.current = pts;
@@ -5545,6 +5560,7 @@ function GoogleMapTab(p) {
     setNewZone("");
     if (editingFieldId != null) setHidden(h => h.filter(id => id !== editingFieldId));
     setEditingFieldId(null);
+    changeAddMode(true); // 次に「✏ 圃場を囲む」で始めるときのために戻しておく
   };
   // 追加・移動・削除・挿入をまとめて1手ずつ戻す
   const undoPt = () => {
@@ -5763,7 +5779,7 @@ function GoogleMapTab(p) {
     }
   }, "✎「", newName || "この圃場", "」を編集中(「この圃場を保存」を押すまでは元の圃場データは変わりません。「やめる」で編集を取り消せます)"), /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
-  }, "地図をタップして圃場の角を順に打ちます(3点以上)。頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "ドラッグ"), "すると頂点を足せます(触れただけでは増えません)。"), /*#__PURE__*/React.createElement("div", {
+  }, addMode ? "地図をタップして圃場の角を順に打ちます(3点以上)。" : "いまは地図をタップしても頂点は増えません。足したいときは下の「頂点を追加」をONにしてください。", "頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "ドラッグ"), "すると頂点を足せます(触れただけでは増えません)。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
     className: "num"
   }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", {
@@ -5787,7 +5803,20 @@ function GoogleMapTab(p) {
   }, "✕ この頂点を削除"), /*#__PURE__*/React.createElement("button", {
     onClick: () => selectPt(-1),
     style: S.smallSecondary
-  }, "選択をやめる")), /*#__PURE__*/React.createElement("div", {
+  }, "選択をやめる")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => changeAddMode(!addMode),
+    style: {
+      ...S.secondaryBtn,
+      width: "100%",
+      marginTop: 8,
+      ...(addMode ? {
+        background: "#FDEBE7",
+        borderColor: "#C74E36",
+        color: "#8a2f1c",
+        fontWeight: 800
+      } : {})
+    }
+  }, addMode ? "✏ 頂点を追加:ON(地図をタップすると増えます)" : "🔒 頂点を追加:OFF(地図をタップしても増えません)"), /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.btnRow,
       marginTop: 8,
@@ -5890,6 +5919,15 @@ function LeafletMapTab(p) {
   const [newCrop, setNewCrop] = React.useState("");
   const [newZone, setNewZone] = React.useState(""); // 作図した圃場の地区
   const [editingFieldId, setEditingFieldId] = React.useState(null); // 既存圃場を編集中ならそのID。nullなら新規作図
+  // 地図タップで頂点を足すかどうか。切れるようにしてあるのは、形を整えている最中に
+  // 地図を触ってしまい、離れた場所に頂点ができて消す作業が発生していたため。
+  // 地図のclickリスナーは初期化時に1回だけ張るので、値はrefでも持って参照する。
+  const [addMode, setAddMode] = React.useState(true);
+  const addModeRef = React.useRef(true);
+  const changeAddMode = v => {
+    addModeRef.current = v;
+    setAddMode(v);
+  };
   const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
@@ -6061,6 +6099,7 @@ function LeafletMapTab(p) {
     // タップで作図
     map.on("click", e => {
       if (!drawingRef.current || draggingRef.current) return;
+      if (!addModeRef.current) return; // 「頂点を追加」がOFFのときは地図を触っても増やさない
       // マーカー操作の直後に地図のclickが続くと点が増えてしまうので短時間だけ弾く
       if (Date.now() - lastEditAtRef.current < 400) return;
       commitPts([...drawPtsRef.current, [e.latlng.lat, e.latlng.lng]]);
@@ -6122,8 +6161,8 @@ function LeafletMapTab(p) {
         const icon = L.divIcon({
           className: "vtx-icon",
           html: '<div class="vtx' + (sel ? " vtx-sel" : "") + '">' + escapeHtml(sel ? "✕" : String(i + 1)) + '</div>',
-          iconSize: [20, 20],
-          iconAnchor: [10, 10]
+          iconSize: [16, 16],
+          iconAnchor: [8, 8]
         });
         const m = L.marker(pt, {
           icon,
@@ -6162,8 +6201,8 @@ function LeafletMapTab(p) {
         const icon = L.divIcon({
           className: "vtx-icon",
           html: '<div class="vtx-mid"></div>',
-          iconSize: [12, 12],
-          iconAnchor: [6, 6]
+          iconSize: [9, 9],
+          iconAnchor: [4.5, 4.5]
         });
         const h = L.marker([mp.lat, mp.lng], {
           icon,
@@ -6218,6 +6257,8 @@ function LeafletMapTab(p) {
   const startDraw = () => {
     setDrawing(true);
     drawingRef.current = true;
+    // 新規はまず点を打つところから始まるのでONで開く
+    changeAddMode(true);
     resetDrawState();
   };
   // 既存の圃場ポリゴンをタップしたときの編集開始。頂点・圃場名などを
@@ -6229,6 +6270,9 @@ function LeafletMapTab(p) {
     // 圃場ポリゴンのclickは地図のclickにも伝播する。何もしないと、選択に使った
     // 同じタップが「作図中の地図タップ」として処理され、5点目の頂点が紛れ込む
     lastEditAtRef.current = Date.now();
+    // 既存の圃場は「形を整えに来た」場面なので、追加はOFFで開く。
+    // ONのままだと地図に触れるたびに離れた場所へ頂点ができ、消す作業が発生する
+    changeAddMode(false);
     resetDrawState();
     const pts = (f.polygon || []).map(pt => [pt[0], pt[1]]);
     drawPtsRef.current = pts;
@@ -6248,6 +6292,7 @@ function LeafletMapTab(p) {
     setNewZone("");
     if (editingFieldId != null) setHidden(h => h.filter(id => id !== editingFieldId));
     setEditingFieldId(null);
+    changeAddMode(true); // 次に「✏ 圃場を囲む」で始めるときのために戻しておく
   };
   // 追加・移動・削除・挿入をまとめて1手ずつ戻す
   const undoPt = () => {
@@ -6438,7 +6483,7 @@ function LeafletMapTab(p) {
     }
   }, "✎「", newName || "この圃場", "」を編集中(「この圃場を保存」を押すまでは元の圃場データは変わりません。「やめる」で編集を取り消せます)"), /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
-  }, "地図をタップして圃場の角を順に打ちます(3点以上)。頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "ドラッグ"), "すると頂点を足せます(触れただけでは増えません)。"), /*#__PURE__*/React.createElement("div", {
+  }, addMode ? "地図をタップして圃場の角を順に打ちます(3点以上)。" : "いまは地図をタップしても頂点は増えません。足したいときは下の「頂点を追加」をONにしてください。", "頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "ドラッグ"), "すると頂点を足せます(触れただけでは増えません)。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
     className: "num"
   }, "頂点 ", drawPts.length, "点 ／ 面積 ", /*#__PURE__*/React.createElement("strong", {
@@ -6462,7 +6507,20 @@ function LeafletMapTab(p) {
   }, "✕ この頂点を削除"), /*#__PURE__*/React.createElement("button", {
     onClick: () => selectPt(-1),
     style: S.smallSecondary
-  }, "選択をやめる")), /*#__PURE__*/React.createElement("div", {
+  }, "選択をやめる")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => changeAddMode(!addMode),
+    style: {
+      ...S.secondaryBtn,
+      width: "100%",
+      marginTop: 8,
+      ...(addMode ? {
+        background: "#FDEBE7",
+        borderColor: "#C74E36",
+        color: "#8a2f1c",
+        fontWeight: 800
+      } : {})
+    }
+  }, addMode ? "✏ 頂点を追加:ON(地図をタップすると増えます)" : "🔒 頂点を追加:OFF(地図をタップしても増えません)"), /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.btnRow,
       marginTop: 8,
@@ -6932,7 +6990,7 @@ function SettingsTab(p) {
     desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。登録済みの圃場が一覧で出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。計算式は圃場ごとに「面積÷10×投下量」で、調合タブの「面積から計算」とまったく同じ式・同じ端数処理(0.01L単位)です。投下量の欄の下に出る「対象◯圃場 ／ 合計◯a → ◯L」は、実際に書き換わる圃場だけを、書き換わる値そのもので合計した予告なので、押した結果と必ず一致します(実績を入力済みの圃場は上書きされません)。集計バーの「合計薬液量」は、実績を入力した圃場だけ実散布量に切り替わるため、まだ実績のない状態の予定合計とは差が出ます。実績が何圃場ぶん混ざっているかは「実績 ◯/◯圃場」で分かります。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(データベースのマスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 全データを送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 地図タブ",
-    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます(触れただけでは増えません。形を確かめたいときに誤って頂点が増えないようにしてあります)。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとデータベースの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真と国土地理院の標準地図(道路・地名)を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。「🔍 住所・地名を入力して地図を移動」に住所や地名を入れると、その場所へ地図がジャンプします(国土地理院の住所検索を使うためAPIキー不要で、無料地図・Googleマップの両方で使えます)。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。登録済みの圃場は赤い輪郭で表示されます。衛星写真は緑や茶が大半なので、赤が最も輪郭を追いやすいためです。中の作物の様子が見えるよう、塗りは薄く輪郭は濃くしてあります。拡大すると圃場名・作物名・面積の札が出ます。地図は画面の縦幅いっぱいに自動で広がるので、スクロールせずに全体を見られます。「⛶」を押すと見出しやタブバーも隠して完全な全画面になり、「✕ 全画面をやめる」で戻ります。圃場の一覧は上の「📋 一覧」に切り替えると出ます。一覧は地区ごとに折りたためて検索もでき、見出しの「👁 表示中」を押すとその地区を地図から一時的に消せます(端末には保存されないので、アプリを開き直すと元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
+    desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。作図パネルの「頂点を追加」をOFFにすると、地図をタップしても頂点が増えません。形を整えている最中に地図を触って離れた場所に点ができるのを防げます(登録済みの圃場をタップして編集を始めたときは最初からOFFです)。頂点をタップすると「✕」に変わり、もう一度タップするとその頂点だけを削除できます(作図パネルの「✕ この頂点を削除」でも消せます)。頂点と頂点の間に出る小さな丸をドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます(触れただけでは増えません。形を確かめたいときに誤って頂点が増えないようにしてあります)。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存するとデータベースの圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真と国土地理院の標準地図(道路・地名)を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。「🔍 住所・地名を入力して地図を移動」に住所や地名を入れると、その場所へ地図がジャンプします(国土地理院の住所検索を使うためAPIキー不要で、無料地図・Googleマップの両方で使えます)。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。登録済みの圃場は赤い輪郭で表示されます。衛星写真は緑や茶が大半なので、赤が最も輪郭を追いやすいためです。中の作物の様子が見えるよう、塗りは薄く輪郭は濃くしてあります。拡大すると圃場名・作物名・面積の札が出ます。地図は画面の縦幅いっぱいに自動で広がるので、スクロールせずに全体を見られます。「⛶」を押すと見出しやタブバーも隠して完全な全画面になり、「✕ 全画面をやめる」で戻ります。圃場の一覧は上の「📋 一覧」に切り替えると出ます。一覧は地区ごとに折りたためて検索もでき、見出しの「👁 表示中」を押すとその地区を地図から一時的に消せます(端末には保存されないので、アプリを開き直すと元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
   }, {
     title: "📋 データベースタブ",
     desc: "圃場マスタ(🌾)・薬剤プリセット(🧪)の2つのサブタブで管理します。圃場の新規登録・編集・削除はすべてここの🌾サブタブで行います(作業タブからの直接登録はできません)。圃場マスタには圃場名・作物名・面積・地区を登録します(予定薬液量はここには持たず、作業タブでその日の投下量から計算します)。「地区」は圃場をまとめるための任意の名前で、一覧の見出し・地図タブの折りたたみ・作業タブの一括追加のすべてに使われます。空欄のままなら「未分類」にまとまります。一覧の「編集」を押すとその場にポップアップが開くので、画面上部まで戻る必要はありません。ここで圃場名や面積を変更すると、作業タブに入っている同じ圃場の表示も同時に更新されます。登録した圃場は作業タブの「圃場を追加」から追加します。回る順番は、追加したあと作業リストで⣿マークをドラッグして並べ替えます(累計薬液量とタンク補給の位置もその並びで計算し直されます)。🧪薬剤サブタブは、薬剤名・種類・剤型を登録しておく単純な名前帳です(希釈倍率は散布水量で変わるため持ちません)。登録しておくと、作業タブの「📋 登録薬剤から追加」で名前・種類・剤型をまとめて呼び出せます。「総使用回数の上限」も登録でき、農薬使用回数の警告に使われます(未登録なら既定3回)。作業タブで使った薬剤も自動でここに貯まります。なお、複数の薬剤をまとめた「組み合わせ」は調合タブの「⭐プリセットに保存」で別に登録でき、作業タブの「薬剤を圃場に適用」で一発適用できます。"
@@ -6965,9 +7023,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.47",
+    ver: "v8.48",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 「頂点を追加」のON/OFFボタンを付けました。OFFにすると地図をタップしても頂点が増えないので、形を整えている最中に離れた場所へ点ができて消す、という手間がなくなります", "🗺 登録済みの圃場をタップして編集を始めたときは、最初からOFFで開きます(形を直しに来た場面なので)。新しく囲むときはONで始まります", "🗺 頂点の丸をさらに小さくしました(頂点20px→16px、辺の中点12px→9px)"]
+  }, {
+    ver: "v8.47",
+    date: "2026-08",
+    isNew: false,
     notes: ["🔄 更新の取りこぼしを減らしました。アイコンなど「無くても動くファイル」の取得に失敗しただけで更新全体が止まり、何度開き直しても古いままになることがありました", "🔄 本体ファイルの取得に失敗したときは1回だけ取り直すようにしました。電波の弱い圃場での更新が通りやすくなります", "※GitHubへの反映には数分かかります。更新した直後に開くとまだ古い版が出ることがあるので、少し待ってから開き直してください。それでも変わらないときは設定タブの「アプリの更新」→「🔄 最新版に更新する」を押してください"]
   }, {
     ver: "v8.46",

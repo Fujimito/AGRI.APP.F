@@ -57,11 +57,11 @@
   .vtx-icon { background:transparent; border:none; }
   /* 頂点。大きいと隣の頂点と重なって細かい調整ができないので小さめにしてある。
      JS側の iconSize / iconAnchor と必ず同じ値にすること(ずれると位置がずれる) */
-  .vtx { width:20px; height:20px; border-radius:50%; background:#C74E36; color:#fff; border:2px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; font-weight:800; font-size:10.5px; }
+  .vtx { width:16px; height:16px; border-radius:50%; background:#C74E36; color:#fff; border:1.5px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; font-weight:800; font-size:9px; }
   /* 選択中の頂点。番号のかわりに✕を出すので、色も濃くして区別できるようにする */
-  .vtx-sel { background:#8a2f1c; border-color:#FFD9CF; font-size:12px; }
+  .vtx-sel { background:#8a2f1c; border-color:#FFD9CF; font-size:11px; }
   /* 辺の中点ハンドル。頂点より小さく薄くして、番号付きの頂点と見分けられるようにする */
-  .vtx-mid { width:12px; height:12px; border-radius:50%; background:rgba(199,78,54,0.45); border:1.5px solid rgba(255,255,255,0.85); box-shadow:0 1px 3px rgba(0,0,0,0.3); }
+  .vtx-mid { width:9px; height:9px; border-radius:50%; background:rgba(199,78,54,0.45); border:1.5px solid rgba(255,255,255,0.85); box-shadow:0 1px 3px rgba(0,0,0,0.3); }
   .leaflet-container { font: inherit; }
 </style>
 <link rel="stylesheet" href="./leaflet.css" />
