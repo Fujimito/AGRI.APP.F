@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.48";
+const APP_VERSION = "v8.49";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -255,6 +255,26 @@ const polygonCenter = latlngs => {
     lng += Number(p[1]);
   });
   return [lat / latlngs.length, lng / latlngs.length];
+};
+
+// 緯度経度を小数第7位に丸める。
+// 地図から受け取る座標は倍精度のままなので 35.68123456789012 のような
+// 17桁になり、1頂点で36文字前後を食う。圃場を数十枚登録すると、それだけで
+// チーム共有データがスプレッドシート1セルの上限(5万文字)を超えてしまい、
+// 「データが大きすぎます」で保存できなくなる。
+// 小数第7位は約1.1cmに相当し、GPSの誤差(数m)よりはるかに細かいので、
+// 実用上の精度は失われない。
+const GEO_DIGITS = 1e7;
+const roundGeo = n => Math.round(Number(n) * GEO_DIGITS) / GEO_DIGITS;
+const roundPts = pts => Array.isArray(pts) ? pts.map(p => [roundGeo(p[0]), roundGeo(p[1])]) : pts;
+// 圃場1件ぶんの座標をまとめて丸める(ポリゴンと中心座標)
+const compactField = f => {
+  if (!f || !Array.isArray(f.polygon)) return f;
+  return {
+    ...f,
+    polygon: roundPts(f.polygon),
+    center: Array.isArray(f.center) ? [roundGeo(f.center[0]), roundGeo(f.center[1])] : f.center
+  };
 };
 // ---- 作図中の頂点編集ヘルパ(地図ライブラリに依存しない純関数) ----
 // Google版・Leaflet版の両方から同じロジックを使うため、ここに切り出してある
@@ -1309,8 +1329,11 @@ function App() {
     }
     if (!confirm("この端末のデータ(圃場・薬剤・作業リスト)を共有データとして保存します。\n既存の共有データは上書きされます。よろしいですか？")) return;
     setSyncing(true);
+    // 以前のバージョンで登録した圃場は座標が倍精度のまま入っている。
+    // 送る前に丸めないと、過去に囲んだ圃場だけで上限に達し続ける。
+    // 端末に保存されている元データには手を触れない(勝手に書き換えない)。
     const payload = JSON.stringify({
-      fields,
+      fields: fields.map(compactField),
       works,
       chemMaster,
       presets,
@@ -1326,7 +1349,15 @@ function App() {
       payload
     }, 2);
     setSyncing(false);
-    if (j && j.error === "auth") {/* post() が案内済み */} else if (j && j.ok) flash("☁ 共有データを保存しました(" + fields.length + "圃場)");else if (j && j.error) flash("保存失敗:" + j.error + "。GASを最新版に更新してください");else flash("保存に失敗しました。URLとGASの更新・デプロイを確認してください");
+    if (j && j.error === "auth") {/* post() が案内済み */} else if (j && j.ok) flash("☁ 共有データを保存しました(" + fields.length + "圃場)");else if (j && j.error) {
+      // 「大きすぎます」はGASの版とは関係がない。更新を促すと的外れな案内になり、
+      // 実際に何度もGASを貼り直しても直らない。今の文字数と上限を出して原因を示す。
+      if (String(j.error).indexOf("大きすぎ") >= 0) {
+        flash("保存失敗:共有データが大きすぎます(" + payload.length.toLocaleString() + "文字／上限45,000文字)。圃場の数を減らすか、頂点の少ない形で囲み直してください");
+      } else {
+        flash("保存失敗:" + j.error + "。GASを最新版に更新してください");
+      }
+    } else flash("保存に失敗しました。URLとGASの更新・デプロイを確認してください");
   };
   const cloudLoad = async () => {
     if (!teamCode.trim()) {
@@ -5580,14 +5611,18 @@ function GoogleMapTab(p) {
       p.flash && p.flash("線が交差しています。頂点を動かしてねじれを直してください");
       return;
     }
-    const center = polygonCenter(drawPts);
-    const areaA = Math.round(polygonAreaA(drawPts) * 100) / 100;
+    // 保存する時点で丸めておく。倍精度のまま貯めると、あとからチーム共有が
+    // セル上限に当たって保存できなくなる(roundPts のコメント参照)。
+    // 面積も丸めた頂点から出して、保存された形と表示される面積を一致させる。
+    const pts = roundPts(drawPts);
+    const center = roundPts([polygonCenter(pts)])[0];
+    const areaA = Math.round(polygonAreaA(pts) * 100) / 100;
     const data = {
       name: newName.trim(),
       crop: newCrop.trim(),
       area: newZone.trim(),
       areaA,
-      polygon: drawPts,
+      polygon: pts,
       center
     };
     if (editingFieldId != null) {
@@ -6312,14 +6347,18 @@ function LeafletMapTab(p) {
       p.flash && p.flash("線が交差しています。頂点を動かしてねじれを直してください");
       return;
     }
-    const center = polygonCenter(drawPts);
-    const areaA = Math.round(polygonAreaA(drawPts) * 100) / 100;
+    // 保存する時点で丸めておく。倍精度のまま貯めると、あとからチーム共有が
+    // セル上限に当たって保存できなくなる(roundPts のコメント参照)。
+    // 面積も丸めた頂点から出して、保存された形と表示される面積を一致させる。
+    const pts = roundPts(drawPts);
+    const center = roundPts([polygonCenter(pts)])[0];
+    const areaA = Math.round(polygonAreaA(pts) * 100) / 100;
     const data = {
       name: newName.trim(),
       crop: newCrop.trim(),
       area: newZone.trim(),
       areaA,
-      polygon: drawPts,
+      polygon: pts,
       center
     };
     if (editingFieldId != null) {
@@ -7023,9 +7062,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.48",
+    ver: "v8.49",
     date: "2026-08",
     isNew: true,
+    notes: ["🐞 チーム共有の「端末→共有へ保存」が「データが大きすぎます」で保存できなくなる不具合を修正しました。圃場の位置情報が必要以上に細かい桁数(小数17桁)で保存されており、圃場を増やすほど容量を食っていました", "小数第7位(約1.1cm)までに丸めるようにしました。GPSの誤差は数mあるため実用上の精度は変わりません。面積の表示(0.01a単位)も変わりません", "共有データの容量が約34%減り、保存できる圃場数の目安が約26圃場から約40圃場に増えます(1圃場40頂点の場合)", "「データが大きすぎます」と出たときの案内を直しました。これはGASの版とは関係がないのに「GASを最新版に更新してください」と表示しており、何度GASを貼り直しても直らない案内になっていました。今は実際の文字数と上限を表示します"]
+  }, {
+    ver: "v8.48",
+    date: "2026-08",
+    isNew: false,
     notes: ["🗺 「頂点を追加」のON/OFFボタンを付けました。OFFにすると地図をタップしても頂点が増えないので、形を整えている最中に離れた場所へ点ができて消す、という手間がなくなります", "🗺 登録済みの圃場をタップして編集を始めたときは、最初からOFFで開きます(形を直しに来た場面なので)。新しく囲むときはONで始まります", "🗺 頂点の丸をさらに小さくしました(頂点20px→16px、辺の中点12px→9px)"]
   }, {
     ver: "v8.47",
