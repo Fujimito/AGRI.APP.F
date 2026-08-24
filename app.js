@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.44";
+const APP_VERSION = "v8.45";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -1747,6 +1747,7 @@ function App() {
   }, /*#__PURE__*/React.createElement(MapTabRouter, {
     fields,
     addFieldWithPolygon,
+    upsertField,
     areas,
     crops,
     addCrop,
@@ -5108,6 +5109,7 @@ function GoogleMapTab(p) {
   const [newName, setNewName] = React.useState("");
   const [newCrop, setNewCrop] = React.useState("");
   const [newZone, setNewZone] = React.useState(""); // 作図した圃場の地区
+  const [editingFieldId, setEditingFieldId] = React.useState(null); // 既存圃場を編集中ならそのID。nullなら新規作図
   const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
@@ -5314,7 +5316,7 @@ function GoogleMapTab(p) {
         clickable: true
       });
       poly.addListener("click", () => {
-        p.onPickField && p.onPickField(f);
+        startEditPoly(f);
       });
       fieldOverlaysRef.current.push(poly);
       if (showLabel) {
@@ -5509,6 +5511,25 @@ function GoogleMapTab(p) {
     drawingRef.current = true;
     resetDrawState();
   };
+  // 既存の圃場ポリゴンをタップしたときの編集開始。頂点・圃場名などを
+  // 作図パネルへ読み込み、地図上では二重表示にならないよう元のポリゴンを隠す
+  const startEditPoly = f => {
+    if (drawingRef.current) return; // 作図中に他の圃場へ乗り換えさせない
+    setDrawing(true);
+    drawingRef.current = true;
+    // 圃場ポリゴンのclickは地図のclickにも伝播する。何もしないと、選択に使った
+    // 同じタップが「作図中の地図タップ」として処理され、5点目の頂点が紛れ込む
+    lastEditAtRef.current = Date.now();
+    resetDrawState();
+    const pts = (f.polygon || []).map(pt => [pt[0], pt[1]]);
+    drawPtsRef.current = pts;
+    setDrawPts(pts);
+    setNewName(f.name || "");
+    setNewCrop(f.crop || "");
+    setNewZone(f.area || "");
+    setEditingFieldId(f.id);
+    setHidden(h => h.indexOf(f.id) >= 0 ? h : [...h, f.id]);
+  };
   const cancelDraw = () => {
     setDrawing(false);
     drawingRef.current = false;
@@ -5516,6 +5537,8 @@ function GoogleMapTab(p) {
     setNewName("");
     setNewCrop("");
     setNewZone("");
+    if (editingFieldId != null) setHidden(h => h.filter(id => id !== editingFieldId));
+    setEditingFieldId(null);
   };
   // 追加・移動・削除・挿入をまとめて1手ずつ戻す
   const undoPt = () => {
@@ -5537,14 +5560,19 @@ function GoogleMapTab(p) {
     }
     const center = polygonCenter(drawPts);
     const areaA = Math.round(polygonAreaA(drawPts) * 100) / 100;
-    p.addFieldWithPolygon({
+    const data = {
       name: newName.trim(),
       crop: newCrop.trim(),
       area: newZone.trim(),
       areaA,
       polygon: drawPts,
       center
-    });
+    };
+    if (editingFieldId != null) {
+      p.upsertField(data, editingFieldId);
+    } else {
+      p.addFieldWithPolygon(data);
+    }
     if (newCrop.trim()) p.addCrop(newCrop.trim());
     cancelDraw();
   };
@@ -5720,7 +5748,14 @@ function GoogleMapTab(p) {
       ...S.settingsBox,
       marginTop: 12
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }, editingFieldId != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.smallLabel,
+      color: "#C74E36",
+      fontWeight: "700",
+      marginBottom: 4
+    }
+  }, "✎「", newName || "この圃場", "」を編集中(「この圃場を保存」を押すまでは元の圃場データは変わりません。「やめる」で編集を取り消せます)"), /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
   }, "地図をタップして圃場の角を順に打ちます(3点以上)。頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "タップかドラッグ"), "すると頂点を足せます。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
@@ -5811,7 +5846,7 @@ function GoogleMapTab(p) {
       marginTop: 10,
       opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
     }
-  }, drawCrossed ? "⚠ 線の交差を直してください" : "この圃場を登録(" + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
+  }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -5848,6 +5883,7 @@ function LeafletMapTab(p) {
   const [newName, setNewName] = React.useState("");
   const [newCrop, setNewCrop] = React.useState("");
   const [newZone, setNewZone] = React.useState(""); // 作図した圃場の地区
+  const [editingFieldId, setEditingFieldId] = React.useState(null); // 既存圃場を編集中ならそのID。nullなら新規作図
   const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
@@ -6058,7 +6094,7 @@ function LeafletMapTab(p) {
         });
       }
       poly.on("click", () => {
-        p.onPickField && p.onPickField(f);
+        startEditPoly(f);
       });
     });
   }, [ready, p.fields, zoom, hidden]);
@@ -6173,6 +6209,25 @@ function LeafletMapTab(p) {
     drawingRef.current = true;
     resetDrawState();
   };
+  // 既存の圃場ポリゴンをタップしたときの編集開始。頂点・圃場名などを
+  // 作図パネルへ読み込み、地図上では二重表示にならないよう元のポリゴンを隠す
+  const startEditPoly = f => {
+    if (drawingRef.current) return; // 作図中に他の圃場へ乗り換えさせない
+    setDrawing(true);
+    drawingRef.current = true;
+    // 圃場ポリゴンのclickは地図のclickにも伝播する。何もしないと、選択に使った
+    // 同じタップが「作図中の地図タップ」として処理され、5点目の頂点が紛れ込む
+    lastEditAtRef.current = Date.now();
+    resetDrawState();
+    const pts = (f.polygon || []).map(pt => [pt[0], pt[1]]);
+    drawPtsRef.current = pts;
+    setDrawPts(pts);
+    setNewName(f.name || "");
+    setNewCrop(f.crop || "");
+    setNewZone(f.area || "");
+    setEditingFieldId(f.id);
+    setHidden(h => h.indexOf(f.id) >= 0 ? h : [...h, f.id]);
+  };
   const cancelDraw = () => {
     setDrawing(false);
     drawingRef.current = false;
@@ -6180,6 +6235,8 @@ function LeafletMapTab(p) {
     setNewName("");
     setNewCrop("");
     setNewZone("");
+    if (editingFieldId != null) setHidden(h => h.filter(id => id !== editingFieldId));
+    setEditingFieldId(null);
   };
   // 追加・移動・削除・挿入をまとめて1手ずつ戻す
   const undoPt = () => {
@@ -6201,14 +6258,19 @@ function LeafletMapTab(p) {
     }
     const center = polygonCenter(drawPts);
     const areaA = Math.round(polygonAreaA(drawPts) * 100) / 100;
-    p.addFieldWithPolygon({
+    const data = {
       name: newName.trim(),
       crop: newCrop.trim(),
       area: newZone.trim(),
       areaA,
       polygon: drawPts,
       center
-    });
+    };
+    if (editingFieldId != null) {
+      p.upsertField(data, editingFieldId);
+    } else {
+      p.addFieldWithPolygon(data);
+    }
     if (newCrop.trim()) p.addCrop(newCrop.trim());
     cancelDraw();
   };
@@ -6356,7 +6418,14 @@ function LeafletMapTab(p) {
       ...S.settingsBox,
       marginTop: 12
     }
-  }, /*#__PURE__*/React.createElement("div", {
+  }, editingFieldId != null && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.smallLabel,
+      color: "#C74E36",
+      fontWeight: "700",
+      marginBottom: 4
+    }
+  }, "✎「", newName || "この圃場", "」を編集中(「この圃場を保存」を押すまでは元の圃場データは変わりません。「やめる」で編集を取り消せます)"), /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
   }, "地図をタップして圃場の角を順に打ちます(3点以上)。頂点は", /*#__PURE__*/React.createElement("strong", null, "ドラッグで移動"), "、", /*#__PURE__*/React.createElement("strong", null, "タップして✕で削除"), "。辺の中点にある小さな丸を", /*#__PURE__*/React.createElement("strong", null, "タップかドラッグ"), "すると頂点を足せます。"), /*#__PURE__*/React.createElement("div", {
     style: S.drawInfo,
@@ -6447,7 +6516,7 @@ function LeafletMapTab(p) {
       marginTop: 10,
       opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
     }
-  }, drawCrossed ? "⚠ 線の交差を直してください" : "この圃場を登録(" + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
+  }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -6885,9 +6954,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.44",
+    ver: "v8.45",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 地図タブで、既に囲んで登録済みの圃場をタップすると、その場で頂点を動かして編集し直せるようになりました。これまでは登録後に形や位置を直す手段がありませんでした。名前・作物・地区も一緒に読み込まれ、「この圃場を保存」で同じ圃場として上書き保存されます(新規の圃場として重複登録されることはありません)"]
+  }, {
+    ver: "v8.44",
+    date: "2026-08",
+    isNew: false,
     notes: ["🧪 農薬データを、アプリに同梱する形から「設定タブから取り込む」方式に変更しました。設定タブの「農薬データ」→「⬇ 農薬データを取り込む」で、あなたのGoogleドライブに置いたデータをこの端末に取り込みます。一度取り込めば、これまでどおり圏外でも登録番号・農薬名・成分名で検索できます", "取り込んだデータは端末内(IndexedDB)に保存されます。記録や圃場の保存領域とは別なので、これまでの保存データを圧迫しません", "取り込みには送信先URLと共有パスワードの設定が必要です。まだ取り込んでいない状態で農薬検索を開くと、その旨の案内が出ます", "データの準備・設置手順は、同梱の README とCode.gsの冒頭コメントに書いてあります"]
   }, {
     ver: "v8.43",
