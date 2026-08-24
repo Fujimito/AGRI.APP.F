@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.49";
+const APP_VERSION = "v8.50";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -257,16 +257,42 @@ const polygonCenter = latlngs => {
   return [lat / latlngs.length, lng / latlngs.length];
 };
 
-// 緯度経度を小数第7位に丸める。
+// 緯度経度を小数第9位に丸める。
 // 地図から受け取る座標は倍精度のままなので 35.68123456789012 のような
-// 17桁になり、1頂点で36文字前後を食う。圃場を数十枚登録すると、それだけで
+// 17桁になり、1頂点で39文字前後を食う。圃場を数十枚登録すると、それだけで
 // チーム共有データがスプレッドシート1セルの上限(5万文字)を超えてしまい、
 // 「データが大きすぎます」で保存できなくなる。
-// 小数第7位は約1.1cmに相当し、GPSの誤差(数m)よりはるかに細かいので、
-// 実用上の精度は失われない。
-const GEO_DIGITS = 1e7;
+//
+// 桁数は面積のずれから決めている(現実的な圃場3,000枚で実測):
+//   7桁 … 最大 0.0147a ずれ、26.3% の圃場で 0.01a 単位の表示が変わる
+//   8桁 … 最大 0.0018a ずれ、 3.3%
+//   9桁 … 最大 0.0002a ずれ、 0.3%
+// 面積は散布量の計算とアグリノート転記に流れる数値なので、
+// 丸めのせいで動いてよい値ではない。容量(削減率26%)より、ずれないことを優先する。
+const GEO_DIGITS = 1e9;
 const roundGeo = n => Math.round(Number(n) * GEO_DIGITS) / GEO_DIGITS;
 const roundPts = pts => Array.isArray(pts) ? pts.map(p => [roundGeo(p[0]), roundGeo(p[1])]) : pts;
+// 地図に出す面積の文字列。
+// 「圃場に登録された面積」を使う。散布量の計算・作業タブ・アグリノート転記で
+// 使われるのはこの値なので、地図だけポリゴンから計算し直した別の数字を出すと、
+// 同じ圃場に2つの面積が見えることになる(データベースで面積を手直しすると必ずずれた)。
+// 単位設定(a/ha/反/町)も他の画面と揃える。以前は "a" 固定で、
+// 反や町に設定していても地図だけアール表示のままだった。
+const fieldAreaText = (f, unitKey) => {
+  const a = f && f.areaA;
+  if (a === "" || a == null || !(parseFloat(a) > 0)) return "面積未設定";
+  return dispArea(a, unitKey) + " " + areaSuffix(unitKey);
+};
+// 登録面積と、囲んだ形から計算した面積が食い違っているか。
+// 地図が登録面積を出すようになったぶん、ずれが黙って隠れないよう一覧で知らせる。
+// 食い違う理由は「データベースで面積だけ手で直した」場合がほとんど。
+const measuredAreaIfOff = f => {
+  const a = parseFloat(f && f.areaA);
+  if (!(a > 0) || !Array.isArray(f.polygon) || f.polygon.length < 3) return null;
+  const m = polygonAreaA(f.polygon);
+  if (!(m > 0)) return null;
+  return Math.abs(m - a) / a >= 0.01 ? m : null; // 1%以上のずれだけ出す
+};
 // 圃場1件ぶんの座標をまとめて丸める(ポリゴンと中心座標)
 const compactField = f => {
   if (!f || !Array.isArray(f.polygon)) return f;
@@ -1779,6 +1805,7 @@ function App() {
     fields,
     addFieldWithPolygon,
     upsertField,
+    areaUnitKey,
     areas,
     crops,
     addCrop,
@@ -5078,7 +5105,15 @@ function MapFieldList(p) {
       }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
         style: S.listSub,
         className: "num"
-      }, fmt(polygonAreaA(f.polygon), 2), " a")), /*#__PURE__*/React.createElement("button", {
+      }, fieldAreaText(f, p.areaUnitKey), (() => {
+        // 登録面積と囲んだ形が食い違っているときだけ、実測値も添える
+        const m = measuredAreaIfOff(f);
+        return m == null ? null : /*#__PURE__*/React.createElement("span", {
+          style: {
+            color: "#8a621f"
+          }
+        }, "（囲んだ形は " + dispArea(m, p.areaUnitKey) + " " + areaSuffix(p.areaUnitKey) + "）");
+      })())), /*#__PURE__*/React.createElement("button", {
         onClick: () => p.setHidden(off ? hidden.filter(id => id !== f.id) : [...hidden, f.id]),
         style: S.smallSecondary,
         title: "地図での表示を切り替え"
@@ -5375,7 +5410,7 @@ function GoogleMapTab(p) {
           },
           // 透明アイコン(ラベルだけ表示)
           label: {
-            text: f.name + (f.crop ? "/" + f.crop : "") + " " + fmt(polygonAreaA(f.polygon), 2) + "a",
+            text: f.name + (f.crop ? "/" + f.crop : "") + " " + fieldAreaText(f, p.areaUnitKey),
             color: "#fff",
             fontSize: "12px",
             fontWeight: "700",
@@ -5385,7 +5420,7 @@ function GoogleMapTab(p) {
         fieldOverlaysRef.current.push(label);
       }
     });
-  }, [ready, p.fields, zoom, hidden]);
+  }, [ready, p.fields, zoom, hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
 
   // 作図中の頂点・線を再描画
   React.useEffect(() => {
@@ -5611,12 +5646,23 @@ function GoogleMapTab(p) {
       p.flash && p.flash("線が交差しています。頂点を動かしてねじれを直してください");
       return;
     }
-    // 保存する時点で丸めておく。倍精度のまま貯めると、あとからチーム共有が
+    // 座標は保存時に丸める。倍精度のまま貯めると、あとからチーム共有が
     // セル上限に当たって保存できなくなる(roundPts のコメント参照)。
-    // 面積も丸めた頂点から出して、保存された形と表示される面積を一致させる。
+    //
+    // ただし面積は「丸める前の座標」から出す。丸めた座標から計算し直すと、
+    // 作図中にパネルで見えていた面積と、保存された面積がわずかにずれる。
+    // 面積は散布量やアグリノート転記に流れるので、画面で確認した値が
+    // そのまま残るようにする。
     const pts = roundPts(drawPts);
-    const center = roundPts([polygonCenter(pts)])[0];
-    const areaA = Math.round(polygonAreaA(pts) * 100) / 100;
+    const center = roundPts([polygonCenter(drawPts)])[0];
+    let areaA = Math.round(polygonAreaA(drawPts) * 100) / 100;
+    // 形をまったく動かさずに保存したときは、登録されている面積をそのまま残す。
+    // 計算し直すと、データベースで手入力した面積(登記簿の値など)が
+    // 囲んだ形から出した値で黙って上書きされてしまう。
+    const editTarget = editingFieldId != null ? p.fields.find(x => x.id === editingFieldId) : null;
+    if (editTarget && JSON.stringify(editTarget.polygon) === JSON.stringify(pts) && parseFloat(editTarget.areaA) > 0) {
+      areaA = editTarget.areaA;
+    }
     const data = {
       name: newName.trim(),
       crop: newCrop.trim(),
@@ -5923,6 +5969,7 @@ function GoogleMapTab(p) {
     style: S.cardLabel
   }, "地図に登録された圃場(", polyFields.length, "件)"), /*#__PURE__*/React.createElement(MapFieldList, {
     fields: polyFields,
+    areaUnitKey: p.areaUnitKey,
     hidden: hidden,
     setHidden: setHidden,
     onFocus: f => {
@@ -6166,7 +6213,7 @@ function LeafletMapTab(p) {
         fillOpacity: st.opacity
       }).addTo(grp);
       if (showLabel) {
-        const labelText = escapeHtml(f.name) + (f.crop ? " / " + escapeHtml(f.crop) : "") + " / " + fmt(polygonAreaA(f.polygon), 2) + " a";
+        const labelText = escapeHtml(f.name) + (f.crop ? " / " + escapeHtml(f.crop) : "") + " / " + escapeHtml(fieldAreaText(f, p.areaUnitKey));
         poly.bindTooltip(labelText, {
           permanent: true,
           direction: "center",
@@ -6177,7 +6224,7 @@ function LeafletMapTab(p) {
         startEditPoly(f);
       });
     });
-  }, [ready, p.fields, zoom, hidden]);
+  }, [ready, p.fields, zoom, hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
 
   // 作図中ポリゴンの再描画
   React.useEffect(() => {
@@ -6347,12 +6394,23 @@ function LeafletMapTab(p) {
       p.flash && p.flash("線が交差しています。頂点を動かしてねじれを直してください");
       return;
     }
-    // 保存する時点で丸めておく。倍精度のまま貯めると、あとからチーム共有が
+    // 座標は保存時に丸める。倍精度のまま貯めると、あとからチーム共有が
     // セル上限に当たって保存できなくなる(roundPts のコメント参照)。
-    // 面積も丸めた頂点から出して、保存された形と表示される面積を一致させる。
+    //
+    // ただし面積は「丸める前の座標」から出す。丸めた座標から計算し直すと、
+    // 作図中にパネルで見えていた面積と、保存された面積がわずかにずれる。
+    // 面積は散布量やアグリノート転記に流れるので、画面で確認した値が
+    // そのまま残るようにする。
     const pts = roundPts(drawPts);
-    const center = roundPts([polygonCenter(pts)])[0];
-    const areaA = Math.round(polygonAreaA(pts) * 100) / 100;
+    const center = roundPts([polygonCenter(drawPts)])[0];
+    let areaA = Math.round(polygonAreaA(drawPts) * 100) / 100;
+    // 形をまったく動かさずに保存したときは、登録されている面積をそのまま残す。
+    // 計算し直すと、データベースで手入力した面積(登記簿の値など)が
+    // 囲んだ形から出した値で黙って上書きされてしまう。
+    const editTarget = editingFieldId != null ? p.fields.find(x => x.id === editingFieldId) : null;
+    if (editTarget && JSON.stringify(editTarget.polygon) === JSON.stringify(pts) && parseFloat(editTarget.areaA) > 0) {
+      areaA = editTarget.areaA;
+    }
     const data = {
       name: newName.trim(),
       crop: newCrop.trim(),
@@ -6631,6 +6689,7 @@ function LeafletMapTab(p) {
     style: S.cardLabel
   }, "地図に登録された圃場(", polyFields.length, "件)"), /*#__PURE__*/React.createElement(MapFieldList, {
     fields: polyFields,
+    areaUnitKey: p.areaUnitKey,
     hidden: hidden,
     setHidden: setHidden,
     onFocus: f => {
@@ -7062,9 +7121,14 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.49",
+    ver: "v8.50",
     date: "2026-08",
     isNew: true,
+    notes: ["🐞 v8.49の容量削減で面積がわずかにずれてしまう問題を修正しました。位置情報を丸める桁数が粗く、実測で4枚に1枚以上の圃場で表示面積が0.01a単位で変わっていました。桁数を上げ(最大ずれ 0.0147a→0.0002a)、面積は丸める前の座標から計算するようにしたので、作図中に見えていた面積がそのまま保存されます", "🗺 地図の面積表示が、圃場に登録された面積を出すようになりました。これまでは地図だけ囲んだ形から計算し直した数字を出していたため、データベースで面積を手直しすると地図と食い違っていました。散布量の計算に使われるのは登録面積なので、そちらに揃えています", "🗺 地図の面積が表示単位(a/ha/反/町)に従うようになりました。これまで地図だけアール固定で、反や町に設定していても変わりませんでした", "🗺 登録面積と囲んだ形の面積が1%以上ずれている圃場は、一覧に「(囲んだ形は ◯◯)」と併記して、食い違いが隠れないようにしました", "🗺 地図で圃場をタップして形を変えずに保存したとき、手入力した面積が計算値で上書きされないようにしました"]
+  }, {
+    ver: "v8.49",
+    date: "2026-08",
+    isNew: false,
     notes: ["🐞 チーム共有の「端末→共有へ保存」が「データが大きすぎます」で保存できなくなる不具合を修正しました。圃場の位置情報が必要以上に細かい桁数(小数17桁)で保存されており、圃場を増やすほど容量を食っていました", "小数第7位(約1.1cm)までに丸めるようにしました。GPSの誤差は数mあるため実用上の精度は変わりません。面積の表示(0.01a単位)も変わりません", "共有データの容量が約34%減り、保存できる圃場数の目安が約26圃場から約40圃場に増えます(1圃場40頂点の場合)", "「データが大きすぎます」と出たときの案内を直しました。これはGASの版とは関係がないのに「GASを最新版に更新してください」と表示しており、何度GASを貼り直しても直らない案内になっていました。今は実際の文字数と上限を表示します"]
   }, {
     ver: "v8.48",
