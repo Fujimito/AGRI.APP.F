@@ -47,7 +47,7 @@
     body { background: #fff; }
     .print-only { display: block !important; }
   }
-  /* 圃場名の札。下の塗りが蛍光色なので、暗い無彩色にして文字を読ませる。
+  /* 圃場名の札。下に塗りと衛星写真が来るので、暗い無彩色にして文字を読ませる。
      leaflet.css の .leaflet-tooltip はこの <style> より後に読み込まれるので、
      同じ強さのセレクタでは負ける。必ず .leaflet-tooltip と重ねて指定すること。 */
   .leaflet-tooltip.field-label { background: rgba(20,26,20,0.86); color:#fff; border:none; font-weight:700; font-size:12px; padding:2px 6px; box-shadow:none; white-space:nowrap; }
@@ -55,11 +55,13 @@
   /* Googleマップ版の札は背景を持てないので、縁取りで読ませる */
   .gm-field-label { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); }
   .vtx-icon { background:transparent; border:none; }
-  .vtx { width:26px; height:26px; border-radius:50%; background:#C74E36; color:#fff; border:2.5px solid #fff; box-shadow:0 1px 4px rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; font-weight:800; font-size:13px; }
+  /* 頂点。大きいと隣の頂点と重なって細かい調整ができないので小さめにしてある。
+     JS側の iconSize / iconAnchor と必ず同じ値にすること(ずれると位置がずれる) */
+  .vtx { width:20px; height:20px; border-radius:50%; background:#C74E36; color:#fff; border:2px solid #fff; box-shadow:0 1px 3px rgba(0,0,0,0.4); display:flex; align-items:center; justify-content:center; font-weight:800; font-size:10.5px; }
   /* 選択中の頂点。番号のかわりに✕を出すので、色も濃くして区別できるようにする */
-  .vtx-sel { background:#8a2f1c; border-color:#FFD9CF; font-size:15px; }
+  .vtx-sel { background:#8a2f1c; border-color:#FFD9CF; font-size:12px; }
   /* 辺の中点ハンドル。頂点より小さく薄くして、番号付きの頂点と見分けられるようにする */
-  .vtx-mid { width:18px; height:18px; border-radius:50%; background:rgba(199,78,54,0.45); border:2px solid rgba(255,255,255,0.85); box-shadow:0 1px 3px rgba(0,0,0,0.3); }
+  .vtx-mid { width:12px; height:12px; border-radius:50%; background:rgba(199,78,54,0.45); border:1.5px solid rgba(255,255,255,0.85); box-shadow:0 1px 3px rgba(0,0,0,0.3); }
   .leaflet-container { font: inherit; }
 </style>
 <link rel="stylesheet" href="./leaflet.css" />
