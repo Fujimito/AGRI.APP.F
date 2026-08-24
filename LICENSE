@@ -1,0 +1,28 @@
+Copyright (c) 2026 Fujimoto. All rights reserved.
+
+このリポジトリは身内(業務関係者)での利用を目的として公開しているものであり、
+オープンソースライセンスの下で配布するものではありません。
+
+著作権者の書面による事前の許諾なく、本ソフトウェア(ソースコード・ドキュメントを含む)の
+全部または一部を、複製・改変・再配布・商用利用することを禁じます。
+
+GitHub上でリポジトリが閲覧可能であることは、上記の許諾を意味しません。
+
+なお、本リポジトリには React・Leaflet 等、それぞれ別のオープンソースライセンス
+(MIT・BSD-2-Clause)の下で配布されている第三者ソフトウェアが同梱されています。
+それらの権利表示・ライセンス全文は THIRD-PARTY-LICENSES.md を参照してください。
+この LICENSE ファイルの制限は、上記の第三者ソフトウェアには及びません。
+
+---
+
+Copyright (c) 2026 Fujimoto. All rights reserved.
+
+This repository is made public for reference by internal collaborators only,
+and is not distributed under an open-source license.
+
+No part of this software (including source code and documentation) may be
+copied, modified, redistributed, or used for commercial purposes without
+the prior written permission of the copyright holder.
+
+The fact that this repository is viewable on GitHub does not constitute
+such permission.
