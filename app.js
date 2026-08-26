@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.60";
+const APP_VERSION = "v8.61";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -1073,21 +1073,6 @@ function App() {
     addTomb("fields", id); // 消したことを他の端末へ伝えるための墓標
     setFieldsSave(fields.filter(f => f.id !== id));
     flash("圃場をマスタから削除しました(過去の記録は残ります)");
-    autoPushFields();
-  };
-  const addFieldOnly = data => {
-    if (fields.some(x => x.name === data.name)) {
-      flash("同名の圃場が既にあります");
-      return;
-    }
-    setFieldsSave([...fields, {
-      id: newId(),
-      name: data.name,
-      crop: data.crop || "",
-      area: (data.area || "").trim(),
-      areaA: data.areaA
-    }]);
-    flash("圃場「" + data.name + "」を登録しました");
     autoPushFields();
   };
   // 地図で囲んだ圃場(ポリゴン・中心座標つき)を登録
@@ -2803,7 +2788,6 @@ function App() {
     upsertField,
     // 「📋 一覧」を圃場マスタにしたため、登録と削除もここで行う
     deleteField,
-    addFieldOnly,
     areaUnitKey,
     areas,
     crops,
@@ -5520,11 +5504,9 @@ function FieldEditModal(p) {
 // 地図に出ている分だけを一覧にしていた頃は、位置のない圃場を
 // 編集する場所がどこにもなくなる。
 function FieldMasterPanel(p) {
-  // 圃場フォーム(新規登録用。編集は下のポップアップで行う)
-  const [fName, setFName] = useState("");
-  const [fCrop, setFCrop] = useState("");
-  const [fArea, setFArea] = useState("");
-  const [fZone, setFZone] = useState(""); // 地区
+  // v8.61 で手入力の登録フォームを外した。登録は地図で囲む1本にする。
+  // 手入力だと位置のない圃場が増え、進捗地図にもナビにも使えない。
+  // 編集(名前・作物・面積・地区)はこれまでどおり一覧の「編集」からできる。
   const [fq, setFq] = useState("");
   // 圃場編集ポップアップ(編集対象のID。nullなら閉じている)
   const [editId, setEditId] = useState(null);
@@ -5562,22 +5544,6 @@ function FieldMasterPanel(p) {
   }, [fieldList]);
   // 編集対象の圃場(マスタから消えていたらポップアップは閉じた扱いにする)
   const editField = editId != null ? p.fields.find(f => f.id === editId) : null;
-  // 新規登録(このカードは登録専用。編集はポップアップで行う)
-  const submitField = () => {
-    if (!fName.trim()) return;
-    const cropName = fCrop.trim();
-    if (cropName) p.addCrop(cropName); // 入力された作物をマスタに自動登録
-    p.addFieldOnly({
-      name: fName.trim(),
-      crop: cropName,
-      area: fZone.trim(),
-      areaA: parseFloat(fArea) || ""
-    });
-    setFName("");
-    setFCrop("");
-    setFArea("");
-    // 地区は残す。同じ地区の圃場を連続で登録することが多いため
-  };
   // 編集ポップアップを開く(一覧のその場で開くので、画面上部まで戻る必要がない)
   const startEdit = f => {
     setEditId(f.id);
@@ -5614,97 +5580,6 @@ function FieldMasterPanel(p) {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "圃場を登録"), /*#__PURE__*/React.createElement("datalist", {
-    id: "croplist"
-  }, p.crops.map(c => /*#__PURE__*/React.createElement("option", {
-    key: c,
-    value: c
-  }))), /*#__PURE__*/React.createElement("div", {
-    style: S.areaGrid
-  }, /*#__PURE__*/React.createElement("input", {
-    value: fName,
-    placeholder: "圃場名 ※必須",
-    onChange: e => setFName(e.target.value),
-    style: S.fieldInput
-  }), /*#__PURE__*/React.createElement("input", {
-    value: fCrop,
-    placeholder: "作物名(入力or選択)",
-    list: "croplist",
-    onChange: e => setFCrop(e.target.value),
-    style: S.fieldInput
-  })), /*#__PURE__*/React.createElement("label", {
-    style: {
-      ...S.areaField,
-      marginTop: 10
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "面積(a)"), /*#__PURE__*/React.createElement("input", {
-    type: "number",
-    inputMode: "decimal",
-    value: fArea,
-    onChange: e => setFArea(e.target.value),
-    style: S.midInput,
-    className: "num"
-  })), /*#__PURE__*/React.createElement("label", {
-    style: {
-      ...S.areaField,
-      marginTop: 10
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "地区(任意)"), /*#__PURE__*/React.createElement("input", {
-    value: fZone,
-    placeholder: "例:大津地区",
-    list: "arealist",
-    onChange: e => setFZone(e.target.value),
-    style: S.fieldInput
-  })), /*#__PURE__*/React.createElement("datalist", {
-    id: "arealist"
-  }, (p.areas || []).map(a => /*#__PURE__*/React.createElement("option", {
-    key: a,
-    value: a
-  }))), (p.areas || []).length > 0 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexWrap: "wrap",
-      gap: 6,
-      marginTop: 8
-    }
-  }, p.areas.map(a => /*#__PURE__*/React.createElement("button", {
-    key: a,
-    onClick: () => setFZone(a),
-    style: {
-      ...S.cropPickChip,
-      ...(fZone === a ? S.cropPickChipOn : {})
-    }
-  }, a))), p.crops.length > 0 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      flexWrap: "wrap",
-      gap: 6,
-      marginTop: 10
-    }
-  }, p.crops.map(c => /*#__PURE__*/React.createElement("button", {
-    key: c,
-    onClick: () => setFCrop(c),
-    style: {
-      ...S.cropPickChip,
-      ...(fCrop === c ? S.cropPickChipOn : {})
-    }
-  }, c))), /*#__PURE__*/React.createElement("button", {
-    onClick: submitField,
-    disabled: !fName.trim(),
-    style: {
-      ...S.primaryBtn,
-      width: "100%",
-      marginTop: 12,
-      opacity: fName.trim() ? 1 : 0.4
-    }
-  }, "＋ 圃場を登録")), /*#__PURE__*/React.createElement("section", {
-    style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
   }, "登録済み圃場(", p.fields.length, "件)"), p.fields.length > 4 && /*#__PURE__*/React.createElement("input", {
     value: fq,
     placeholder: "🔍 圃場名・作物名・地区で検索",
@@ -5715,7 +5590,7 @@ function FieldMasterPanel(p) {
     }
   }), p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "まだ圃場が登録されていません。上のフォームから登録してください。"), fieldGroups.map(g => /*#__PURE__*/React.createElement(React.Fragment, {
+  }, "まだ圃場が登録されていません。上の「🗺 地図」に切り替えて「✏ 圃場を囲む」から登録してください。"), fieldGroups.map(g => /*#__PURE__*/React.createElement(React.Fragment, {
     key: "zone:" + g.name
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -7134,7 +7009,6 @@ function GoogleMapTab(p) {
     fields: p.fields,
     upsertField: p.upsertField,
     deleteField: p.deleteField,
-    addFieldOnly: p.addFieldOnly,
     areas: p.areas,
     crops: p.crops,
     addCrop: p.addCrop,
@@ -7940,7 +7814,6 @@ function LeafletMapTab(p) {
     fields: p.fields,
     upsertField: p.upsertField,
     deleteField: p.deleteField,
-    addFieldOnly: p.addFieldOnly,
     areas: p.areas,
     crops: p.crops,
     addCrop: p.addCrop,
@@ -8435,9 +8308,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.60",
+    ver: "v8.61",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 圃場の手入力登録をやめました。登録は地図で囲む1本になります。手入力だと位置のない圃場が増え、進捗地図にもナビにも使えないためです。登録済みの圃場の編集(名前・作物・面積・地区)と削除は、これまでどおり「📋 圃場一覧」の各行からできます"]
+  }, {
+    ver: "v8.60",
+    date: "2026-08",
     notes: ["🚦 進捗地図の札にも面積を出しました。地図タブと同じく、圃場名の下に面積を別の行で出します", "⚙ 自動取得の間隔の説明を直しました。「Apps Script には1日あたりの実行時間の上限がある」と書いていましたが、これは不正確でした。公式の上限は「1回の実行は最長6分」「同時実行は1ユーザー30まで」で、「90分/日・6時間/日」はトリガーの合計実行時間のことで、このアプリが使うウェブアプリの呼び出しには当たりません(2026-08確認)"]
   }, {
     ver: "v8.59",
