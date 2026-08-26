@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.53";
+const APP_VERSION = "v8.54";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -6464,8 +6464,29 @@ function GoogleMapTab(p) {
   }), fullMap && /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(false),
     style: S.mapFullExit
-  }, "✕ 全画面をやめる")), drawing && /*#__PURE__*/React.createElement("div", {
-    style: fullMap ? S.drawPanelFull : {
+  }, "✕ 全画面をやめる")), drawing && fullMap && /*#__PURE__*/React.createElement(DrawBarFull, {
+    drawPts,
+    drawArea,
+    drawCrossed,
+    addMode,
+    changeAddMode,
+    undoPt,
+    histLen,
+    resetDrawState,
+    fixTwist,
+    onCancel: cancelDraw,
+    editing: editingFieldId != null,
+    newName,
+    setNewName,
+    newCrop,
+    setNewCrop,
+    newZone,
+    setNewZone,
+    saveDraw,
+    crops: p.crops,
+    areas: p.areas
+  }), drawing && !fullMap && /*#__PURE__*/React.createElement("div", {
+    style: {
       ...S.settingsBox,
       marginTop: 12
     }
@@ -6588,14 +6609,7 @@ function GoogleMapTab(p) {
       ...S.primaryBtn,
       width: "100%",
       marginTop: 10,
-      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4,
-      // 全画面ではパネルがスクロールするので、一番押したいこのボタンが
-      // 下に隠れてしまう。パネルの底に張り付けて常に見えるようにする
-      ...(fullMap ? {
-        position: "sticky",
-        bottom: 0,
-        zIndex: 1
-      } : {})
+      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
     }
   }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
     style: S.card,
@@ -7214,8 +7228,29 @@ function LeafletMapTab(p) {
   }), fullMap && /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(false),
     style: S.mapFullExit
-  }, "✕ 全画面をやめる")), drawing && /*#__PURE__*/React.createElement("div", {
-    style: fullMap ? S.drawPanelFull : {
+  }, "✕ 全画面をやめる")), drawing && fullMap && /*#__PURE__*/React.createElement(DrawBarFull, {
+    drawPts,
+    drawArea,
+    drawCrossed,
+    addMode,
+    changeAddMode,
+    undoPt,
+    histLen,
+    resetDrawState,
+    fixTwist,
+    onCancel: cancelDraw,
+    editing: editingFieldId != null,
+    newName,
+    setNewName,
+    newCrop,
+    setNewCrop,
+    newZone,
+    setNewZone,
+    saveDraw,
+    crops: p.crops,
+    areas: p.areas
+  }), drawing && !fullMap && /*#__PURE__*/React.createElement("div", {
+    style: {
       ...S.settingsBox,
       marginTop: 12
     }
@@ -7338,14 +7373,7 @@ function LeafletMapTab(p) {
       ...S.primaryBtn,
       width: "100%",
       marginTop: 10,
-      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4,
-      // 全画面ではパネルがスクロールするので、一番押したいこのボタンが
-      // 下に隠れてしまう。パネルの底に張り付けて常に見えるようにする
-      ...(fullMap ? {
-        position: "sticky",
-        bottom: 0,
-        zIndex: 1
-      } : {})
+      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
     }
   }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
     style: S.card,
@@ -7807,9 +7835,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.53",
+    ver: "v8.54",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 全画面で圃場を囲むときの操作欄を、画面下の1行に畳みました。これまでは説明文・入力欄・登録ボタンで画面の半分近くを占めて地図が見えませんでした(実測 555px → 61px)", "🗺 圃場名・作物名・地区の入力は「✓ 登録」を押したときにポップアップで出るようになりました。地図を見ている間は出ません", "🗺 全画面の1行バーからも「🔀 並び順」(線の交差を直す)・「↩」(1つ戻す)・「🗑」(全消し)・「✕」(作図をやめる)が使えます"]
+  }, {
+    ver: "v8.53",
+    date: "2026-08",
     notes: ["🚁 作業タブの各圃場に「散布済」チェックを追加しました。チェックを入れると進捗マップの色が変わり、外すと元に戻ります。散布量を入れなくても「終わった」ことだけ先に記録できます", "🚁 チェックを外すと実績も取り消されます。スプレッドシートの「防除記録」も状態が『調合済』に戻り、実散布量と報告日が消えます(行は消しません。調合した事実は残ります)", "🚁 「今日の準備」に「✓ 投下量から実績を一括入力」を追加しました。散布済にした圃場のうち、実散布量がまだ空のものだけに『面積÷10×投下量』を入れます。手で入れた値は上書きしません", "🚦 進捗マップの期間切替(当日/7日間/シーズン)をやめ、作業タブで選んでいる日の作業だけを見る形にしました", "🐞 チェックを続けて操作したとき、片方しか反映されない・外したはずの実績がサーバー側に残り続ける不具合を修正しました。画面の再描画を待たずに操作すると古いデータを元に保存され、更新時刻が過去へ戻って『送信済みなのに中身が違う』状態で固まっていました"]
   }, {
     ver: "v8.52",
@@ -8089,6 +8121,117 @@ function SettingsTab(p) {
       }
     }, n))));
   })));
+}
+
+// ═══════════════════ 全画面で作図するときの操作バー ═══════════════════
+// 通常表示の作図パネルをそのまま全画面に出すと、画面の半分近くを占めて
+// 肝心の地図が見えなくなる(説明文2行・大きなトグル・入力欄3つ・登録ボタン)。
+// 全画面のときは1行に畳み、圃場名などの入力は「登録」を押したときだけ
+// ポップアップで出す。地図を見ながら使う操作(頂点の追加・戻す・全消し)だけを残す。
+//
+// 作物名・地区の候補(datalist)はこの中に持つ。通常のパネルの中にある候補を
+// 参照すると、全画面ではそのパネルごと描画されないため候補が出なくなる。
+function DrawBarFull(p) {
+  const [nameOpen, setNameOpen] = React.useState(false);
+  const ready = p.drawPts.length >= 3 && !p.drawCrossed;
+  const iconBtn = (label, onClick, disabled, title) => /*#__PURE__*/React.createElement("button", {
+    onClick,
+    disabled: !!disabled,
+    title,
+    "aria-label": title,
+    style: {
+      ...S.drawBarBtn,
+      opacity: disabled ? 0.35 : 1
+    }
+  }, label);
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: S.drawBarFull
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.drawBarInfo,
+    className: "num"
+  }, p.drawPts.length, "点 ／ ", /*#__PURE__*/React.createElement("strong", null, fmt(p.drawArea, 2), " a"), p.drawCrossed ? /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#C74E36",
+      fontWeight: 800
+    }
+  }, " ⚠交差") : null),
+  // 交差しているときだけ出す。全画面には説明を置く余地がないので、
+  // 押せば直るボタンそのものを見せる
+  p.drawCrossed ? iconBtn("🔀 並び順", p.fixTwist, false, "頂点の並び順を直す") : null, iconBtn(p.addMode ? "✏ ON" : "🔒 OFF", () => p.changeAddMode(!p.addMode), false, p.addMode ? "地図をタップすると頂点が増えます" : "地図をタップしても頂点は増えません"), iconBtn("↩", p.undoPt, p.histLen === 0, "1つ戻す"), iconBtn("🗑", p.resetDrawState, p.drawPts.length === 0, "全消し"), iconBtn("✕", p.onCancel, false, "作図をやめる"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setNameOpen(true),
+    disabled: !ready,
+    style: {
+      ...S.drawBarSave,
+      opacity: ready ? 1 : 0.35
+    }
+  }, p.editing ? "✓ 保存" : "✓ 登録")), nameOpen && /*#__PURE__*/React.createElement("div", {
+    style: S.modalOverlay,
+    onClick: () => setNameOpen(false)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.modalBox,
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.listTitle
+  }, p.editing ? "圃場を保存" : "圃場を登録"), /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel,
+    className: "num"
+  }, "頂点 ", p.drawPts.length, "点 ／ 面積 ", fmt(p.drawArea, 2), " a"), /*#__PURE__*/React.createElement("input", {
+    value: p.newName,
+    placeholder: "圃場名 ※必須",
+    autoFocus: true,
+    onChange: e => p.setNewName(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 10
+    }
+  }), /*#__PURE__*/React.createElement("input", {
+    value: p.newCrop,
+    placeholder: "作物名(任意)",
+    list: "croplist-full",
+    onChange: e => p.setNewCrop(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 8
+    }
+  }), /*#__PURE__*/React.createElement("datalist", {
+    id: "croplist-full"
+  }, (p.crops || []).map(c => /*#__PURE__*/React.createElement("option", {
+    key: c,
+    value: c
+  }))), /*#__PURE__*/React.createElement("input", {
+    value: p.newZone,
+    placeholder: "地区(任意)",
+    list: "arealist-full",
+    onChange: e => p.setNewZone(e.target.value),
+    style: {
+      ...S.fieldInput,
+      marginTop: 8
+    }
+  }), /*#__PURE__*/React.createElement("datalist", {
+    id: "arealist-full"
+  }, (p.areas || []).map(a => /*#__PURE__*/React.createElement("option", {
+    key: a,
+    value: a
+  }))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      p.saveDraw();
+      setNameOpen(false);
+    },
+    disabled: !p.newName.trim(),
+    style: {
+      ...S.primaryBtn,
+      width: "100%",
+      marginTop: 14,
+      opacity: p.newName.trim() ? 1 : 0.4
+    }
+  }, p.editing ? "この圃場を保存(" : "この圃場を登録(", fmt(p.drawArea, 2), " a)"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setNameOpen(false),
+    style: {
+      ...S.smallSecondary,
+      width: "100%",
+      marginTop: 8
+    }
+  }, "地図に戻る"))));
 }
 
 // ═══════════════════ 進捗マップタブ ═══════════════════
@@ -9754,21 +9897,56 @@ const S = {
     background: "#dfe6da",
     padding: "0 0 env(safe-area-inset-bottom)"
   },
-  // 全画面のまま作図するときの操作パネル。地図の覆い(mapWrapFull, zIndex 900)より
-  // 前に出す。画面の半分強までにして、上半分は地図をタップできる状態を残す。
-  drawPanelFull: {
+  // 全画面のまま作図するときの操作バー。地図の覆い(mapWrapFull, zIndex 900)より
+  // 前に出す。高さは1行ぶんに抑え、地図をできるだけ広く残す。
+  drawBarFull: {
     position: "fixed",
     left: 0,
     right: 0,
     bottom: 0,
     zIndex: 920,
-    maxHeight: "58vh",
-    overflowY: "auto",
-    background: "rgba(255,255,255,0.97)",
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    flexWrap: "nowrap",
+    overflowX: "auto",
+    background: "rgba(255,255,255,0.96)",
     borderTop: "1.5px solid #D8E0D2",
-    borderRadius: "14px 14px 0 0",
-    padding: "12px 12px calc(14px + env(safe-area-inset-bottom))",
-    boxShadow: "0 -4px 18px rgba(0,0,0,0.22)"
+    padding: "8px 10px calc(8px + env(safe-area-inset-bottom))",
+    boxShadow: "0 -3px 14px rgba(0,0,0,0.2)"
+  },
+  drawBarInfo: {
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#1C2B21",
+    whiteSpace: "nowrap",
+    marginRight: 2
+  },
+  drawBarBtn: {
+    flexShrink: 0,
+    minWidth: 44,
+    padding: "10px 10px",
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#1C2B21",
+    background: "#fff",
+    border: "1.5px solid #D8E0D2",
+    borderRadius: 9,
+    cursor: "pointer",
+    whiteSpace: "nowrap"
+  },
+  drawBarSave: {
+    flexShrink: 0,
+    marginLeft: "auto",
+    padding: "10px 16px",
+    fontSize: 15,
+    fontWeight: 800,
+    color: "#fff",
+    background: "#2E7D4F",
+    border: "1.5px solid #1B5E36",
+    borderRadius: 9,
+    cursor: "pointer",
+    whiteSpace: "nowrap"
   },
   mapFullExit: {
     position: "fixed",
