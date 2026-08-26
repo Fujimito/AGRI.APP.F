@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.65";
+const APP_VERSION = "v8.66";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2973,8 +2973,9 @@ function App() {
     style: {
       // 1タブの幅は画面幅÷4。375pxの端末で 95px、320px なら 80px しかない。
       // 8文字を入れるには字を画面幅に合わせて縮める必要がある。
-      // 上限を 9.5px にしてあるので、幅のある端末で大きくなりすぎない。
-      fontSize: "clamp(8px, 2.55vw, 9.5px)",
+      // 上限は 13px。1タブの幅は180pxで止めてあるので、
+      // タブレットやノートPCではこの大きさがちょうど収まる。
+      fontSize: "clamp(8px, 2.55vw, 13px)",
       fontWeight: 700,
       lineHeight: 1.3,
       whiteSpace: "nowrap",
@@ -4560,15 +4561,23 @@ function WorkTab(p) {
     style: {
       display: "flex",
       alignItems: "center",
-      justifyContent: "space-between"
+      justifyContent: "space-between",
+      // 幅が足りなければボタンを下の行へ送る。
+      // 390px幅の端末で「印刷」が10px切れていた。
+      flexWrap: "wrap",
+      gap: 8
     },
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
+    style: {
+      ...S.cardLabel,
+      marginBottom: 0
+    }
   }, "記録(完了 ", history.length, "件)"), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
-      gap: 8
+      gap: 8,
+      flexWrap: "wrap"
     }
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setAgriOpen(true),
@@ -8745,9 +8754,20 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.65",
+    ver: "v8.66",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "📱 スマホ幅でカードの右端が切れていたのを直しました。360px幅の端末で本文が404pxの幅で置かれ、右の56pxが見えなくなっていました(v8.64 でタブバーを固定したときに入ったものです)。320・360・390・768・844・1024・1366px の7つの幅で、全タブはみ出し0件を実測しています",
+      "💻 タブレット横とノートPCで、本文の幅を広げました(640px → 900px以上の画面で760px、1280px以上で880px)。スマホは今までどおりです",
+      "📱 スマホを横にしたときなど、画面が低いときに見出しを小さくして本文を広く使うようにしました(844×390 で見出し 110px → 88px)",
+      "📋 作業タブの「記録」の行で、幅が足りないときに「印刷」ボタンが切れていたのを、下の行へ回るようにしました",
+      "💻 タブバーのボタンが幅の広い画面で間延びるのをやめ、中央に寄せて文字を読める大きさにしました",
+      "📱 画面の切り欠き(ノッチ)が左右にある端末を横向きで使ったとき、中身が切り欠きの下に入らないようにしました(実機未検証)"
+    ]
+  }, {
+    ver: "v8.65",
+    date: "2026-08",
     notes: ["🧭 地図タブに「🧭 北が上 ／ 🧭 進行方向」の切替を付けました。進行方向にすると、向いている向きが上になるよう地図ごと回ります(圃場名の札は文字が立ったままです)。iPhoneは初回に方位の利用許可を聞きます。方位を取れない端末では北が上のままになります", "🧭 進捗地図は北が上のままです(地図タブだけの機能です)"]
   }, {
     ver: "v8.64",
@@ -9937,8 +9957,10 @@ const S = {
     fontFamily: "'Hiragino Sans','Noto Sans JP',system-ui,sans-serif"
   },
   header: {
-    padding: "18px 16px 4px",
-    maxWidth: 640,
+    // 上下の余白は画面の高さに合わせる。
+    // スマホを横にすると高さが390pxしかなく、見出しだけで110px使っていた。
+    padding: "clamp(6px, 1.7vh, 18px) 16px 4px",
+    maxWidth: "var(--shell-w, 640px)",
     margin: "0 auto"
   },
   eyebrow: {
@@ -9948,13 +9970,15 @@ const S = {
     color: "#2E7D4F"
   },
   title: {
-    fontSize: 27,
+    // 画面が低いときだけ小さくする。幅ではなく高さで見るのは、
+    // 幅が足りないのではなく高さが足りないから。
+    fontSize: "clamp(19px, 3.4vh, 27px)",
     fontWeight: 800,
     margin: "2px 0 0",
     letterSpacing: "-0.01em"
   },
   main: {
-    maxWidth: 640,
+    maxWidth: "var(--shell-w, 640px)",
     margin: "0 auto",
     padding: "10px 12px 0",
     display: "flex",
@@ -10482,6 +10506,9 @@ const S = {
     // position:fixed をやめた。器(.app-shell)の一番下にいるので、
     // アドレスバーやキーボードで位置が動かない。
     display: "flex",
+    // 帯は画面いっぱいのまま、ボタンだけ中央に寄せる。
+    // 1366pxのノートPCだと4つのボタンが341pxずつになって間延びる。
+    justifyContent: "center",
     background: "#fff",
     borderTop: "1.5px solid #D8E0D2",
     paddingBottom: "env(safe-area-inset-bottom)",
@@ -10500,6 +10527,7 @@ const S = {
   },
   tabBtn: {
     flex: 1,
+    maxWidth: 180,
     display: "flex",
     flexDirection: "column",
     alignItems: "center",
