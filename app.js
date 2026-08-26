@@ -674,6 +674,10 @@ migrateSync();
 // ═══════════════════ メイン ═══════════════════
 function App() {
   const [tab, setTab] = useState("calc");
+  // navigator.onLine が無い環境(古いWebView)ではオンライン扱いにする。
+  // 分からないときに「オフライン」と出すと、実際には送れているのに
+  // 送れていないと思わせることになる。
+  const [online, setOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine !== false);
   // 地図タブは一度開いたら、他のタブへ移っても display:none で残しておく。
   // Googleマップは地図を作り直すたびに課金対象(Map load)になるため、タブを
   // 行き来するだけで回数が増えないようにする。無料地図でも再読み込みが減る。
@@ -2412,6 +2416,19 @@ function App() {
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
   }, [workDate]);
+
+  // 見た目の表示用。上の効果は「戻ったときに送る」ためのもので、
+  // 役割が違うので別に持つ。
+  useEffect(() => {
+    const up = () => setOnline(true);
+    const down = () => setOnline(false);
+    window.addEventListener("online", up);
+    window.addEventListener("offline", down);
+    return () => {
+      window.removeEventListener("online", up);
+      window.removeEventListener("offline", down);
+    };
+  }, []);
   return /*#__PURE__*/React.createElement("div", {
     style: S.page
   }, /*#__PURE__*/React.createElement("header", {
@@ -2437,13 +2454,51 @@ function App() {
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: S.versionTag
-  }, APP_VERSION), pendingCount > 0 && /*#__PURE__*/React.createElement("button", {
+  }, APP_VERSION))), /*#__PURE__*/React.createElement("div", {
+    // 接続状態とチームは見出しの下に1行で置く。バージョンの隣に積むと
+    // 右の列が広がって、タイトルが3行に折れる(実測 見出し128px)
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "flex-end",
+      columnGap: 6,
+      rowGap: 4,
+      flexWrap: "wrap",
+      marginTop: 8
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    // 電波の有無。圏外でもアプリは動くが、共有は止まる。
+    // 「送ったつもりで届いていない」を先に気づけるように常に出す。
+    // navigator.onLine は「網に繋がっているか」であって、
+    // 送信先に届くかどうかまでは分からない。
+    style: {
+      ...S.hdrChip,
+      background: online ? "#E6F2EA" : "#F6E4E0",
+      color: online ? "#1F6B43" : "#9A3B26",
+      borderColor: online ? "#BFDDCB" : "#E7C3BA"
+    },
+    title: online ? "電波あり。共有できます" : "圏外です。記録は端末に残り、電波が戻ってから送られます"
+  }, online ? "● オンライン" : "○ オフライン"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setTab("settings"),
+    style: {
+      ...S.hdrChip,
+      background: teamCode.trim() ? "#EAF1F6" : "#F4F1E2",
+      color: teamCode.trim() ? "#2A5F80" : "#7A6414",
+      borderColor: teamCode.trim() ? "#C6DAE7" : "#E2D8A9",
+      cursor: "pointer",
+      maxWidth: 140,
+      overflow: "hidden",
+      textOverflow: "ellipsis",
+      whiteSpace: "nowrap"
+    },
+    title: teamCode.trim() ? "この端末はチーム「" + teamCode.trim() + "」と共有しています" : "チームコードが未設定です。押すと設定を開きます"
+  }, teamCode.trim() ? "👥 " + teamCode.trim() : "👥 チーム未設定"), pendingCount > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setTab("work");
       syncPending();
     },
     style: S.headerBadge
-  }, syncing ? "送信中…" : "☁ " + dateLabel(workDate) + " 未送信 " + pendingCount + "件")))), chemWarnings.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, syncing ? "送信中…" : "☁ " + dateLabel(workDate) + " 未送信 " + pendingCount + "件"))), chemWarnings.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.warnBand,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("span", {
@@ -2616,7 +2671,7 @@ function App() {
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
     className: "no-print"
-  }, [["calc", "🧮", "調合"], ["work", "🚁", "作業"], ["map", "🗺", "地図"], ["settings", "⚙", "設定"]].map(t =>/*#__PURE__*/React.createElement("button", {
+  }, [["calc", "🧮", ["薬剤登録", "希釈計算"]], ["work", "🚁", ["作業予定", "進捗確認"]], ["map", "🗺", ["圃場登録", "圃場一覧"]], ["settings", "⚙", ["設定", ""]]].map(t =>/*#__PURE__*/React.createElement("button", {
     key: t[0],
     onClick: () => setTab(t[0]),
     style: {
@@ -2625,16 +2680,20 @@ function App() {
     }
   }, /*#__PURE__*/React.createElement("span", {
     style: {
-      fontSize: 22
+      fontSize: 20
     }
   }, t[1]), /*#__PURE__*/React.createElement("span", {
+    // 2行に分ける。1行に詰めると「薬剤登録・希釈計算」は
+    // スマホ幅(1タブ90px前後)に収まらず、文字が潰れるか横に溢れる
     style: {
-      fontSize: 11.5,
+      fontSize: 10.5,
       fontWeight: 700,
-      whiteSpace: "nowrap"
+      lineHeight: 1.25,
+      whiteSpace: "nowrap",
+      textAlign: "center"
     },
     className: "tab-label"
-  }, t[2])))));
+  }, t[2][0], t[2][1] && /*#__PURE__*/React.createElement("br", null), t[2][1])))));
 }
 
 // ═══════════════════ 調合計算タブ ═══════════════════
@@ -9677,6 +9736,14 @@ const S = {
     // 地図(Leafletは内部でz-index 400〜800を使う)より必ず上に出す。重なり順は
     // 地図=0 < タブバー=850 < ドラッグ中の札=900 < トースト=1000 < ポップアップ=1100
     zIndex: 850
+  },
+  hdrChip: {
+    fontSize: 11,
+    fontWeight: 800,
+    padding: "3px 8px",
+    borderRadius: 999,
+    border: "1.5px solid transparent",
+    lineHeight: 1.4
   },
   tabBtn: {
     flex: 1,
