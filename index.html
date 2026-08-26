@@ -79,11 +79,8 @@
   .leaflet-tooltip.field-label .fl-crop { font-weight:600; color:#D8E6DC; }
   .leaflet-tooltip.field-label .fl-area { display:block; font-weight:600; font-size:11px; color:#BFE3CD; line-height:1.2; }
   /* Googleマップ版の面積は別の札なので、名前の下へずらす */
-  .gm-field-area { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); transform: translateY(13px) rotate(var(--maprot, 0deg)); }
-  /* 「進行方向が上」で地図を回したとき、札の文字だけ逆に回して立てる。
-     --maprot は地図の入れ物(app.js の rotStyle)が入れる */
-  .gm-field-label { transform: rotate(var(--maprot, 0deg)); }
-  .leaflet-tooltip.field-label .fl-box { display: block; transform: rotate(var(--maprot, 0deg)); }
+  .gm-field-area { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); transform: translateY(13px); }
+  .leaflet-tooltip.field-label .fl-box { display: block; }
   /* Googleマップ版の札は背景を持てないので、縁取りで読ませる */
   .gm-field-label { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); }
   .vtx-icon { background:transparent; border:none; }

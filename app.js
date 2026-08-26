@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.66";
+const APP_VERSION = "v8.67";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -837,6 +837,17 @@ function App() {
   };
   const [gmapKey, setGmapKeyState] = useState(() => localStorage.getItem("tankmix:gmapkey") || "");
   const [gmapKeyInput, setGmapKeyInput] = useState(() => localStorage.getItem("tankmix:gmapkey") || "");
+  // ベクター地図のマップID。入っているときだけ、地図を指で回せるようになる。
+  // 空なら今までどおりのラスター地図(回転なし)。
+  const [gmapId, setGmapIdState] = useState(() => localStorage.getItem("tankmix:gmapid") || "");
+  const [gmapIdInput, setGmapIdInput] = useState(() => localStorage.getItem("tankmix:gmapid") || "");
+  const saveGmapId = v => {
+    const trimmed = (v || "").trim();
+    setGmapIdState(trimmed);
+    setGmapIdInput(trimmed);
+    localStorage.setItem("tankmix:gmapid", trimmed);
+    flash(trimmed ? "マップIDを保存しました。地図を開き直すと指で回せるようになります" : "マップIDを削除しました。回転なしの地図に戻ります");
+  };
   const setMapEngine = v => {
     setMapEngineState(v);
     localStorage.setItem("tankmix:mapengine", v);
@@ -2889,6 +2900,7 @@ function App() {
     fetchProgress,
     mapEngine,
     gmapKey,
+    gmapId,
     pullSec
   }), mapMounted && /*#__PURE__*/React.createElement("div", {
     style: tab === "map" ? undefined : {
@@ -2908,6 +2920,7 @@ function App() {
     flash,
     mapEngine,
     gmapKey,
+    gmapId,
     setTab,
     // 表示中かどうか。隠れている間は大きさを測れないので採寸を止め、
     // 戻ってきたときに測り直させる
@@ -2949,6 +2962,10 @@ function App() {
     gmapKeyInput,
     setGmapKeyInput,
     saveGmapKey,
+    gmapId,
+    gmapIdInput,
+    setGmapIdInput,
+    saveGmapId,
     seasonStart,
     setSeasonStart,
     eraseAllData,
@@ -3733,9 +3750,12 @@ function WorkTab(p) {
     recorder: p.recorder,
     areaUnitKey: p.areaUnitKey,
     fetchProgress: p.fetchProgress,
+    // v8.67: 散布済のチェックはこの地図が入り口になった
+    toggleDone: p.toggleDone,
     // 地図タブと同じエンジン設定を使う(無料地図 / Googleマップ)
     mapEngine: p.mapEngine,
     gmapKey: p.gmapKey,
+    gmapId: p.gmapId,
     pullSec: p.pullSec,
     active: true
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
@@ -4261,19 +4281,13 @@ function WorkTab(p) {
         ...S.checkBtn,
         ...(selected.includes(w.id) ? S.checkBtnOn : {})
       }
-    }, selected.includes(w.id) ? "✓" : "") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
-      onClick: () => p.toggleDone(w.id),
-      style: {
-        ...S.doneBox,
-        ...(w.reported ? S.doneBoxOn : {})
-      },
-      title: w.reported ? "散布済を取り消す" : "散布済にする",
-      "aria-label": w.reported ? "散布済を取り消す" : "散布済にする",
-      "aria-pressed": w.reported ? "true" : "false"
-    }, w.reported ? "✓" : ""), /*#__PURE__*/React.createElement("span", {
+    }, selected.includes(w.id) ? "✓" : "") : /*#__PURE__*/React.createElement("span", {
+      // v8.67 で行頭の散布済チェックを外した。
+      // チェックは「🚦 進捗地図」で圃場をタップして入れる。
+      // ここは実績入力だけに戻してある。
       style: S.orderNum,
       className: "num"
-    }, idx + 1)), /*#__PURE__*/React.createElement("div", {
+    }, idx + 1), /*#__PURE__*/React.createElement("div", {
       style: {
         minWidth: 0,
         flex: 1
@@ -6210,76 +6224,6 @@ const FIELD_COLOR = {
 // これをやらないと画面をスクロールしないと地図の下半分が見えない。
 // Google版・Leaflet版で手順が同じなので共通化してある。違うのは
 // 「大きさが変わった」と地図に伝える呼び出しだけなので resize で受け取る。
-// 端末の向き(方位)を読む。
-// iOS は webkitCompassHeading(真北基準、時計回り)を持つ。
-// Android は deviceorientationabsolute の alpha(反時計回り)を使う。
-// どちらも取れない端末があるので、取れないときは北が上のままにする。
-function useHeadingUp(flash) {
-  const [headUp, setHeadUp] = React.useState(false);
-  const [heading, setHeading] = React.useState(0);
-  const gotRef = React.useRef(false);
-  React.useEffect(() => {
-    if (!headUp) return;
-    gotRef.current = false;
-    const onDO = e => {
-      let h = null;
-      if (typeof e.webkitCompassHeading === "number") h = e.webkitCompassHeading;else if (e.absolute && typeof e.alpha === "number") h = 360 - e.alpha;
-      if (h === null || isNaN(h)) return;
-      gotRef.current = true;
-      // 1度未満の揺れで描き直さない。地図がぶるぶる震えるのを防ぐ
-      setHeading(prev => Math.abs(((h - prev + 540) % 360) - 180) < 2 ? prev : h);
-    };
-    window.addEventListener("deviceorientationabsolute", onDO, true);
-    window.addEventListener("deviceorientation", onDO, true);
-    const t = setTimeout(() => {
-      if (!gotRef.current && flash) flash("この端末では方位を取れませんでした。北が上のままになります");
-    }, 3000);
-    return () => {
-      clearTimeout(t);
-      window.removeEventListener("deviceorientationabsolute", onDO, true);
-      window.removeEventListener("deviceorientation", onDO, true);
-    };
-  }, [headUp]);
-  // iOS はタップの中で許可を求めないと方位をくれない
-  const toggleHeadUp = async () => {
-    if (headUp) {
-      setHeadUp(false);
-      setHeading(0);
-      return;
-    }
-    try {
-      const DOE = window.DeviceOrientationEvent;
-      if (DOE && typeof DOE.requestPermission === "function") {
-        const r = await DOE.requestPermission();
-        if (r !== "granted") {
-          flash && flash("方位の利用が許可されませんでした");
-          return;
-        }
-      }
-    } catch (e) {
-      // 許可を求められない環境。そのまま試す
-    }
-    setHeadUp(true);
-  };
-  // 地図の入れ物に当てる形。回した分だけ四隅が見えるので、
-  // 入れ物を対角線分(約142%)まで広げてから回す。
-  const rotStyle = headUp ? {
-    position: "absolute",
-    left: "50%",
-    top: "50%",
-    width: "142%",
-    height: "142%",
-    transform: "translate(-50%, -50%) rotate(" + -heading + "deg)",
-    "--maprot": heading + "deg"
-  } : null;
-  return {
-    headUp,
-    heading,
-    toggleHeadUp,
-    rotStyle
-  };
-}
-
 function useMapHeightFit(mapWrapRef, hidden, drawing, ready, fullMap, resize) {
   // resize は描画のたびに作り直される関数なので、依存配列には入れずrefで最新を見る
   const resizeRef = React.useRef(resize);
@@ -6491,12 +6435,6 @@ function GoogleMapTab(p) {
   };
   const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
-  // 進行方向が上の表示(地図をCSSで回す)
-  const {
-    headUp,
-    toggleHeadUp,
-    rotStyle
-  } = useHeadingUp(p.flash);
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
   const mapWrapRef = React.useRef(null); // 地図+凡例の枠。高さを実測して決める
   // 全画面のまま作図できる。作図パネルは全画面のとき、地図の上に
@@ -6656,6 +6594,14 @@ function GoogleMapTab(p) {
         center,
         zoom: z,
         mapTypeId: "hybrid",
+        // マップIDが入っているときだけベクター地図にする。
+        // ベクターにすると、指二本での回転と傾けが使える。
+        // この2つのオプションはベクター地図のときだけ効く(公式)。
+        ...(p.gmapId ? {
+          mapId: p.gmapId,
+          headingInteractionEnabled: true,
+          tiltInteractionEnabled: true
+        } : {}),
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: false,
@@ -7051,15 +6997,6 @@ function GoogleMapTab(p) {
   };
   // 一覧表示中と、他のタブを見ている間はどちらも display:none で隠れている
   const mapHidden = listOnly || p.active === false;
-  // 回転のON/OFFで入れ物の大きさが変わるので、地図に測り直させる
-  React.useEffect(() => {
-    const t = setTimeout(() => {
-      const m = mapRef.current;
-      if (!m) return;
-      if (m.invalidateSize) m.invalidateSize();else if (window.google && window.google.maps) window.google.maps.event.trigger(m, "resize");
-    }, 60);
-    return () => clearTimeout(t);
-  }, [headUp]);
   useMapHeightFit(mapWrapRef, mapHidden, drawing, ready, fullMap, () => {
     if (mapRef.current && window.google) window.google.maps.event.trigger(mapRef.current, "resize");
   });
@@ -7179,18 +7116,7 @@ function GoogleMapTab(p) {
         color: "#8a621f"
       } : {})
     }
-  }, mapType === "hybrid" ? "🗺 地図表示" : "📷 衛星写真"), /*#__PURE__*/React.createElement("button", {
-    onClick: toggleHeadUp,
-    style: {
-      ...S.smallSecondary,
-      ...(headUp ? {
-        background: "#EAF3FA",
-        borderColor: "#3B7EA1",
-        color: "#2b5a7a"
-      } : {})
-    },
-    title: headUp ? "向いている方向が上。押すと北が上に戻ります" : "北が上。押すと向いている方向が上になります"
-  }, headUp ? "🧭 進行方向" : "🧭 北が上"), !drawing ? /*#__PURE__*/React.createElement("button", {
+  }, mapType === "hybrid" ? "🗺 地図表示" : "📷 衛星写真"), !drawing ? /*#__PURE__*/React.createElement("button", {
     onClick: startDraw,
     style: S.smallPrimary
   }, "✏ 圃場を囲む") : /*#__PURE__*/React.createElement("button", {
@@ -7231,14 +7157,11 @@ function GoogleMapTab(p) {
     } : fullMap ? S.mapWrapFull : S.mapWrap
   }, /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
-    style: {
-      ...(fullMap ? {
-        ...S.mapBox,
-        borderRadius: 0,
-        border: "none"
-      } : S.mapBox),
-      ...(rotStyle || {})
-    },
+    style: fullMap ? {
+      ...S.mapBox,
+      borderRadius: 0,
+      border: "none"
+    } : S.mapBox,
     "data-map-box": ""
   }), fullMap && drawing && /*#__PURE__*/React.createElement("button", {
     // 作図中は下の帯を作図パネルが使うので、抜けるボタンは右上に出す。
@@ -7461,12 +7384,6 @@ function LeafletMapTab(p) {
   };
   const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
-  // 進行方向が上の表示(地図をCSSで回す)
-  const {
-    headUp,
-    toggleHeadUp,
-    rotStyle
-  } = useHeadingUp(p.flash);
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
   const mapWrapRef = React.useRef(null); // 地図+凡例の枠。高さを実測して決める
   // 全画面のまま作図できる。作図パネルは全画面のとき、地図の上に
@@ -7696,8 +7613,7 @@ function LeafletMapTab(p) {
         // 圃場名と面積を別の行にする。同じ行に並べると、
         // 名前に数字が入る圃場(「嘉島60」など)で面積と続きの数字に見える。
         // 名前は受け取った文字列でもあるので、必ずエスケープしてからHTMLに入れる。
-        // fl-box で包むのは、「進行方向が上」で地図ごと回したときに
-        // この中身だけ逆に回して文字を立てるため(CSS の --maprot)。
+        // fl-box で包むのは、名前と面積を一つの块にまとめるため。
         const labelText = '<span class="fl-box"><span class="fl-name">' + escapeHtml(f.name) + (f.crop ? '<span class="fl-crop"> / ' + escapeHtml(f.crop) + '</span>' : "") + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span></span>';
         poly.bindTooltip(labelText, {
           permanent: true,
@@ -7925,15 +7841,6 @@ function LeafletMapTab(p) {
 
   // 一覧表示中と、他のタブを見ている間はどちらも display:none で隠れている
   const mapHidden = listOnly || p.active === false;
-  // 回転のON/OFFで入れ物の大きさが変わるので、地図に測り直させる
-  React.useEffect(() => {
-    const t = setTimeout(() => {
-      const m = mapRef.current;
-      if (!m) return;
-      if (m.invalidateSize) m.invalidateSize();else if (window.google && window.google.maps) window.google.maps.event.trigger(m, "resize");
-    }, 60);
-    return () => clearTimeout(t);
-  }, [headUp]);
   useMapHeightFit(mapWrapRef, mapHidden, drawing, ready, fullMap, () => {
     if (mapRef.current) mapRef.current.invalidateSize();
   });
@@ -8043,18 +7950,7 @@ function LeafletMapTab(p) {
         color: "#8a621f"
       } : {})
     }
-  }, tileMode === "photo" ? "🗺 地図表示" : "📷 衛星写真"), /*#__PURE__*/React.createElement("button", {
-    onClick: toggleHeadUp,
-    style: {
-      ...S.smallSecondary,
-      ...(headUp ? {
-        background: "#EAF3FA",
-        borderColor: "#3B7EA1",
-        color: "#2b5a7a"
-      } : {})
-    },
-    title: headUp ? "向いている方向が上。押すと北が上に戻ります" : "北が上。押すと向いている方向が上になります"
-  }, headUp ? "🧭 進行方向" : "🧭 北が上"), !drawing ? /*#__PURE__*/React.createElement("button", {
+  }, tileMode === "photo" ? "🗺 地図表示" : "📷 衛星写真"), !drawing ? /*#__PURE__*/React.createElement("button", {
     onClick: startDraw,
     style: S.smallPrimary
   }, "✏ 圃場を囲む") : /*#__PURE__*/React.createElement("button", {
@@ -8076,14 +7972,11 @@ function LeafletMapTab(p) {
     } : fullMap ? S.mapWrapFull : S.mapWrap
   }, /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
-    style: {
-      ...(fullMap ? {
-        ...S.mapBox,
-        borderRadius: 0,
-        border: "none"
-      } : S.mapBox),
-      ...(rotStyle || {})
-    },
+    style: fullMap ? {
+      ...S.mapBox,
+      borderRadius: 0,
+      border: "none"
+    } : S.mapBox,
     "data-map-box": ""
   }), fullMap && drawing && /*#__PURE__*/React.createElement("button", {
     // 作図中は下の帯を作図パネルが使うので、抜けるボタンは右上に出す。
@@ -8655,7 +8548,44 @@ function SettingsTab(p) {
     }
   }, "✓ 保存済み"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "Google マップに切り替えると、地図タブで衛星写真と道路・地名を同時に表示できます。APIキーはこの端末の中にだけ保存され、ソースコード(GitHub)には一切含まれません。ただし地図を読み込むたびにGoogleのサーバーへは送信されるため、Google Cloud Consoleでドメイン制限(HTTPリファラー制限)を必ず設定してください。"))), /*#__PURE__*/React.createElement("section", {
+  }, "Google マップに切り替えると、地図タブで衛星写真と道路・地名を同時に表示できます。APIキーはこの端末の中にだけ保存され、ソースコード(GitHub)には一切含まれません。ただし地図を読み込むたびにGoogleのサーバーへは送信されるため、Google Cloud Consoleでドメイン制限(HTTPリファラー制限)を必ず設定してください。"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 16,
+      paddingTop: 14,
+      borderTop: "1px solid #E3E9DF"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "マップID(任意・地図を指で回したいとき)"), /*#__PURE__*/React.createElement("input", {
+    value: p.gmapIdInput,
+    onChange: e => p.setGmapIdInput(e.target.value),
+    placeholder: "例: 8f3a1b2c4d5e6f70",
+    style: {
+      ...S.fieldInput,
+      width: "100%",
+      marginTop: 6,
+      fontFamily: "monospace",
+      fontSize: 14
+    },
+    autoCapitalize: "off",
+    autoCorrect: "off",
+    autoComplete: "off",
+    spellCheck: false
+  }), /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.saveGmapId(p.gmapIdInput),
+    style: {
+      ...S.smallSecondary,
+      marginTop: 10
+    }
+  }, "💾 マップIDを保存"), p.gmapId && /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...S.smallLabel,
+      marginLeft: 10,
+      color: "#2E7D4F"
+    }
+  }, "✓ 保存済み"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "地図を指二本で回したいときだけ入れてください。Google Cloud Console の「マップの管理」でマップIDを新しく作り、種類に「ベクター」を選んで「回転」と「傾斜」を有効にしたものを貼り付けます(APIキーと同じプロジェクトで作ってください)。空のままなら今までどおりの地図で、回転はできません。※ 衛星写真をベクター地図で出したときの見え方はこちらでは未検証です。合わなければこの欄を空にして保存すれば戻ります。無料地図(国土地理院)側は回転に対応していません。")))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("散布タンク", openSec.tank, () => toggleSec("tank")), openSec.tank && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
     style: S.areaField
@@ -8754,9 +8684,18 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.66",
+    ver: "v8.67",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "🚦 散布済のチェックを「🚦 進捗地図」に移しました。地図で圃場をタップして「✓ 散布済にする」を押すとその場で緑に変わります。もう一度タップすれば「↩ 散布済を取り消す」。実散布量を入れてあるときだけ確認を出します",
+      "📋 作業一覧の行頭にあった散布済チェックを外し、一覧側は実績入力だけに戻しました。その日の作業に入っていない圃場は地図からチェックできません(圃場の追加はこれまでどおり作業一覧側です)",
+      "🗺 地図を指二本で回せるようにしました。⚙設定タブの地図の欄に「マップID」を追加しています。Google Cloud Console の「マップの管理」で種類「ベクター」のマップIDを作り、「回転」と「傾斜」を有効にして貼り付けてください(APIキーだけでは回せません)。空のままなら今までどおりです。※ 衛星写真をベクター地図で出したときの見え方はこちらでは未検証です",
+      "🧭 v8.65 の「🧭 進行方向」を外しました。地図の入れ物をCSSで回していただけで、Leaflet も Google も回転を知らないため、回した状態では地図を指で動かせませんでした(実測: 北が上なら右へ400pxで中央タイルが 5/27/12 → 5/26/12、90°回すと動かない)"
+    ]
+  }, {
+    ver: "v8.66",
+    date: "2026-08",
     notes: [
       "📱 スマホ幅でカードの右端が切れていたのを直しました。360px幅の端末で本文が404pxの幅で置かれ、右の56pxが見えなくなっていました(v8.64 でタブバーを固定したときに入ったものです)。320・360・390・768・844・1024・1366px の7つの幅で、全タブはみ出し0件を実測しています",
       "💻 タブレット横とノートPCで、本文の幅を広げました(640px → 900px以上の画面で760px、1280px以上で880px)。スマホは今までどおりです",
@@ -9480,6 +9419,14 @@ function ProgressGoogleCanvas(p) {
         },
         zoom: withPoly.length ? 16 : 5,
         mapTypeId: "hybrid",
+        // マップIDが入っているときだけベクター地図にする。
+        // ベクターにすると、指二本での回転と傾けが使える。
+        // この2つのオプションはベクター地図のときだけ効く(公式)。
+        ...(p.gmapId ? {
+          mapId: p.gmapId,
+          headingInteractionEnabled: true,
+          tiltInteractionEnabled: true
+        } : {}),
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: false,
@@ -9937,12 +9884,37 @@ function ProgressMapTab(p) {
       marginTop: 6
     },
     className: "num"
-  }, sel.st.sprayedL > 0 ? "実散布量 " + fmt(sel.st.sprayedL, 1) + " L／" : "", "入力者 ", sel.st.by || "(不明)", sel.st.at ? " ／ " + sel.st.at : ""), /*#__PURE__*/React.createElement("button", {
+  }, sel.st.sprayedL > 0 ? "実散布量 " + fmt(sel.st.sprayedL, 1) + " L／" : "", "入力者 ", sel.st.by || "(不明)", sel.st.at ? " ／ " + sel.st.at : ""), (() => {
+    // この日の作業に入っている場合だけ、ここで散布済を切り替えられる。
+    // 作業に入っていない圃場をここから追加はしない。
+    // 圃場の登録は作業一覧側の仕事のままにしてある。
+    const sw = (p.works || []).find(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
+    if (!sw) return /*#__PURE__*/React.createElement("p", {
+      style: {
+        ...S.smallLabel,
+        marginTop: 12
+      }
+    }, "この日の作業に入っていません。「📋 作業一覧」で圃場を追加すると、ここでチェックを入れられます。");
+    if (!p.toggleDone) return null;
+    return /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        // 取り消すと実散布量も消える。入れた値があるときだけ確かめる
+        if (sw.reported && parseFloat(sw.sprayedL) > 0 && !confirm("「" + sel.field.name + "」の散布済を取り消します。\n入力済みの実散布量 " + fmt(parseFloat(sw.sprayedL), 1) + " L も消えます。よろしいですか？")) return;
+        p.toggleDone(sw.id);
+        setSel(null);
+      },
+      style: {
+        ...(sw.reported ? S.secondaryBtn : S.primaryBtn),
+        width: "100%",
+        marginTop: 14
+      }
+    }, sw.reported ? "↩ 散布済を取り消す" : "✓ 散布済にする");
+  })(), /*#__PURE__*/React.createElement("button", {
     onClick: () => setSel(null),
     style: {
       ...S.smallSecondary,
       width: "100%",
-      marginTop: 14
+      marginTop: 8
     }
   }, "閉じる"))));
 }
@@ -11162,9 +11134,6 @@ const S = {
     display: "flex",
     flexDirection: "column",
     width: "100%",
-    // 「進行方向が上」では中の地図を回す。回した分はここで切る
-    position: "relative",
-    overflow: "hidden",
     minHeight: 280 // 高さは実測して JS が入れる。ここは測る前の初期値
   },
   // 全画面。タブバー(850)より上に出し、地図だけを見せる
