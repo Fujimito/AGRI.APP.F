@@ -2397,7 +2397,9 @@ function App() {
     flash,
     // 進捗地図(作業タブの「🚦 進捗地図」表示)に渡す
     recorder,
-    fetchProgress
+    fetchProgress,
+    mapEngine,
+    gmapKey
   }), tab === "preset" &&/*#__PURE__*/React.createElement(PresetTab, {
     fields,
     upsertField,
@@ -3186,6 +3188,9 @@ function WorkTab(p) {
     recorder: p.recorder,
     areaUnitKey: p.areaUnitKey,
     fetchProgress: p.fetchProgress,
+    // 地図タブと同じエンジン設定を使う(無料地図 / Googleマップ)
+    mapEngine: p.mapEngine,
+    gmapKey: p.gmapKey,
     active: true
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card,
@@ -8361,16 +8366,300 @@ const toMapStatus = st => st === "done" || st === "local" ? "done" : "planned";
 // 進捗地図を開いている間の自動取得の間隔。短くするほど他の端末の実績が早く
 // 映るが、そのぶんGASの実行回数と通信量が増える。45秒は未計測の暫定値。
 const AUTO_REFRESH_MS = 45000;
+// 圃場名の札を出しはじめる倍率。Leaflet版とGoogle版で揃える
+const PROGRESS_LABEL_MIN_ZOOM = 15;
 
-function ProgressMapTab(p) {
-  const mapRef = React.useRef(null);
+// ── 進捗地図の中身(Leaflet版) ──
+// 見出し・凡例・件数は親(ProgressMapTab)が持ち、ここは地図そのものだけを描く。
+// 地図タブと同じく、無料地図(Leaflet)とGoogleマップを設定で切り替えられる。
+// 親とは apiRef({ resize, fit })でやり取りする。地図の実体はライブラリごとに
+// 別物なので、共通の関数名だけを約束して中身は各自が持つ。
+function ProgressLeafletCanvas(p) {
   const containerRef = React.useRef(null);
+  const mapRef = React.useRef(null);
   const layerRef = React.useRef(null);
-  const mapWrapRef = React.useRef(null);
-  const fittedRef = React.useRef(false); // 最初の1回だけ、その日の圃場が入るように寄せる
   const fitRef = React.useRef([]); // 直近に描いた「その日の圃場」のポリゴン
+  const fittedRef = React.useRef(false); // 最初の1回だけ自動で寄せる
   const [ready, setReady] = React.useState(false);
   const [zoom, setZoom] = React.useState(15);
+
+  const fit = () => {
+    const L = window.L;
+    const pts = (fitRef.current || []).flat();
+    if (!L || !mapRef.current || pts.length === 0) return;
+    try {
+      mapRef.current.fitBounds(L.latLngBounds(pts), {
+        padding: [24, 24],
+        maxZoom: 17
+      });
+    } catch (e) {
+      // 座標が壊れている圃場が混ざっている場合。表示位置だけの話なので
+      // ここで落とさず、今の表示のままにする
+    }
+  };
+
+  React.useEffect(() => {
+    if (!window.L || !containerRef.current || mapRef.current) return;
+    const L = window.L;
+    const withPoly = (p.fields || []).filter(f => f.center);
+    const map = L.map(containerRef.current, {
+      zoomControl: true,
+      attributionControl: true,
+      maxZoom: 21
+    }).setView(withPoly.length ? withPoly[0].center : [35.0, 137.0], withPoly.length ? 16 : 5);
+    // タイルは地図タブと同じ国土地理院タイル(出典表示も同じ)。
+    // 進捗地図のためだけに別の配信元を足さない
+    L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg", {
+      attribution: "地理院タイル",
+      maxZoom: 21,
+      maxNativeZoom: 18
+    }).addTo(map);
+    layerRef.current = L.layerGroup().addTo(map);
+    map.on("zoomend", () => setZoom(map.getZoom()));
+    mapRef.current = map;
+    setZoom(map.getZoom());
+    setReady(true);
+    setTimeout(() => map.invalidateSize(), 200);
+    if (p.apiRef) p.apiRef.current = {
+      resize: () => mapRef.current && mapRef.current.invalidateSize(),
+      fit
+    };
+    return () => {
+      map.remove();
+      mapRef.current = null;
+      if (p.apiRef) p.apiRef.current = null;
+    };
+  }, []);
+
+  // 「⊙ 今日の圃場へ」。親が数字を1つ増やして知らせる
+  React.useEffect(() => {
+    if (p.fitSeq) fit();
+  }, [p.fitSeq]);
+
+  React.useEffect(() => {
+    if (!ready || !window.L || !layerRef.current) return;
+    const L = window.L;
+    const grp = layerRef.current;
+    grp.clearLayers();
+    const showLabel = zoom >= PROGRESS_LABEL_MIN_ZOOM;
+    // 寄せる範囲は「その日の作業に入っている圃場」だけにする。登録済みの
+    // 全圃場で寄せると、遠くに1枚でも登録があるだけで地図が県単位まで
+    // 引いてしまい、今日の圃場が点にしか見えなくなる。
+    const targetBounds = [];
+    (p.fields || []).forEach(f => {
+      if (!f.polygon || f.polygon.length < 3) return;
+      // キーは文字列で統一(statusByField 側と揃える)。数値と文字列が混ざると
+      // 突き合わせに失敗して、作業に入っている圃場まで対象外(灰)になる
+      const st = p.statusByField.get(String(f.id));
+      const key = st ? st.status : "none";
+      if (p.onlyTarget && key === "none") return;
+      const c = PROGRESS_STATES[key] || PROGRESS_STATES.none;
+      const poly = L.polygon(f.polygon, {
+        color: c.stroke,
+        weight: key === "none" ? 1.5 : 3,
+        fillColor: c.fill,
+        fillOpacity: key === "none" ? 0.15 : 0.55
+      }).addTo(grp);
+      if (key !== "none") targetBounds.push(f.polygon);
+      if (showLabel) {
+        // 圃場名は他の端末から受け取った文字列でもあるので、必ずエスケープしてから
+        // 札のHTMLに入れる(そのまま入れるとXSSになる)
+        poly.bindTooltip(escapeHtml((c.mark ? c.mark + " " : "") + f.name), {
+          permanent: true,
+          direction: "center",
+          className: "field-label"
+        });
+      }
+      poly.on("click", () => p.onSelect({
+        field: f,
+        st: st || null
+      }));
+    });
+    fitRef.current = targetBounds;
+    // 初回だけ自動で寄せる。以後は動かさない(見ている場所が勝手に飛ぶため)。
+    // 地図の高さは表示後に実測して入るので、まだ大きさが入っていないうちに
+    // 寄せると倍率がでたらめになる。大きさが入るまでは寄せずに待つ。
+    if (!fittedRef.current && targetBounds.length && mapRef.current.getSize().y > 80) {
+      fittedRef.current = true;
+      fit();
+    }
+  }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget]);
+
+  return /*#__PURE__*/React.createElement("div", {
+    ref: containerRef,
+    style: p.style,
+    "data-map-box": ""
+  });
+}
+
+// ── 進捗地図の中身(Googleマップ版) ──
+// ★Googleマップは地図を作るたびに課金対象(Map load)になる。地図タブとは別の
+//   地図なので、作業タブで進捗地図を開くとそのぶん回数が増える。無料地図
+//   (Leaflet)のままなら増えない。設定タブで選べる。
+function ProgressGoogleCanvas(p) {
+  const containerRef = React.useRef(null);
+  const mapRef = React.useRef(null);
+  const overlaysRef = React.useRef([]);
+  const fitRef = React.useRef([]);
+  const fittedRef = React.useRef(false);
+  const [ready, setReady] = React.useState(false);
+  const [zoom, setZoom] = React.useState(15);
+  const [loadErr, setLoadErr] = React.useState(false);
+
+  const fit = () => {
+    const g = window.google && window.google.maps;
+    const pts = (fitRef.current || []).flat();
+    if (!g || !mapRef.current || pts.length === 0) return;
+    try {
+      const b = new g.LatLngBounds();
+      pts.forEach(pt => b.extend({
+        lat: pt[0],
+        lng: pt[1]
+      }));
+      mapRef.current.fitBounds(b, 24);
+    } catch (e) {
+      // 座標が壊れている圃場が混ざっている場合。表示位置だけの話なので
+      // ここで落とさず、今の表示のままにする
+    }
+  };
+
+  React.useEffect(() => {
+    let cancelled = false;
+    loadGoogleMaps(p.gmapKey).then(() => {
+      if (cancelled || !containerRef.current || mapRef.current) return;
+      const g = window.google.maps;
+      const withPoly = (p.fields || []).filter(f => f.center);
+      const map = new g.Map(containerRef.current, {
+        center: withPoly.length ? {
+          lat: withPoly[0].center[0],
+          lng: withPoly[0].center[1]
+        } : {
+          lat: 35.0,
+          lng: 137.0
+        },
+        zoom: withPoly.length ? 16 : 5,
+        mapTypeId: "hybrid",
+        mapTypeControl: false,
+        streetViewControl: false,
+        fullscreenControl: false,
+        // 進捗を見るだけの地図なので、作図で要る細かい操作は載せない
+        clickableIcons: false
+      });
+      map.addListener("zoom_changed", () => setZoom(map.getZoom()));
+      mapRef.current = map;
+      setZoom(map.getZoom());
+      setReady(true);
+      if (p.apiRef) p.apiRef.current = {
+        resize: () => {
+          if (mapRef.current && window.google) window.google.maps.event.trigger(mapRef.current, "resize");
+        },
+        fit
+      };
+    }).catch(() => {
+      if (!cancelled) setLoadErr(true);
+    });
+    return () => {
+      cancelled = true;
+      overlaysRef.current.forEach(o => o.setMap && o.setMap(null));
+      overlaysRef.current = [];
+      mapRef.current = null;
+      if (p.apiRef) p.apiRef.current = null;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (p.fitSeq) fit();
+  }, [p.fitSeq]);
+
+  React.useEffect(() => {
+    if (!ready || !mapRef.current || !window.google) return;
+    const g = window.google.maps;
+    overlaysRef.current.forEach(o => o.setMap && o.setMap(null));
+    overlaysRef.current = [];
+    const showLabel = zoom >= PROGRESS_LABEL_MIN_ZOOM;
+    const targetBounds = [];
+    (p.fields || []).forEach(f => {
+      if (!f.polygon || f.polygon.length < 3) return;
+      const st = p.statusByField.get(String(f.id));
+      const key = st ? st.status : "none";
+      if (p.onlyTarget && key === "none") return;
+      const c = PROGRESS_STATES[key] || PROGRESS_STATES.none;
+      const poly = new g.Polygon({
+        paths: f.polygon.map(pt => ({
+          lat: pt[0],
+          lng: pt[1]
+        })),
+        strokeColor: c.stroke,
+        strokeWeight: key === "none" ? 1.5 : 3,
+        fillColor: c.fill,
+        fillOpacity: key === "none" ? 0.15 : 0.55,
+        map: mapRef.current,
+        clickable: true
+      });
+      poly.addListener("click", () => p.onSelect({
+        field: f,
+        st: st || null
+      }));
+      overlaysRef.current.push(poly);
+      if (key !== "none") targetBounds.push(f.polygon);
+      if (showLabel) {
+        const ctr = f.center || polygonCenter(f.polygon);
+        // 透明アイコン+ラベルだけのマーカー。Googleマップ側は文字列として
+        // 扱うのでHTMLにはならない(Leaflet側のエスケープに当たる処理は不要)
+        const label = new g.Marker({
+          position: {
+            lat: ctr[0],
+            lng: ctr[1]
+          },
+          map: mapRef.current,
+          icon: {
+            path: 0,
+            scale: 0
+          },
+          label: {
+            text: (c.mark ? c.mark + " " : "") + f.name,
+            color: "#fff",
+            fontSize: "12px",
+            fontWeight: "700",
+            className: "gm-field-label"
+          }
+        });
+        overlaysRef.current.push(label);
+      }
+    });
+    fitRef.current = targetBounds;
+    if (!fittedRef.current && targetBounds.length) {
+      fittedRef.current = true;
+      fit();
+    }
+  }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget]);
+
+  if (loadErr) {
+    return /*#__PURE__*/React.createElement("div", {
+      style: {
+        ...p.style,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: 16,
+        textAlign: "center"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: S.empty
+    }, "Googleマップを読み込めませんでした。APIキーと電波を確かめてください。"));
+  }
+  return /*#__PURE__*/React.createElement("div", {
+    ref: containerRef,
+    style: p.style,
+    "data-map-box": ""
+  });
+}
+
+function ProgressMapTab(p) {
+  const mapWrapRef = React.useRef(null);
+  // 地図の実体(Leaflet/Google)とのやり取り口。{ resize, fit } を子が入れる
+  const apiRef = React.useRef(null);
+  const [fitSeq, setFitSeq] = React.useState(0);
   const [fullMap, setFullMap] = React.useState(false);
   // 既定は全部出す。周りの圃場が見えていないと、どこを見ているのか分からなくなるため。
   // 圃場が多くて対象が埋もれるときのために、絞り込めるようにしてある。
@@ -8386,29 +8675,17 @@ function ProgressMapTab(p) {
     from: "",
     to: ""
   }));
-  const LABEL_MIN_ZOOM = 15;
-
-  // その日の作業に入っている圃場が全部入るところまで寄せる。
-  // ボタンからも呼ぶ(見失ったときに戻る手段がないと、指で探すしかない)
-  const fitToTargets = () => {
-    const L = window.L;
-    const pts = (fitRef.current || []).flat();
-    if (!L || !mapRef.current || pts.length === 0) return;
-    try {
-      mapRef.current.fitBounds(L.latLngBounds(pts), {
-        padding: [24, 24],
-        maxZoom: 17
-      });
-    } catch (e) {
-      // 座標が壊れている圃場が混ざっている場合。表示位置だけの話なので
-      // ここで落とさず、今の表示のままにする
-    }
-  };
+  // 「⊙ 今日の圃場へ」。地図の実体は子が持っているので、数字を1つ増やして頼む
+  const fitToTargets = () => setFitSeq(n => n + 1);
 
   // 期間は選ばせない。見たいのは「作業タブで選んでいる日の圃場が済んだかどうか」で、
   // 日付を別に選べると作業タブと食い違って、どちらが本当か分からなくなる。
   const from = p.workDate;
   const to = p.workDate;
+  // 地図エンジンは地図タブと共通の設定を使う。進捗地図だけ別の地図にすると
+  // 見え方がタブごとに変わって混乱する。Googleを選んでいてAPIキーがないときは
+  // 地図を出せないので、地図タブと同じ案内を出す。
+  const useGoogle = p.mapEngine === "google";
 
   const refresh = async () => {
     if (loading) return;
@@ -8511,88 +8788,8 @@ function ProgressMapTab(p) {
     return c;
   }, [statusByField, p.fields]);
 
-  // ── 地図の初期化(1回だけ) ──
-  React.useEffect(() => {
-    if (!window.L || !containerRef.current || mapRef.current) return;
-    const L = window.L;
-    const withPoly = (p.fields || []).filter(f => f.center);
-    const map = L.map(containerRef.current, {
-      zoomControl: true,
-      attributionControl: true,
-      maxZoom: 21
-    }).setView(withPoly.length ? withPoly[0].center : [35.0, 137.0], withPoly.length ? 16 : 5);
-    // タイルは地図タブと同じ国土地理院タイル(出典表示も同じ)。
-    // 進捗マップのためだけに別の配信元を足さない
-    L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg", {
-      attribution: "地理院タイル",
-      maxZoom: 21,
-      maxNativeZoom: 18
-    }).addTo(map);
-    layerRef.current = L.layerGroup().addTo(map);
-    map.on("zoomend", () => setZoom(map.getZoom()));
-    mapRef.current = map;
-    setZoom(map.getZoom());
-    setReady(true);
-    setTimeout(() => map.invalidateSize(), 200);
-    return () => {
-      map.remove();
-      mapRef.current = null;
-    };
-  }, []);
-
-  useMapHeightFit(mapWrapRef, !p.active, false, ready, fullMap, () => {
-    if (mapRef.current) mapRef.current.invalidateSize();
-  });
-
-  // ── ポリゴンの塗り分け ──
-  React.useEffect(() => {
-    if (!ready || !window.L || !layerRef.current) return;
-    const L = window.L;
-    const grp = layerRef.current;
-    grp.clearLayers();
-    const showLabel = zoom >= LABEL_MIN_ZOOM;
-    // 寄せる範囲は「その日の作業に入っている圃場」だけにする。登録済みの
-    // 全圃場で寄せると、遠くに1枚でも登録があるだけで地図が県単位まで
-    // 引いてしまい、今日の圃場が点にしか見えなくなる。
-    const targetBounds = [];
-    (p.fields || []).forEach(f => {
-      if (!f.polygon || f.polygon.length < 3) return;
-      // キーは文字列で統一(statusByField 側と揃える)。数値と文字列が混ざると
-      // 突き合わせに失敗して、作業に入っている圃場まで対象外(灰)になる
-      const st = statusByField.get(String(f.id));
-      const key = st ? st.status : "none";
-      if (onlyTarget && key === "none") return;
-      const c = PROGRESS_STATES[key] || PROGRESS_STATES.none;
-      const poly = L.polygon(f.polygon, {
-        color: c.stroke,
-        weight: key === "none" ? 1.5 : 3,
-        fillColor: c.fill,
-        fillOpacity: key === "none" ? 0.15 : 0.55
-      }).addTo(grp);
-      if (key !== "none") targetBounds.push(f.polygon);
-      if (showLabel) {
-        // 圃場名は他の端末から受け取った文字列でもあるので、必ずエスケープしてから
-        // 札のHTMLに入れる(そのまま入れるとXSSになる)
-        poly.bindTooltip(escapeHtml((c.mark ? c.mark + " " : "") + f.name), {
-          permanent: true,
-          direction: "center",
-          className: "field-label"
-        });
-      }
-      poly.on("click", () => setSel({
-        field: f,
-        st: st || null
-      }));
-    });
-    fitRef.current = targetBounds;
-    // 初回だけ自動で寄せる。以後は動かさない(見ている場所が勝手に飛ぶため)。
-    // 地図の高さは表示後に実測して入るので、まだ大きさが入っていないうちに
-    // 寄せると倍率がでたらめになる。大きさが入るまでは寄せずに待つ。
-    if (!fittedRef.current && targetBounds.length && mapRef.current.getSize().y > 80) {
-      fittedRef.current = true;
-      fitToTargets();
-    }
-  }, [ready, p.fields, statusByField, zoom, onlyTarget]);
+  // 地図の初期化・塗り分け・寄せはすべて子(ProgressLeafletCanvas /
+  // ProgressGoogleCanvas)が持つ。ここは取得した状態と見出しだけを扱う。
 
   const legend = /*#__PURE__*/React.createElement("div", {
     style: {
@@ -8692,19 +8889,29 @@ function ProgressMapTab(p) {
       marginTop: 8,
       fontWeight: 700
     }
-  }, err), legend), !window.L && /*#__PURE__*/React.createElement("p", {
+  }, err), legend), useGoogle && !p.gmapKey && /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "Googleマップを使うにはAPIキーの設定が必要です。設定タブで入力してください。"), !useGoogle && !window.L && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "地図ライブラリを読み込めませんでした。オンラインで開き直してください。"), /*#__PURE__*/React.createElement("div", {
     ref: mapWrapRef,
     style: fullMap ? S.mapWrapFull : S.mapWrap
-  }, /*#__PURE__*/React.createElement("div", {
-    ref: containerRef,
+  }, /*#__PURE__*/React.createElement(useGoogle && p.gmapKey ? ProgressGoogleCanvas : ProgressLeafletCanvas, {
+    // 地図の実体を入れ替える。key を分けておかないと、設定を切り替えたとき
+    // React が同じ位置のコンポーネントとして使い回し、前の地図のDOMが残る
+    key: useGoogle && p.gmapKey ? "google" : "leaflet",
+    fields: p.fields,
+    statusByField,
+    onlyTarget,
+    onSelect: setSel,
+    apiRef,
+    fitSeq,
+    gmapKey: p.gmapKey,
     style: fullMap ? {
       ...S.mapBox,
       borderRadius: 0,
       border: "none"
-    } : S.mapBox,
-    "data-map-box": ""
+    } : S.mapBox
   }), fullMap ? /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(false),
     style: S.mapFullExit
