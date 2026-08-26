@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.63";
+const APP_VERSION = "v8.64";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2711,7 +2711,8 @@ function App() {
     };
   }, []);
   return /*#__PURE__*/React.createElement("div", {
-    style: S.page
+    style: S.page,
+    className: "app-shell"
   }, /*#__PURE__*/React.createElement("header", {
     style: S.header,
     className: "no-print"
@@ -3024,6 +3025,12 @@ function CalcTab(p) {
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, pickFor !== null && /*#__PURE__*/React.createElement(ChemPickModal, {
     chemMaster: p.chemMaster,
     onPick: onPick,
+    // 新しい行を足すときだけ「手入力で追加」を出す。
+    // 既存の行を差し替えるときは、その行に直接打てば済む
+    onBlank: pickFor === "new" ? () => {
+      p.addChem();
+      setPickFor(null);
+    } : null,
     onCancel: () => setPickFor(null)
   }), /*#__PURE__*/React.createElement("section", {
     style: S.card
@@ -3197,18 +3204,16 @@ function CalcTab(p) {
       marginTop: 10
     }
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: p.addChem,
-    style: {
-      ...S.addBtn,
-      marginTop: 0
-    }
-  }, "＋ 薬剤を追加"), /*#__PURE__*/React.createElement("button", {
+    // 追加の口は1つだけ。押すと登録済みの一覧が出て、
+    // その中に「手入力で追加」もある。
+    // 2つ並べていた頃は、どちらを押せばよいのか分からなかった。
     onClick: () => setPickFor("new"),
     style: {
       ...S.addBtn,
-      marginTop: 0
+      marginTop: 0,
+      gridColumn: "1 / -1"
     }
-  }, "📋 登録薬剤から追加"))), /*#__PURE__*/React.createElement("section", {
+  }, "＋ 薬剤を追加"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -4787,9 +4792,9 @@ function ChemPickModal(p) {
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "登録済みの薬剤から選ぶ"), p.chemMaster.length === 0 ? /*#__PURE__*/React.createElement("p", {
+  }, "薬剤を追加"), p.chemMaster.length === 0 ? /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "まだ薬剤が登録されていません。", /*#__PURE__*/React.createElement("br", null), "データベースタブの🧪薬剤で登録してください。") : /*#__PURE__*/React.createElement(React.Fragment, null, p.chemMaster.length > 4 && /*#__PURE__*/React.createElement("input", {
+  }, "まだ薬剤が登録されていません。", /*#__PURE__*/React.createElement("br", null), "上の「🧪 薬剤・プリセット」で登録するか、下の「手入力で追加」からどうぞ。") : /*#__PURE__*/React.createElement(React.Fragment, null, p.chemMaster.length > 4 && /*#__PURE__*/React.createElement("input", {
     value: q,
     placeholder: "🔍 薬剤名・種類で検索",
     onChange: e => setQ(e.target.value),
@@ -4813,12 +4818,22 @@ function ChemPickModal(p) {
     style: S.listTitle
   }, c.name), /*#__PURE__*/React.createElement("div", {
     style: S.listSub
-  }, useLabel(c.use), "・", formLabel(c.form)))))), /*#__PURE__*/React.createElement("button", {
-    onClick: p.onCancel,
+  }, useLabel(c.use), "・", formLabel(c.form)))))), p.onBlank && /*#__PURE__*/React.createElement("button", {
+    // 登録していない薬剤をその場で打ちたいときの道。
+    // v8.63まではこれが別のボタン(「＋ 薬剤を追加」)として
+    // 並んでいて、どちらを押せばよいのか分からなかった。
+    onClick: p.onBlank,
     style: {
       ...S.secondaryBtn,
       width: "100%",
       marginTop: 14
+    }
+  }, "✎ 手入力で追加"), /*#__PURE__*/React.createElement("button", {
+    onClick: p.onCancel,
+    style: {
+      ...S.smallSecondary,
+      width: "100%",
+      marginTop: 8
     }
   }, "閉じる")));
 }
@@ -6204,16 +6219,21 @@ function useMapHeightFit(mapWrapRef, hidden, drawing, ready, fullMap, resize) {
         resizeRef.current();
         return;
       }
-      let h = window.innerHeight - el.getBoundingClientRect().top - navH - 14;
-      // 画面がスクロールされていると上端が負になりうるので上限で抑える
-      h = Math.min(h, window.innerHeight - navH - 60);
+      // v8.64 で器(.app-shell)の中を main だけスクロールさせる形にした。
+      // 地図に使える高さは「main の下端 − 地図の上端」。
+      // window.innerHeight で測るとタブバーの分だけ長く出る。
+      const mainEl = el.closest ? el.closest("main") : null;
+      const bottom = mainEl ? mainEl.getBoundingClientRect().bottom : window.innerHeight - navH;
+      let h = bottom - el.getBoundingClientRect().top - 14;
+      h = Math.min(h, (mainEl ? mainEl.clientHeight : window.innerHeight - navH) - 60);
       // 作図中は下の操作パネルに手が届くよう、画面の半分ほどに抑える
       if (drawing) h = Math.min(h, Math.round(window.innerHeight * 0.5));
       el.style.height = Math.max(240, h) + "px";
       // カードの下余白などで1画面に収まらないぶんを実測して詰める。
       // ここまでやらないと数十pxだけ縦スクロールが残る
       if (!drawing) {
-        const over = document.documentElement.scrollHeight - window.innerHeight;
+        const box = mainEl || document.documentElement;
+        const over = box.scrollHeight - box.clientHeight;
         if (over > 0) el.style.height = Math.max(240, h - over) + "px";
       }
       resizeRef.current();
@@ -6675,7 +6695,10 @@ function GoogleMapTab(p) {
         fieldOverlaysRef.current.push(areaLabel);
       }
     });
-  }, [ready, p.fields, zoom, hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
+    // 拡大縮小のたびに全部の圃場を描き直すと、圃場が多い端末でカクツく。
+    // zoom を使っているのは「札を出すかどうか」だけなので、
+    // しきい値をまたいだときだけ描き直す。
+  }, [ready, p.fields, zoom >= LABEL_MIN_ZOOM, hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
 
   // 作図中の頂点・線を再描画
   React.useEffect(() => {
@@ -7029,9 +7052,14 @@ function GoogleMapTab(p) {
       ...(listOnly ? S.segOn : {})
     }
   }, "📋 圃場一覧")), /*#__PURE__*/React.createElement("div", {
+    // 幅の狭い端末では折り返す。375px だと
+    // 「✏ 圃場を囲む」が画面の右外(実測 433px)へ出ていた。
     style: {
       display: "flex",
-      gap: 8
+      gap: 8,
+      flexWrap: "wrap",
+      justifyContent: "flex-end",
+      minWidth: 0
     }
   }, !listOnly && /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(true),
@@ -7565,7 +7593,10 @@ function LeafletMapTab(p) {
         startEditPoly(f);
       });
     });
-  }, [ready, p.fields, zoom, hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
+    // 拡大縮小のたびに全部の圃場を描き直すと、圃場が多い端末でカクツく。
+    // zoom を使っているのは「札を出すかどうか」だけなので、
+    // しきい値をまたいだときだけ描き直す。
+  }, [ready, p.fields, zoom >= LABEL_MIN_ZOOM, hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
 
   // 作図中ポリゴンの再描画
   React.useEffect(() => {
@@ -7854,9 +7885,14 @@ function LeafletMapTab(p) {
       ...(listOnly ? S.segOn : {})
     }
   }, "📋 圃場一覧")), /*#__PURE__*/React.createElement("div", {
+    // 幅の狭い端末では折り返す。375px だと
+    // 「✏ 圃場を囲む」が画面の右外(実測 433px)へ出ていた。
     style: {
       display: "flex",
-      gap: 8
+      gap: 8,
+      flexWrap: "wrap",
+      justifyContent: "flex-end",
+      minWidth: 0
     }
   }, !listOnly && /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(true),
@@ -8579,9 +8615,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.63",
+    ver: "v8.64",
     date: "2026-08",
     isNew: true,
+    notes: ["📱 タブバーが画面に固定されず動く件を直しました。画面の高さぴったりの器を作り、中身だけをスクロールさせる形にしています。アドレスバーの出入りやキーボードでタブバーが上下に動かなくなります(特にタブレット)", "📱 地図タブの操作ボタンが幅の狭い端末で画面の右外へ出ていたのを、折り返すようにしました(375pxで「✏ 圃場を囲む」が 433px の位置にあったのを実測して修正)", "🗺 地図の拡大縮小が重い件に手を入れました。これまでは拡大縮小のたびに全部の圃場を描き直していました。札を出す・出さないの境目をまたいだときだけ描き直します(圃場が多いタブレットで効きます)", "🧪 調合電卓の薬剤の追加を「＋ 薬剤を追加」1つにまとめました。押すと登録済みの一覧が出て、その中に「✎ 手入力で追加」もあります"]
+  }, {
+    ver: "v8.63",
+    date: "2026-08",
     notes: ["🐞 更新のたびに本日の作業圃場が一覧から消える不具合を修正しました。スプレッドシートは「2026-08-26」のような文字列をセルに入れた時点で日付として解釈するため、受け取ると「Wed Aug 26 2026…」の形になり、「その日の作業」と一致しなくなっていました(v8.58で作業を受け取るようにしたときから)。進捗地図の日付の絞り込みも同じ理由で外れていました。※スプレッドシート側の Code.gs を差し替えて再デプロイしてください", "🔧 既に日付が化けた状態で端末に残っている作業も、起動時に1度だけ直します"]
   }, {
     ver: "v8.62",
@@ -9202,7 +9242,8 @@ function ProgressLeafletCanvas(p) {
       fittedRef.current = true;
       fit();
     }
-  }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget, p.areaUnitKey]);
+    // 地図タブと同じ理由で、札の出し分けのしきい値でだけ描き直す
+  }, [ready, p.fields, p.statusByField, zoom >= PROGRESS_LABEL_MIN_ZOOM, p.onlyTarget, p.areaUnitKey]);
   // 地図を作ったあとで入れ物の幅が決まることがある。
   // そのとき地図は 0px のままで、タイルも形も出ない。
   // 他のタブを往復すると直るのは、その拍子に大きさが測り直されるから。
@@ -9404,7 +9445,8 @@ function ProgressGoogleCanvas(p) {
       fittedRef.current = true;
       fit();
     }
-  }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget, p.areaUnitKey]);
+    // 地図タブと同じ理由で、札の出し分けのしきい値でだけ描き直す
+  }, [ready, p.fields, p.statusByField, zoom >= PROGRESS_LABEL_MIN_ZOOM, p.onlyTarget, p.areaUnitKey]);
   // 地図を作ったあとで入れ物の幅が決まることがある。
   // そのとき地図は 0px のままで、タイルも形も出ない。
   // 他のタブを往復すると直るのは、その拍子に大きさが測り直されるから。
@@ -9754,11 +9796,11 @@ function ProgressMapTab(p) {
 // ═══════════════════ スタイル ═══════════════════
 const S = {
   page: {
-    minHeight: "100vh",
+    // 高さとスクロールは index.html の .app-shell が持つ。
+    // ここで minHeight を持つと器より背が伸びて二重にスクロールする。
     background: "#F0F3EC",
     color: "#1C2B21",
-    fontFamily: "'Hiragino Sans','Noto Sans JP',system-ui,sans-serif",
-    paddingBottom: 88
+    fontFamily: "'Hiragino Sans','Noto Sans JP',system-ui,sans-serif"
   },
   header: {
     padding: "18px 16px 4px",
@@ -10303,10 +10345,8 @@ const S = {
     borderRadius: 10
   },
   tabbar: {
-    position: "fixed",
-    bottom: 0,
-    left: 0,
-    right: 0,
+    // position:fixed をやめた。器(.app-shell)の一番下にいるので、
+    // アドレスバーやキーボードで位置が動かない。
     display: "flex",
     background: "#fff",
     borderTop: "1.5px solid #D8E0D2",
