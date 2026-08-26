@@ -688,10 +688,11 @@ function App() {
   // navigator.onLine が無い環境(古いWebView)ではオンライン扱いにする。
   // 分からないときに「オフライン」と出すと、実際には送れているのに
   // 送れていないと思わせることになる。
-  // 自動取得の間隔(秒)。短いほど手元に早く出るが、そのぶん
-  // GASの実行回数と実行時間を使う。Apps Script には1日あたりの
-  // 実行時間の上限がある(アカウントの種類で違う。実測していない)ので、
-  // 既定は30秒とし、短い値を選べるようにしてある。
+  // 自動取得の間隔(秒)。短いほど手元に早く出るが、GASの実行回数は増える。
+  // 公式の上限(2026-08確認)は 1回の実行=最長6分 / 同時実行=1ユーザー30。
+  // 「90分/日・6時間/日」はトリガーの合計実行時間であって、ウェブアプリの
+  // 呼び出しには当たらない。ウェブアプリの1日の呼び出し回数の上限は公式の表には
+  // 載っていないが、無制限という根拠もないので既定は30秒にしてある。
   const [pullSec, setPullSecState] = useState(() => {
     const v = parseInt(localStorage.getItem("tankmix:pullsec") || "", 10);
     return PULL_SEC_CHOICES.indexOf(v) >= 0 ? v : 30;
@@ -8189,7 +8190,7 @@ function SettingsTab(p) {
     value: v
   }, PULL_SEC_LABELS[v])))), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "短くするほど、他の端末の予定や進捗が早く手元に出ます。ただしそのぶん、スプレッドシート側のスクリプトが回る回数も増えます。Apps Script には1日あたりの実行時間の上限があり、上限に当たるとその日は送受信が止まります(上限の値はアカウントの種類で違います。このアプリでは実測していません)。端末の台数だけ回数は倍になります。まずは30秒で使ってみて、遅ければ短くしてください。画面を裏に回している間と、調合・設定タブを開いている間は取りに行きません。"), /*#__PURE__*/React.createElement("p", {
+  }, "短くするほど、他の端末の予定や進捗が早く手元に出ます。そのぶん、スプレッドシート側のスクリプトが回る回数は増えます(端末の台数だけ倍になります)。Apps Script の公式の上限は「1回の実行は最長6分」「同時実行は1ユーザー30まで」で、よく見る「90分/日(個人)・6時間/日(Workspace)」はトリガーの合計実行時間のことで、このアプリが使っているウェブアプリの呼び出しには当たりません。ウェブアプリの1日あたりの呼び出し回数の上限は、公式の表には載っていません(2026-08確認)。ただし制限が無いという意味ではなく、このアプリでは実測していません。まずは30秒で使ってみて、遅ければ短くしてください。画面を裏に回している間と、調合・設定タブを開いている間は取りに行きません。"), /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "圃場と薬剤は、登録・編集・削除した時点で自動的に送られます。このボタンは、圏外だったときの送り直しと、他の端末が入れた分を今すぐ受け取るためのものです。変わったものだけをやりとりするので、他の端末が足した圃場や薬剤を消しません。"), secHead("３　作業データの送信"), /*#__PURE__*/React.createElement("button", {
     onClick: () => p.pushProgress(),
@@ -9017,7 +9018,9 @@ function ProgressLeafletCanvas(p) {
       if (showLabel) {
         // 圃場名は他の端末から受け取った文字列でもあるので、必ずエスケープしてから
         // 札のHTMLに入れる(そのまま入れるとXSSになる)
-        poly.bindTooltip(escapeHtml((c.mark ? c.mark + " " : "") + f.name), {
+        // 地図タブと同じ形。名前と面積を行で分ける。
+        // 名前に数字が入る圃場だと、同じ行に並べた面積と続きの数字に見える。
+        poly.bindTooltip('<span class="fl-name">' + escapeHtml((c.mark ? c.mark + " " : "") + f.name) + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>', {
           permanent: true,
           direction: "center",
           className: "field-label"
@@ -9036,7 +9039,7 @@ function ProgressLeafletCanvas(p) {
       fittedRef.current = true;
       fit();
     }
-  }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget]);
+  }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget, p.areaUnitKey]);
 
   return /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
@@ -9178,6 +9181,27 @@ function ProgressGoogleCanvas(p) {
           }
         });
         overlaysRef.current.push(label);
+        // Googleの札はHTMLも改行も入れられないので、面積は別の札にして
+        // CSS(gm-field-area)で名前の下へずらす。地図タブと同じやり方。
+        const areaLabel = new g.Marker({
+          position: {
+            lat: ctr[0],
+            lng: ctr[1]
+          },
+          map: mapRef.current,
+          icon: {
+            path: 0,
+            scale: 0
+          },
+          label: {
+            text: fieldAreaText(f, p.areaUnitKey),
+            color: "#BFE3CD",
+            fontSize: "11px",
+            fontWeight: "600",
+            className: "gm-field-area"
+          }
+        });
+        overlaysRef.current.push(areaLabel);
       }
     });
     fitRef.current = targetBounds;
@@ -9185,7 +9209,7 @@ function ProgressGoogleCanvas(p) {
       fittedRef.current = true;
       fit();
     }
-  }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget]);
+  }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget, p.areaUnitKey]);
 
   if (loadErr) {
     return /*#__PURE__*/React.createElement("div", {
@@ -9436,6 +9460,7 @@ function ProgressMapTab(p) {
     apiRef,
     fitSeq,
     gmapKey: p.gmapKey,
+    areaUnitKey: p.areaUnitKey,
     style: fullMap ? {
       ...S.mapBox,
       borderRadius: 0,
