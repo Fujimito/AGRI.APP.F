@@ -26,6 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
+  "PROGRESS_ORDER", "toMapStatus",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -305,20 +306,24 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 
 // ── 進捗マップの状態 ───────────────────────────────────
 {
-  const keys = ["done", "local", "mixed", "planned", "none"];
+  // v8.56で3つに絞った。緑=実施済 / 赤=未実施 / 灰=対象外。
+  // 中間(調合済・未送信)は色を持たせず、実施済・未実施のどちらかに寄せる。
+  const keys = ["done", "planned", "none"];
   keys.forEach(k => {
     eq("進捗 " + k + " に色がある", !!(t.PROGRESS_STATES[k] || {}).fill, true);
     eq("進捗 " + k + " に見出しがある", !!(t.PROGRESS_STATES[k] || {}).label, true);
   });
+  eq("進捗 色は3つだけ", Object.keys(t.PROGRESS_STATES).length, 3);
+  eq("進捗 凡例の並びは色の数と一致", t.PROGRESS_ORDER.length, 3);
   // 同じ圃場に複数の作業があるとき、いちばん進んだ状態を採るための順序
-  eq("進捗 実績済が最上位",
-     t.PROGRESS_RANK.done > t.PROGRESS_RANK.local, true);
-  eq("進捗 未送信の実績は調合済より上",
-     t.PROGRESS_RANK.local > t.PROGRESS_RANK.mixed, true);
-  eq("進捗 調合済は未実績より上",
-     t.PROGRESS_RANK.mixed > t.PROGRESS_RANK.planned, true);
-  eq("進捗 対象外が最下位",
-     t.PROGRESS_RANK.planned > t.PROGRESS_RANK.none, true);
+  eq("進捗 実施済が最上位", t.PROGRESS_RANK.done > t.PROGRESS_RANK.planned, true);
+  eq("進捗 対象外が最下位", t.PROGRESS_RANK.planned > t.PROGRESS_RANK.none, true);
+  // サーバーから来る状態(planned / mixed / done)と、旧版の local を寄せる
+  eq("進捗 done は実施済", t.toMapStatus("done"), "done");
+  eq("進捗 local(未送信)は実施済", t.toMapStatus("local"), "done");
+  eq("進捗 mixed(調合済)は未実施", t.toMapStatus("mixed"), "planned");
+  eq("進捗 planned は未実施", t.toMapStatus("planned"), "planned");
+  eq("進捗 知らない状態は未実施に倒す", t.toMapStatus("なにか"), "planned");
 }
 
 // ── 版数の整合(sw.js と揃っているか) ───────────────────
