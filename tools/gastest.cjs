@@ -309,7 +309,36 @@ const F2 = {
   eq("壊れた薬剤JSONは空配列にする", [again.ok, again.works[0].chems], [true, []]);
 }
 
-// ── 15. doGet ──
+// ── 15. 作業日がシート側で日付に化けても、文字列で返す ──
+// スプレッドシートは "2026-08-26" を Date として解釈する。そのまま String() すると
+// "Wed Aug 26 2026 ..." になり、アプリの「その日の作業」に一致しなくなって
+// 本日の圃場が一覧から消える。gasharness はこの解釈を再現している。
+{
+  const ctx = makeContext({});
+  const W = {
+    id: 7001, workDate: "2026-08-26", fieldId: 1001, fieldName: "北の田",
+    status: "done", plannedL: 10, sprayedL: 10, reportAreaA: 12,
+    chemCount: 0, chemText: "", crop: "", areaA: 12, chems: [],
+    totalL: 10, waterMl: 0, memo: "", seq: 0,
+    by: "藤本", deviceId: "dev-1",
+    reportedAt: "2026-08-26", updatedAt: "2026-08-26T01:00:00.000Z",
+  };
+  post(ctx, { type: "pushWorks", team: TEAM, items: [W] });
+
+  const sh = ctx.SHEET_STATE.getSheetByName("作業");
+  ok("シート側では日付になっている", sh.getRange(2, 3).getValue() instanceof Date);
+
+  const all = post(ctx, { type: "pull", team: TEAM, since: "" });
+  eq("pull の作業日は yyyy-MM-dd", all.works[0].workDate, "2026-08-26");
+  eq("pull の実績入力日時も同じ", all.works[0].reportedAt, "2026-08-26");
+
+  const pr = post(ctx, { type: "progress", team: TEAM, date: "2026-08-26" });
+  eq("progress も日付で絞り込める", [pr.ok, pr.items.length], [true, 1]);
+  const none = post(ctx, { type: "progress", team: TEAM, date: "2026-08-27" });
+  eq("別の日には出ない", none.items.length, 0);
+}
+
+// ── 16. doGet ──
 {
   const ctx = makeContext({ SHARED_SECRET: "x" });
   const g = JSON.parse(ctx.doGet().getContent());

@@ -322,6 +322,23 @@ const PUSH_MAX = 300;
 // 更新日時は ISO8601 の文字列で持つ。Date のまま入れるとシートのタイムゾーンや
 // 表示形式に引きずられ、差分取得(since より新しい行)の比較がずれる。
 // ISO文字列なら辞書順の比較がそのまま時刻の比較になる。
+// セルの値を "yyyy-MM-dd" の文字列に戻す。
+// スプレッドシートは "2026-08-26" のような文字列を入れると日付として
+// 解釈し、読み戻すと Date で返す。そのまま String() すると
+// "Wed Aug 26 2026 00:00:00 GMT+0900" になり、アプリ側の
+// 「その日の作業(workDate === 選んでいる日)」と一致しなくなる。
+// 刃味は「本日の作業圃場が一覧から消える」という形で出る。
+function ymd_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, "Asia/Tokyo", "yyyy-MM-dd");
+  const s = String(v || "").trim();
+  if (!s) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  // "Wed Aug 26 2026 ..." や ISO 文字列で戻ってきた場合も拾う
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return s;
+  return Utilities.formatDate(d, "Asia/Tokyo", "yyyy-MM-dd");
+}
+
 function isoNow_() {
   return new Date().toISOString();
 }
@@ -351,8 +368,21 @@ function getRecSheet_(name, headers, headBg) {
   }
   return sh;
 }
+// 作業シートの日付列は、シート側に日付として解釈させない。
+// 読み戻しは ymd_ でも直せるが、そもそも文字列のまま置いておく方が安全。
+// 表示上も "2026-08-26" のままで、ロケールで揺れない。
+const WORK_TEXT_COLS = [3, 15, 16];  // 作業日 / 実績入力日時 / 編集日時(1始まり)
+
 function getFieldSheet_() { return getRecSheet_(FIELD_SHEET, FIELD_HEADERS, "#EDF5EE"); }
-function getWorkSheet_()  { return getRecSheet_(WORK_SHEET,  WORK_HEADERS,  "#EAF3FA"); }
+function getWorkSheet_()  {
+  const sh = getRecSheet_(WORK_SHEET, WORK_HEADERS, "#EAF3FA");
+  // 一度だけではなく毎回当てる。列を増やした版へ差し替えたときや、
+  // 手でシートを作り直したときに抜けるのを防ぐ。軽い操作なので毎回でも良い。
+  WORK_TEXT_COLS.forEach(function (c) {
+    sh.getRange(1, c, sh.getMaxRows() || 1000, 1).setNumberFormat("@");
+  });
+  return sh;
+}
 function getChemSheet_()  { return getRecSheet_(CHEM_SHEET,  CHEM_HEADERS,  "#F3EEF8"); }
 
 // ── 圃場1件 → 行 ──
@@ -439,7 +469,7 @@ function workRow_(w, team, at) {
 function workObj_(r) {
   return {
     id: Number(r[0]),
-    workDate: String(r[2] || ""),
+    workDate: ymd_(r[2]),
     fieldId: Number(r[3]),
     fieldName: String(r[4] || ""),
     status: String(r[5] || "planned"),
@@ -449,7 +479,7 @@ function workObj_(r) {
     chemCount: Number(r[9]) || 0,
     chemText: String(r[10] || ""),
     by: String(r[11] || ""),
-    reportedAt: String(r[13] || ""),
+    reportedAt: ymd_(r[13]),
     updatedAt: String(r[WORK_EDIT_COL] || ""),
     serverAt: String(r[WORK_AT_COL] || ""),
     deleted: !!r[16],
@@ -605,7 +635,7 @@ function progressItems_(team, from, to) {
     if (!r[0] && r[0] !== 0) continue;
     if (team && String(r[1]) !== String(team)) continue;
     if (r[16]) continue;                            // 削除済み
-    const d = String(r[2] || "");
+    const d = ymd_(r[2]);
     if (from && d < from) continue;
     if (to && d > to) continue;
     out.push({
@@ -615,7 +645,7 @@ function progressItems_(team, from, to) {
       sprayedL: r[7] === "" ? 0 : Number(r[7]),
       areaA: r[8] === "" ? "" : Number(r[8]),
       by: String(r[11] || ""),
-      at: String(r[13] || r[WORK_AT_COL] || ""),
+      at: String(r[13] instanceof Date ? ymd_(r[13]) : r[13] || r[WORK_AT_COL] || ""),
     });
   }
   return out;

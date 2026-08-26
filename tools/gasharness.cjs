@@ -15,6 +15,11 @@ const SRC = path.join(__dirname, "..", "Code.gs");
 
 // ─────────── スプレッドシートの張りぼて ───────────
 // 実物と同じく「2次元配列 + 1始まりの行列番号」で持つ。
+// Googleスプレッドシートは "2026-08-26" のような日付に見える文字列を、
+// セルに入れた時点で Date として解釈する。読み戻すと文字列ではなく Date が返る。
+// これを再現しないと、日付がずれる不具合をテストで捕まえられない。
+const coerce = v => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? new Date(v + "T00:00:00+09:00") : v;
+
 class FakeSheet {
   constructor(name) {
     this.name = name;
@@ -22,6 +27,7 @@ class FakeSheet {
     this.frozen = 0;
   }
   getName() { return this.name; }
+  getMaxRows() { return Math.max(this.rows.length, 1000); }
   getLastRow() {
     for (let r = this.rows.length - 1; r >= 0; r--) {
       const row = this.rows[r] || [];
@@ -57,17 +63,19 @@ class FakeSheet {
       setValues(vals) {
         for (let i = 0; i < nr; i++) {
           if (!sh.rows[r0 + i]) sh.rows[r0 + i] = [];
-          for (let j = 0; j < nc; j++) sh.rows[r0 + i][c0 + j] = vals[i][j];
+          for (let j = 0; j < nc; j++) sh.rows[r0 + i][c0 + j] = coerce(vals[i][j]);
         }
         return range;
       },
       getValue() { return sh._cell(r0, c0); },
       setValue(v) {
         if (!sh.rows[r0]) sh.rows[r0] = [];
-        sh.rows[r0][c0] = v;
+        sh.rows[r0][c0] = coerce(v);
         return range;
       },
       setFontWeight() { return range; },
+      setNumberFormat() { return range; },
+      setNumberFormats() { return range; },
       setBackground() { return range; },
       setBackgrounds() { return range; },
       clearContent() {
@@ -81,7 +89,7 @@ class FakeSheet {
     return range;
   }
   appendRow(values) {
-    this.rows[this.getLastRow()] = values.slice();
+    this.rows[this.getLastRow()] = values.map(coerce);
   }
   setFrozenRows(n) { this.frozen = n; }
   deleteRows(start, count) { this.rows.splice(start - 1, count); }
@@ -117,7 +125,12 @@ function makeContext(props) {
       createTextOutput: s => ({ _s: s, setMimeType() { return this; }, getContent() { return this._s; } }),
     },
     Utilities: {
-      formatDate: (d, tz, fmt) => new Date(d).toISOString().slice(0, 19).replace("T", " "),
+      formatDate: (d, tz, fmt) => {
+        // 使っているのは "yyyy-MM-dd" と "yyyy-MM-dd HH:mm:ss" の2つだけ。
+        // タイムゾーンは Asia/Tokyo 固定で呼ばれる前提で +09:00 として整える。
+        const t = new Date(new Date(d).getTime() + 9 * 3600 * 1000).toISOString();
+        return fmt === "yyyy-MM-dd" ? t.slice(0, 10) : t.slice(0, 19).replace("T", " ");
+      },
     },
     DriveApp: {
       getFileById() { throw new Error("no drive in test"); },
