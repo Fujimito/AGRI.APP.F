@@ -20,11 +20,12 @@ const EXPORTS = [
   "APP_VERSION", "escapeHtml", "fmt", "fmtL", "formLabel", "formOrder", "useLabel",
   "areaUnit", "volUnit", "dispArea", "areaSuffix", "dispVol", "volSuffix",
   "polygonAreaA", "segIntersects", "polygonSelfIntersects", "polygonCenter",
-  "ptsMove", "ptsRemove", "ptsInsert", "drawMidpoints", "pushDrawHistory",
+  "ptsMove", "ptsRemove", "ptsInsert", "drawMidpoints", "pushDrawHistory", "untwistPts",
   "DRAW_HISTORY_MAX", "naviUrl", "fieldCenter", "planTankRefills",
   "shiftDate", "dateLabel", "newChem", "agriAmountUnit", "stripTrailingZeros",
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
+  "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -221,6 +222,91 @@ eq("薬剤検索 完全一致を前方一致より上に出す", t.searchChemDb(
 // 空文字は全件一致になるが、呼び出し側(ChemSearchModal)が
 // query が空なら検索そのものを行わないので画面には出ない
 eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db, "", false, true, false).length, 2);
+
+// ── ねじれの並べ替え ───────────────────────────────────
+{
+  // 同じ四角形を、時計回りと反時計回りで打った場合。
+  // 「反時計回りだとねじれる」という思い込みが起きやすいが、実際は一致する。
+  const cw = [[33.20, 130.40], [33.20, 130.41], [33.19, 130.41], [33.19, 130.40]];
+  const ccw = cw.slice().reverse();
+  eq("回り方 時計回りは交差しない", t.polygonSelfIntersects(cw), false);
+  eq("回り方 反時計回りも交差しない", t.polygonSelfIntersects(ccw), false);
+  eq("回り方 面積は向きによらず同じ",
+     Math.round(t.polygonAreaA(cw) * 1000), Math.round(t.polygonAreaA(ccw) * 1000));
+
+  // 交差するのは「外周をたどる順に打っていない」とき。
+  // 左 → 右上 → 左下 → 右 の順(利用者が実際に踏んだ形)
+  const bow = [[33.20, 130.400], [33.21, 130.420], [33.18, 130.405], [33.195, 130.430]];
+  eq("並び順 行き来する順は交差する", t.polygonSelfIntersects(bow), true);
+
+  const fixed = t.untwistPts(bow);
+  eq("並び順 直したら交差しない", t.polygonSelfIntersects(fixed), false);
+  eq("並び順 頂点の数は変わらない", fixed.length, bow.length);
+  // 座標そのものは1つも動かさない(並べ替えるだけ)
+  const key = a => a.map(p => p.join(",")).sort().join(" / ");
+  eq("並び順 座標の集合は変わらない", key(fixed), key(bow));
+  // ねじれが解けるので、面積は打ち消し合っていた状態より大きくなる
+  eq("並び順 直すと面積が正しくなる", t.polygonAreaA(fixed) > t.polygonAreaA(bow), true);
+
+  // すでに正しい形は壊さない
+  eq("並び順 正しい形は交差したままにならない",
+     t.polygonSelfIntersects(t.untwistPts(cw)), false);
+  eq("並び順 3点以下はそのまま返す",
+     t.untwistPts([[1, 1], [2, 2], [3, 3]]).length, 3);
+  eq("並び順 配列でなければそのまま返す", t.untwistPts(null), null);
+}
+
+// ── 同期:変わったものにだけ時刻を打つ ─────────────────
+// 全件に打つと、触っていないレコードまで「自分のほうが新しい」と主張して
+// 他の端末の変更を踏み潰す。ここが壊れると、壊れたことに気づけないまま
+// データが少しずつ消えていくので、必ず自動で見張る。
+{
+  const prev = [
+    { id: 1, name: "北の田", updatedAt: "2026-08-01T00:00:00.000Z" },
+    { id: 2, name: "南の田", updatedAt: "2026-08-01T00:00:00.000Z" },
+  ];
+  const next = [
+    { id: 1, name: "北の田", updatedAt: "2026-08-01T00:00:00.000Z" },
+    { id: 2, name: "南の田(改)", updatedAt: "2026-08-01T00:00:00.000Z" },
+  ];
+  const out = t.stampUpdated(next, prev);
+  eq("同期 変わっていない行の時刻は動かさない", out[0].updatedAt, "2026-08-01T00:00:00.000Z");
+  eq("同期 変わった行には新しい時刻が入る", out[1].updatedAt !== "2026-08-01T00:00:00.000Z", true);
+  eq("同期 新規行にも時刻が入る",
+     !!t.stampUpdated([{ id: 3, name: "新" }], prev)[0].updatedAt, true);
+
+  // updatedAt / pushedAt そのものの変化は「変更」と数えない。
+  // 数えると保存のたびに時刻が進み続け、送信が終わらなくなる
+  const sent = [{ id: 1, name: "北の田", updatedAt: "2026-08-01T00:00:00.000Z",
+                  pushedAt: "2026-08-01T00:00:00.000Z" }];
+  eq("同期 送信済みフラグの付与は変更と数えない",
+     t.stampUpdated(sent, prev)[0].updatedAt, "2026-08-01T00:00:00.000Z");
+  eq("同期 指紋は updatedAt を無視する",
+     t.syncFingerprint({ id: 1, a: 1, updatedAt: "x" }),
+     t.syncFingerprint({ id: 1, a: 1, updatedAt: "y" }));
+  eq("同期 指紋はキーの並び順に影響されない",
+     t.syncFingerprint({ a: 1, b: 2 }), t.syncFingerprint({ b: 2, a: 1 }));
+  eq("同期 中身が違えば指紋も違う",
+     t.syncFingerprint({ a: 1 }) !== t.syncFingerprint({ a: 2 }), true);
+}
+
+// ── 進捗マップの状態 ───────────────────────────────────
+{
+  const keys = ["done", "local", "mixed", "planned", "none"];
+  keys.forEach(k => {
+    eq("進捗 " + k + " に色がある", !!(t.PROGRESS_STATES[k] || {}).fill, true);
+    eq("進捗 " + k + " に見出しがある", !!(t.PROGRESS_STATES[k] || {}).label, true);
+  });
+  // 同じ圃場に複数の作業があるとき、いちばん進んだ状態を採るための順序
+  eq("進捗 実績済が最上位",
+     t.PROGRESS_RANK.done > t.PROGRESS_RANK.local, true);
+  eq("進捗 未送信の実績は調合済より上",
+     t.PROGRESS_RANK.local > t.PROGRESS_RANK.mixed, true);
+  eq("進捗 調合済は未実績より上",
+     t.PROGRESS_RANK.mixed > t.PROGRESS_RANK.planned, true);
+  eq("進捗 対象外が最下位",
+     t.PROGRESS_RANK.planned > t.PROGRESS_RANK.none, true);
+}
 
 // ── 版数の整合(sw.js と揃っているか) ───────────────────
 const sw = fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8");

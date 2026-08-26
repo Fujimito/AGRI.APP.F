@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.50";
+const APP_VERSION = "v8.52";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -256,6 +256,34 @@ const polygonCenter = latlngs => {
   });
   return [lat / latlngs.length, lng / latlngs.length];
 };
+// ねじれ(蝶ネクタイ形)を、頂点の並べ替えだけで直す。座標そのものは1つも動かさない。
+//
+// ねじれる原因は回り方(時計回り/反時計回り)ではなく、外周をたどる順に打っていない
+// ことにある。実測で、同じ四角形を時計回り・反時計回りのどちらで打っても
+// polygonSelfIntersects の判定は false で一致する。交差するのは、たとえば
+// 左 → 右上 → 左下 → 右 のように、周を一周せず行き来する順で打ったとき。
+//
+// 重心から見た角度の順に並べ直すと、その並びは必ず一周する順になる。
+//
+// ただし万能ではない。大きくへこんだ(凹んだ)圃場では、角度順が本人の意図した
+// 形と変わることがある。そのため自動では適用せず、ボタンを押したときだけ実行し、
+// 履歴に積んで「↩ 1つ戻す」で戻せるようにしている。
+// 直しきれなかった場合(並べ替えてもまだ交差する)は呼び出し側で断ること。
+const untwistPts = pts => {
+  if (!Array.isArray(pts) || pts.length < 4) return pts;
+  const c = polygonCenter(pts);
+  if (!c) return pts;
+  // 経度は緯度が上がるほど実距離が縮む。cos で補正しないと、南北に細長い圃場で
+  // 角度が歪んで並び順を間違える
+  const k = Math.cos(c[0] * Math.PI / 180) || 1;
+  return pts.map((pt, i) => ({
+    pt,
+    i,
+    a: Math.atan2(pt[0] - c[0], (pt[1] - c[1]) * k)
+  })).sort((x, y) => x.a - y.a || x.i - y.i) // 同じ角度なら元の順を保つ(並びが毎回変わらないように)
+  .map(x => x.pt);
+};
+
 
 // 緯度経度を小数第9位に丸める。
 // 地図から受け取る座標は倍精度のままなので 35.68123456789012 のような
@@ -455,6 +483,90 @@ const save = (key, value) => {
   }
 };
 
+// ── 端末ID ──
+// 「どの端末が書いたか」を残すための識別子。記録者名は同じ名前を複数台に
+// 入れられるうえ後から変えられるので、送信元の区別には使えない。
+// 認証ではないので乱数の質は問わない(認証は合言葉が担う)。
+const deviceId = (() => {
+  let v = "";
+  try {
+    v = localStorage.getItem("tankmix:deviceid") || "";
+    if (!v) {
+      v = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+      localStorage.setItem("tankmix:deviceid", v);
+    }
+  } catch (e) {
+    // プライベートブラウズ等で localStorage が使えない端末。
+    // その場で作った値を使う(起動のたびに変わるが、送信自体は通る)
+    v = "d-tmp-" + Math.random().toString(36).slice(2, 8);
+  }
+  return v;
+})();
+
+// 同期の時刻はすべて ISO8601 の文字列で持つ。文字列にしておくと辞書順の比較が
+// そのまま時刻の比較になり、サーバー側(GAS)と同じ判定が書ける。
+const nowIso = () => new Date().toISOString();
+
+// ── 変わったレコードにだけ updatedAt を打つ ──
+// 保存のたびに配列全体へ現在時刻を入れると、触っていないレコードまで
+// 「自分のほうが新しい」と主張してしまい、他の端末の変更を踏み潰す。
+// 前の配列と中身を比べ、実際に変わったものだけに時刻を入れる。
+// updatedAt / pushedAt は比較から除く(これ自体が変わったことを変更と数えると
+// 保存のたびに時刻が進み続けて止まらない)。
+const SYNC_META = ["updatedAt", "pushedAt"];
+const syncFingerprint = o => {
+  const c = {};
+  Object.keys(o).sort().forEach(k => {
+    if (SYNC_META.indexOf(k) < 0) c[k] = o[k];
+  });
+  return JSON.stringify(c);
+};
+const stampUpdated = (next, prev) => {
+  const before = new Map((prev || []).map(x => [x.id, x]));
+  const at = nowIso();
+  return next.map(x => {
+    const old = before.get(x.id);
+    if (old && syncFingerprint(old) === syncFingerprint(x)) return x;
+    return {
+      ...x,
+      updatedAt: at
+    };
+  });
+};
+
+// ── 削除の墓標(トゥームストーン) ──
+// 端末Aで消しただけでは、端末Bは「自分が持っている＝まだある」としか判断できず、
+// 次の同期で消したはずのものが復活する。消したという事実そのものを送るために、
+// IDと時刻だけを残す。実データは消えるので容量は増えない。
+const TOMB_KEY = "tankmix:tombs";
+const TOMB_MAX = 500; // 古い墓標から捨てる。復活は「同期していない端末が残っていた」時だけ起きる
+const loadTombs = () => {
+  const t = load(TOMB_KEY, {
+    fields: [],
+    works: []
+  });
+  return {
+    fields: Array.isArray(t.fields) ? t.fields : [],
+    works: Array.isArray(t.works) ? t.works : []
+  };
+};
+const addTomb = (kind, ids) => {
+  const t = loadTombs();
+  const at = nowIso();
+  const seen = new Set(t[kind].map(x => String(x.id)));
+  (Array.isArray(ids) ? ids : [ids]).forEach(id => {
+    if (seen.has(String(id))) return;
+    seen.add(String(id));
+    t[kind].push({
+      id,
+      updatedAt: at,
+      deleted: true
+    });
+  });
+  if (t[kind].length > TOMB_MAX) t[kind] = t[kind].slice(t[kind].length - TOMB_MAX);
+  save(TOMB_KEY, t);
+};
+
 // 一意なID発行。Date.now()+乱数だと、地区からの一括投入のように同じミリ秒で
 // 複数まとめて作るときIDが衝突し、別の圃場を書き換えてしまう事故が起きるため、
 // 必ず前回より大きい値を返すカウンタ方式にしている。
@@ -514,6 +626,25 @@ const migrate = () => {
 };
 migrate();
 
+// v8.51 への移行:同期のために updatedAt を持たせる。
+// 持っていないレコードは「この端末で、いまこの形になった」とみなす。
+// これをやらないと、既にある圃場・作業が「変わっていない」と判定されて
+// 一度も送られず、進捗マップにも出ない。
+const migrateSync = () => {
+  if (localStorage.getItem("tankmix:syncmigrated")) return;
+  localStorage.setItem("tankmix:syncmigrated", "1");
+  const at = nowIso();
+  ["tankmix:fields", "tankmix:works"].forEach(k => {
+    const list = load(k, []);
+    if (!Array.isArray(list) || list.length === 0) return;
+    save(k, list.map(x => x && x.updatedAt ? x : {
+      ...x,
+      updatedAt: at
+    }));
+  });
+};
+migrateSync();
+
 // ═══════════════════ メイン ═══════════════════
 function App() {
   const [tab, setTab] = useState("calc");
@@ -524,6 +655,12 @@ function App() {
   const [mapMounted, setMapMounted] = useState(false);
   useEffect(() => {
     if (tab === "map") setMapMounted(true);
+  }, [tab]);
+  // 進捗マップも同じ扱い。地図を作り直すとタイルを取り直すことになるので、
+  // 一度開いたら残しておく
+  const [progMounted, setProgMounted] = useState(false);
+  useEffect(() => {
+    if (tab === "progress") setProgMounted(true);
   }, [tab]);
   const [toast, setToast] = useState("");
   const [mode, setMode] = useState("direct");
@@ -665,14 +802,21 @@ function App() {
     setToast(msg);
     setTimeout(() => setToast(""), 2400);
   };
-  const setFieldsSave = next => {
+  // ── Raw と Save の使い分け ──
+  // Save … 人がこの端末で編集したとき。変わったレコードに updatedAt を打つ
+  // Raw  … 同期で受け取った内容を入れるとき、および送信済みフラグの書き戻し。
+  //        ここで時刻を打つと、他の端末が入れた変更を自分の編集として
+  //        主張し直すことになり、往復のたびに勝ち負けが入れ替わる
+  const setFieldsRaw = next => {
     setFields(next);
     save("tankmix:fields", next);
   };
-  const setWorksSave = next => {
+  const setWorksRaw = next => {
     setWorks(next);
     save("tankmix:works", next);
   };
+  const setFieldsSave = next => setFieldsRaw(stampUpdated(next, fields));
+  const setWorksSave = next => setWorksRaw(stampUpdated(next, works));
   const setChemMasterSave = next => {
     setChemMaster(next);
     save("tankmix:chemmaster", next);
@@ -730,6 +874,7 @@ function App() {
     return f.id;
   };
   const deleteField = id => {
+    addTomb("fields", id); // 消したことを他の端末へ伝えるための墓標
     setFieldsSave(fields.filter(f => f.id !== id));
     flash("圃場をマスタから削除しました(過去の記録は残ります)");
   };
@@ -849,7 +994,15 @@ function App() {
     setWorksSave([...works, ...add]);
     flash(add.length + "圃場を" + dateLabel(workDate) + "のリストに追加しました");
   };
-  const removeWork = id => setWorksSave(works.filter(w => w.id !== id));
+  const removeWork = id => {
+    addTomb("works", id);
+    setWorksSave(works.filter(w => w.id !== id));
+    // 墓標を積むだけでは、他の端末の進捗マップはその圃場を実績済のまま出し続ける。
+    // 送るところまでやって初めて色が戻る
+    pushProgress({
+      quiet: true
+    });
+  };
   // 複数の作業をまとめて外す(選択削除・一括削除用)。
   // 1件ずつremoveWorkを呼ぶと古いworksを元に上書きし合って1件しか消えないため、必ずまとめて処理する。
   const removeWorks = ids => {
@@ -1123,6 +1276,11 @@ function App() {
     } : w);
     setWorksSave(next);
     flash("実績を保存しました。作業終了後に一括送信してください");
+    // 進捗マップ用の送信だけは、その場で自動で試みる。圏外なら失敗するが
+    // 未送信のまま残るので、電波が戻ってから手動または次の保存時に送られる
+    pushProgress({
+      quiet: true
+    });
   };
 
   // まとめ散布(複数圃場):フライト実績総量を面積比で各圃場に按分し、
@@ -1176,8 +1334,17 @@ function App() {
     });
     setWorksSave(next);
     flash(members.length + "圃場に面積比で按分して記録しました(合計" + fmt(totalSprayed, 2) + "L)");
+    pushProgress({
+      quiet: true
+    });
   };
-  const deleteWork = id => setWorksSave(works.filter(w => w.id !== id));
+  const deleteWork = id => {
+    addTomb("works", id);
+    setWorksSave(works.filter(w => w.id !== id));
+    pushProgress({
+      quiet: true
+    });
+  };
   const buildPayload = w => {
     const f = resolveWork(w);
     return {
@@ -1403,8 +1570,10 @@ function App() {
         // 受け取った中身は配列である前提のコードが多い。壊れた形のまま入れると
         // 以後アプリ全体が落ちるので、配列になっているものだけ差し替える
         const arr = v => Array.isArray(v);
-        if (arr(data.fields)) setFieldsSave(data.fields);
-        if (arr(data.works)) setWorksSave(data.works);
+        // 受け取った内容をそのまま入れる。ここで updatedAt を打ち直すと、
+        // 他の人が入れた変更を自分の編集として主張することになる
+        if (arr(data.fields)) setFieldsRaw(data.fields);
+        if (arr(data.works)) setWorksRaw(data.works);
         if (arr(data.chemMaster)) setChemMasterSave(data.chemMaster);
         if (arr(data.presets)) setPresetsSave(data.presets);
         if (arr(data.routes)) save("tankmix:routes", data.routes);
@@ -1420,6 +1589,272 @@ function App() {
       flash("読み込みに失敗しました");
     }
   };
+  // ══════════ 進捗共有(レコード単位) ══════════
+  // 従来の cloudSave / cloudLoad は「1チーム=1セルを丸ごと置き換える」方式で、
+  // 誰かの保存が他の人の実績を消していた。ここから下は、変わったレコードだけを
+  // 送る/受け取る経路。旧方式も残してあり、しばらくは両方使える。
+  //
+  // 役割を分けている:
+  //   進捗(works)  … 送るだけ。他の端末の作業内容は取り込まない。
+  //                   サーバーには進捗マップに要る要約(状態・実績量・記録者)しか
+  //                   置いておらず、薬剤の明細まで戻せないため
+  //   圃場(fields) … 双方向。ポリゴンを含む完全な内容をサーバーに置ける
+  const SYNC_CHUNK = 200; // GAS側の PUSH_MAX(300)より小さくしておく
+
+  // 未送信 = updatedAt が pushedAt と食い違うもの
+  const pendingOf = list => list.filter(x => x.updatedAt && x.updatedAt !== x.pushedAt);
+  const syncReady = () => {
+    const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
+    return !!url && !!teamCode.trim();
+  };
+  const fieldToItem = f => {
+    const c = compactField(f);
+    return {
+      id: c.id,
+      name: c.name || "",
+      crop: c.crop || "",
+      area: c.area || "",
+      areaA: c.areaA,
+      center: c.center || null,
+      polygon: c.polygon || [],
+      updatedAt: c.updatedAt || "",
+      by: recorder,
+      deviceId
+    };
+  };
+  const itemToField = it => ({
+    id: it.id,
+    name: it.name || "",
+    crop: it.crop || "",
+    area: it.area || "",
+    areaA: it.areaA,
+    center: it.center || null,
+    polygon: it.polygon || [],
+    updatedAt: it.updatedAt || "",
+    // 受け取った時点で「送信済み」にしておく。そうしないと次の送信で
+    // 受け取ったばかりの内容をそのまま送り返し、往復が終わらない
+    pushedAt: it.updatedAt || ""
+  });
+  const workStatus = w => w.reported ? "done" : (w.chems || []).length > 0 ? "mixed" : "planned";
+  const workToItem = w => {
+    const f = resolveWork(w);
+    return {
+      id: w.id,
+      workDate: w.workDate || "",
+      fieldId: w.fieldId,
+      fieldName: f.name || "",
+      status: workStatus(w),
+      plannedL: parseFloat(w.plannedL) || 0,
+      sprayedL: w.reported ? parseFloat(w.sprayedL) || 0 : 0,
+      reportAreaA: w.reportAreaA || "",
+      chemCount: (w.chems || []).length,
+      chemText: (w.chems || []).map(c => (c.name || "(無名)") + "(" + (c.ratio || "?") + "倍)").join(" / "),
+      by: recorder,
+      deviceId,
+      reportedAt: w.reported ? w.reportDate || "" : "",
+      updatedAt: w.updatedAt || ""
+    };
+  };
+
+  // 件数で分割して送る。1回で送りきれる件数はGAS側の上限で決まる
+  const pushItems = async (type, items) => {
+    let sent = 0;
+    for (let i = 0; i < items.length; i += SYNC_CHUNK) {
+      const part = items.slice(i, i + SYNC_CHUNK);
+      const j = await post({
+        type,
+        team: teamCode.trim(),
+        items: part
+      }, 2);
+      if (!j || !j.ok) return {
+        ok: false,
+        sent,
+        error: j && j.error
+      };
+      sent += part.length;
+    }
+    return {
+      ok: true,
+      sent
+    };
+  };
+
+  // ── 進捗を送る ──
+  // quiet:true のときは画面に何も出さない(実績保存の直後に自動で呼ぶため)。
+  // 圏外や未設定なら黙って諦める。未送信のまま残るので、あとから手で送れる。
+  const pushProgress = async opt => {
+    const quiet = opt && opt.quiet;
+    if (!syncReady()) {
+      if (!quiet) flash("送信先URLとチームコードを設定してください");
+      return false;
+    }
+    const cur = load("tankmix:works", []);
+    const pend = pendingOf(cur);
+    const tombs = loadTombs().works;
+    if (pend.length === 0 && tombs.length === 0) {
+      if (!quiet) flash("送っていない進捗はありません");
+      return true;
+    }
+    const items = pend.map(workToItem).concat(tombs.map(t => ({
+      id: t.id,
+      fieldId: 0,
+      workDate: "",
+      status: "planned",
+      deleted: true,
+      updatedAt: t.updatedAt,
+      by: recorder,
+      deviceId
+    })));
+    const r = await pushItems("pushWorks", items);
+    if (!r.ok) {
+      if (!quiet && r.error !== "auth") flash("進捗の送信に失敗しました" + (r.error ? "(" + r.error + ")" : ""));
+      return false;
+    }
+    // 送れたものだけ pushedAt を進める。送信中に編集された行は updatedAt が
+    // 先へ進んでいるので、次回もう一度送られる
+    const done = new Map(pend.map(w => [w.id, w.updatedAt]));
+    setWorksRaw(load("tankmix:works", []).map(w => done.has(w.id) ? {
+      ...w,
+      pushedAt: done.get(w.id)
+    } : w));
+    const t = loadTombs();
+    t.works = [];
+    save(TOMB_KEY, t);
+    if (!quiet) flash("進捗を送信しました(" + items.length + "件)");
+    return true;
+  };
+
+  // ── 圃場マスタを送る ──
+  const pushFieldsSync = async opt => {
+    const quiet = opt && opt.quiet;
+    if (!syncReady()) {
+      if (!quiet) flash("送信先URLとチームコードを設定してください");
+      return false;
+    }
+    const cur = load("tankmix:fields", []);
+    const pend = pendingOf(cur);
+    const tombs = loadTombs().fields;
+    if (pend.length === 0 && tombs.length === 0) {
+      if (!quiet) flash("送っていない圃場はありません");
+      return true;
+    }
+    const items = pend.map(fieldToItem).concat(tombs.map(t => ({
+      id: t.id,
+      deleted: true,
+      updatedAt: t.updatedAt,
+      by: recorder,
+      deviceId
+    })));
+    const r = await pushItems("pushFields", items);
+    if (!r.ok) {
+      if (!quiet && r.error !== "auth") flash("圃場の送信に失敗しました" + (r.error ? "(" + r.error + ")" : ""));
+      return false;
+    }
+    const done = new Map(pend.map(f => [f.id, f.updatedAt]));
+    setFieldsRaw(load("tankmix:fields", []).map(f => done.has(f.id) ? {
+      ...f,
+      pushedAt: done.get(f.id)
+    } : f));
+    const t = loadTombs();
+    t.fields = [];
+    save(TOMB_KEY, t);
+    if (!quiet) flash("圃場を送信しました(" + items.length + "件)");
+    return true;
+  };
+
+  // ── 圃場マスタを受け取る(差分) ──
+  const pullFieldsSync = async opt => {
+    const quiet = opt && opt.quiet;
+    if (!syncReady()) {
+      if (!quiet) flash("送信先URLとチームコードを設定してください");
+      return false;
+    }
+    const since = localStorage.getItem("tankmix:pullat") || "";
+    const j = await post({
+      type: "pull",
+      team: teamCode.trim(),
+      since
+    }, 1);
+    if (!j || !j.ok) {
+      if (!quiet && !(j && j.error === "auth")) flash("受信に失敗しました" + (j && j.error ? "(" + j.error + ")" : ""));
+      return false;
+    }
+    const cur = load("tankmix:fields", []);
+    const byId = new Map(cur.map(f => [String(f.id), f]));
+    let added = 0,
+      updated = 0,
+      removed = 0;
+    (j.fields || []).forEach(inc => {
+      const key = String(inc.id);
+      const old = byId.get(key);
+      if (inc.deleted) {
+        if (old) {
+          byId.delete(key);
+          removed++;
+        }
+        return;
+      }
+      if (!old) {
+        byId.set(key, itemToField(inc));
+        added++;
+        return;
+      }
+      // この端末に、まだ送っていない新しい編集があるなら残す。
+      // 受け取った側で上書きすると、目の前で直したばかりの形が戻る
+      if (String(old.updatedAt || "") > String(inc.updatedAt || "")) return;
+      byId.set(key, {
+        ...old,
+        ...itemToField(inc)
+      });
+      updated++;
+    });
+    if (added || updated || removed) setFieldsRaw(Array.from(byId.values()));
+    // serverTime は応答が含む範囲の終わり。次回はここから先だけを受け取る
+    if (j.serverTime) localStorage.setItem("tankmix:pullat", j.serverTime);
+    if (!quiet) flash("受信しました(追加" + added + "・更新" + updated + "・削除" + removed + ")");
+    return true;
+  };
+
+  // 送ってから受け取る。順番が逆だと、自分の未送信の変更が
+  // 受け取った内容で埋もれたまま送られない
+  const syncFields = async () => {
+    if (!syncReady()) {
+      flash("送信先URLとチームコードを設定してください");
+      return;
+    }
+    setSyncing(true);
+    const okPush = await pushFieldsSync({
+      quiet: true
+    });
+    const okPull = await pullFieldsSync({
+      quiet: true
+    });
+    setSyncing(false);
+    if (okPush && okPull) flash("☁ 圃場を同期しました");else flash("同期に失敗しました。電波とGASの版数を確認してください");
+  };
+
+  // ── 進捗マップ用の読み取り ──
+  // 失敗の理由を区別して返す。「設定していない」「電波がない」「GASが古い」で
+  // 案内すべきことが違うのに、まとめて「取得できません」と出すと直しようがない
+  const fetchProgress = async (from, to) => {
+    if (!syncReady()) return {
+      error: "設定"
+    };
+    const j = await post({
+      type: "progress",
+      team: teamCode.trim(),
+      from,
+      to
+    }, 1);
+    if (!j) return {
+      error: "通信"
+    };
+    if (!j.ok) return {
+      error: j.error === "unknown type" ? "GAS" : j.error || "不明"
+    };
+    return j;
+  };
+
   // ── 農薬データの取り込み(GAS経由・分割受信) ──
   // 起動時に、取り込み済みかどうかだけ確認して設定タブの表示に使う
   useEffect(() => {
@@ -1710,7 +2145,7 @@ function App() {
   }, "他", chemWarnings.length - 2, "件"))), toast && /*#__PURE__*/React.createElement("div", {
     style: S.toast
   }, toast), /*#__PURE__*/React.createElement("main", {
-    style: tab === "map" ? S.mainFull : S.main
+    style: tab === "map" || tab === "progress" ? S.mainFull : S.main
   }, tab === "calc" && /*#__PURE__*/React.createElement(CalcTab, {
     mode,
     setMode,
@@ -1816,6 +2251,19 @@ function App() {
     // 表示中かどうか。隠れている間は大きさを測れないので採寸を止め、
     // 戻ってきたときに測り直させる
     active: tab === "map"
+  })), progMounted && /*#__PURE__*/React.createElement("div", {
+    style: tab === "progress" ? undefined : {
+      display: "none"
+    }
+  }, /*#__PURE__*/React.createElement(ProgressMapTab, {
+    fields,
+    works,
+    workDate,
+    seasonStart,
+    recorder,
+    areaUnitKey,
+    fetchProgress,
+    active: tab === "progress"
   })), tab === "settings" && /*#__PURE__*/React.createElement(SettingsTab, {
     areaUnitKey,
     setAreaUnitKey,
@@ -1834,6 +2282,8 @@ function App() {
     testConnection,
     cloudSave,
     cloudLoad,
+    syncFields,
+    pushProgress,
     syncing,
     chemDbInfo,
     chemDbBusy,
@@ -1856,7 +2306,7 @@ function App() {
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
     className: "no-print"
-  }, [["calc", "🧮", "調合"], ["work", "🚁", "作業"], ["map", "🗺", "地図"], ["preset", "📋", "データベース"], ["settings", "⚙", "設定"]].map(t => /*#__PURE__*/React.createElement("button", {
+  }, [["calc", "🧮", "調合"], ["work", "🚁", "作業"], ["map", "🗺", "地図"], ["progress", "🚦", "進捗"], ["preset", "📋", "データベース"], ["settings", "⚙", "設定"]].map(t => /*#__PURE__*/React.createElement("button", {
     key: t[0],
     onClick: () => setTab(t[0]),
     style: {
@@ -5190,10 +5640,8 @@ function GoogleMapTab(p) {
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
   const mapWrapRef = React.useRef(null); // 地図+凡例の枠。高さを実測して決める
-  // 作図はパネルが画面外に出てしまうので、始めたら全画面を解除する
-  React.useEffect(() => {
-    if (drawing) setFullMap(false);
-  }, [drawing]);
+  // 全画面のまま作図できる。作図パネルは全画面のとき、地図の上に
+  // 下からのシートとして重なる(S.drawPanelFull)。
   const [gpsOn, setGpsOn] = React.useState(false);
   const [mapType, setMapType] = React.useState("hybrid"); // hybrid=衛星+地名, roadmap=地図のみ
   const drawingRef = React.useRef(false);
@@ -5229,6 +5677,21 @@ function GoogleMapTab(p) {
     const sel = typeof o.select === "number" ? o.select : -1;
     selPtRef.current = sel;
     setSelPt(sel);
+  };
+  // ねじれを、頂点の並べ替えだけで直す。座標は1つも動かさない。
+  // 自動では走らせない。凹んだ圃場では意図した形と変わりうるので、
+  // 押した本人が結果を見て「↩ 1つ戻す」で戻せる形にしている。
+  const fixTwist = () => {
+    const cur = drawPtsRef.current;
+    const next = untwistPts(cur);
+    if (polygonSelfIntersects(next)) {
+      // 並べ替えでは解けない形(頂点が重なっている等)。できなかったと伝えて、
+      // 黙って何もしないことはしない
+      p.flash && p.flash("並び順では直せませんでした。頂点をドラッグして直してください");
+      return;
+    }
+    commitPts(next);
+    p.flash && p.flash("頂点の並び順を直しました(戻すには「↩ 1つ戻す」)");
   };
   // 頂点は変えず選択だけ切り替える。編集ではないので履歴には積まない
   const selectPt = i => {
@@ -5772,7 +6235,7 @@ function GoogleMapTab(p) {
       display: "flex",
       gap: 8
     }
-  }, !listOnly && !drawing && /*#__PURE__*/React.createElement("button", {
+  }, !listOnly && /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(true),
     style: S.smallSecondary,
     title: "地図を全画面で見る"
@@ -5847,7 +6310,7 @@ function GoogleMapTab(p) {
     onClick: () => setFullMap(false),
     style: S.mapFullExit
   }, "✕ 全画面をやめる")), drawing && /*#__PURE__*/React.createElement("div", {
-    style: {
+    style: fullMap ? S.drawPanelFull : {
       ...S.settingsBox,
       marginTop: 12
     }
@@ -5874,7 +6337,17 @@ function GoogleMapTab(p) {
       ...S.drawWarn,
       display: drawCrossed ? "" : "none"
     }
-  }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。頂点をドラッグしてねじれを直すか、「↩ 1つ戻す」で戻してください。"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
+  }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。下の「並び順を直す」を押すか、頂点をドラッグして直してください。"),
+  // 警告と同じく、常に置いて display だけを切り替える(ドラッグ中はReactを動かせない)
+  /*#__PURE__*/React.createElement("button", {
+    onClick: fixTwist,
+    style: {
+      ...S.secondaryBtn,
+      width: "100%",
+      marginTop: 8,
+      display: drawCrossed ? "" : "none"
+    }
+  }, "🔀 並び順を直す"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
     style: S.selPtRow
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -5960,7 +6433,14 @@ function GoogleMapTab(p) {
       ...S.primaryBtn,
       width: "100%",
       marginTop: 10,
-      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
+      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4,
+      // 全画面ではパネルがスクロールするので、一番押したいこのボタンが
+      // 下に隠れてしまう。パネルの底に張り付けて常に見えるようにする
+      ...(fullMap ? {
+        position: "sticky",
+        bottom: 0,
+        zIndex: 1
+      } : {})
     }
   }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
     style: S.card,
@@ -6014,10 +6494,8 @@ function LeafletMapTab(p) {
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
   const mapWrapRef = React.useRef(null); // 地図+凡例の枠。高さを実測して決める
-  // 作図はパネルが画面外に出てしまうので、始めたら全画面を解除する
-  React.useEffect(() => {
-    if (drawing) setFullMap(false);
-  }, [drawing]);
+  // 全画面のまま作図できる。作図パネルは全画面のとき、地図の上に
+  // 下からのシートとして重なる(S.drawPanelFull)。
   const [gpsOn, setGpsOn] = React.useState(false);
   const [zoom, setZoom] = React.useState(15);
   const [tileMode, setTileMode] = React.useState("photo"); // "photo" | "map"
@@ -6053,6 +6531,21 @@ function LeafletMapTab(p) {
     const sel = typeof o.select === "number" ? o.select : -1;
     selPtRef.current = sel;
     setSelPt(sel);
+  };
+  // ねじれを、頂点の並べ替えだけで直す。座標は1つも動かさない。
+  // 自動では走らせない。凹んだ圃場では意図した形と変わりうるので、
+  // 押した本人が結果を見て「↩ 1つ戻す」で戻せる形にしている。
+  const fixTwist = () => {
+    const cur = drawPtsRef.current;
+    const next = untwistPts(cur);
+    if (polygonSelfIntersects(next)) {
+      // 並べ替えでは解けない形(頂点が重なっている等)。できなかったと伝えて、
+      // 黙って何もしないことはしない
+      p.flash && p.flash("並び順では直せませんでした。頂点をドラッグして直してください");
+      return;
+    }
+    commitPts(next);
+    p.flash && p.flash("頂点の並び順を直しました(戻すには「↩ 1つ戻す」)");
   };
   // 頂点は変えず選択だけ切り替える。編集ではないので履歴には積まない
   const selectPt = i => {
@@ -6511,7 +7004,7 @@ function LeafletMapTab(p) {
       display: "flex",
       gap: 8
     }
-  }, !listOnly && !drawing && /*#__PURE__*/React.createElement("button", {
+  }, !listOnly && /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(true),
     style: S.smallSecondary,
     title: "地図を全画面で見る"
@@ -6567,7 +7060,7 @@ function LeafletMapTab(p) {
     onClick: () => setFullMap(false),
     style: S.mapFullExit
   }, "✕ 全画面をやめる")), drawing && /*#__PURE__*/React.createElement("div", {
-    style: {
+    style: fullMap ? S.drawPanelFull : {
       ...S.settingsBox,
       marginTop: 12
     }
@@ -6594,7 +7087,17 @@ function LeafletMapTab(p) {
       ...S.drawWarn,
       display: drawCrossed ? "" : "none"
     }
-  }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。頂点をドラッグしてねじれを直すか、「↩ 1つ戻す」で戻してください。"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
+  }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。下の「並び順を直す」を押すか、頂点をドラッグして直してください。"),
+  // 警告と同じく、常に置いて display だけを切り替える(ドラッグ中はReactを動かせない)
+  /*#__PURE__*/React.createElement("button", {
+    onClick: fixTwist,
+    style: {
+      ...S.secondaryBtn,
+      width: "100%",
+      marginTop: 8,
+      display: drawCrossed ? "" : "none"
+    }
+  }, "🔀 並び順を直す"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
     style: S.selPtRow
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -6680,7 +7183,14 @@ function LeafletMapTab(p) {
       ...S.primaryBtn,
       width: "100%",
       marginTop: 10,
-      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
+      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4,
+      // 全画面ではパネルがスクロールするので、一番押したいこのボタンが
+      // 下に隠れてしまう。パネルの底に張り付けて常に見えるようにする
+      ...(fullMap ? {
+        position: "sticky",
+        bottom: 0,
+        zIndex: 1
+      } : {})
     }
   }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
     style: S.card,
@@ -6917,9 +7427,30 @@ function SettingsTab(p) {
       ...S.smallSecondary,
       padding: "13px 0"
     }
-  }, "☁↓ 共有→端末へ読込")), /*#__PURE__*/React.createElement("p", {
+  }, "☁↓ 共有→端末へ読込")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: p.syncFields,
+    disabled: p.syncing,
+    style: {
+      ...S.smallSecondary,
+      padding: "13px 0"
+    }
+  }, "🔁 圃場を同期"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.pushProgress(),
+    disabled: p.syncing,
+    style: {
+      ...S.smallSecondary,
+      padding: "13px 0"
+    }
+  }, "🚦 進捗を送信")), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "同じチームコードの端末どうしで、圃場・薬剤・作業リストを共有できます(後から保存した内容で上書き)。共有がうまくいかない場合は、GASを最新のCode.gsに更新して再デプロイしてください。共有・送信される内容は、圃場名・作物・面積・圃場の位置情報(地図で囲んだ緯度経度)・地区・薬剤・作業記録・記録者名です。送信先はあなたが設定したGoogleスプレッドシートだけで、このアプリの作者を含む第三者には送信されません。"))), /*#__PURE__*/React.createElement("section", {
+  }, "「🔁 圃場を同期」は、変わった圃場だけを送って受け取ります。上の「☁↑ 端末→共有へ保存」と違い、他の端末が足した圃場を消しません。圃場の数が増えて「大きすぎます」と出るようになったら、こちらを使ってください。「🚦 進捗を送信」は進捗タブ用の実績を送ります(実績を保存したときにも自動で送られるので、圏外だったときの送り直しに使います)。どちらもGASを最新のCode.gsに更新してから使ってください。"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "同じチームコードの端末どうしで、圃場・薬剤・作業リストを共有できます(後から保存した内容で上書き)。共有がうまくいかない場合は、GASを最新のCode.gsに更新して再デプロイしてください。共有・送信される内容は、圃場名・作物・面積・圃場の位置情報(地図で囲んだ緯度経度)・地区・薬剤・作業記録・記録者名と、この端末を区別するための端末ID(初回起動時に作られる意味のない文字列で、機種や電話番号とは無関係です)です。作業者の現在地は送信しません。送信先はあなたが設定したGoogleスプレッドシートだけで、このアプリの作者を含む第三者には送信されません。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("農薬データ", openSec.chemdb, () => toggleSec("chemdb")), openSec.chemdb && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -7121,9 +7652,17 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.50",
+    ver: "v8.52",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 線が交差したときに「🔀 並び順を直す」ボタンが出るようになりました。頂点の座標は1つも動かさず、外周をたどる順に並べ替えるだけです。押したあと「↩ 1つ戻す」で元に戻せます。※大きくへこんだ形の圃場では意図した形と変わることがあるので、結果を見てから登録してください", "🗺 全画面のまま圃場を囲めるようになりました。これまでは作図を始めると全画面が解除されていました。全画面のときは操作パネルが下から重なり、「この圃場を登録」は常に画面の下端に出ます", "🚦 進捗マップに「◉ 対象だけ／○ 全圃場」の切り替えを追加しました。その期間に作業がある圃場だけを出せます(既定は全圃場)", "🐞 作業をその日のリストから外したとき、他の端末の進捗マップでその圃場が実績済のまま残る不具合を修正しました。外した時点で送るようにしています"]
+  }, {
+    ver: "v8.51",
+    date: "2026-08",
+    notes: ["🚦 進捗マップを追加しました。実績を入力した圃場が緑に変わり、チームの誰がどこまで終えたかを1枚の地図で見られます。位置を作図する地図タブとは別のタブなので、散布中に触っても圃場の形が変わることはありません。更新は「🔄 最新を取得」を押したときだけです", "🚦 実績を保存すると、進捗ぶんが自動でスプレッドシートへ送られます。圏外だったときは未送信のまま残り、設定タブの「🚦 進捗を送信」で送り直せます。地図では未送信の実績を橙で表示します", "☁ 設定タブに「🔁 圃場を同期」を追加しました。変わった圃場だけを送って受け取るので、他の人が足した圃場や実績を消しません。従来の「☁↑ 端末→共有へ保存」は全部を置き換える方式で、同時に作業していると消える事故と、圃場が増えると保存できなくなる上限がありました。今後はこちらをお使いください", "⚙ スプレッドシート側に「圃場マスタ」「作業」シートが自動で追加されます。既存の「防除記録」シートはそのまま残り、内容も変わりません。Code.gsを最新に差し替えて「新バージョン」でデプロイし直してください"]
+  }, {
+    ver: "v8.50",
+    date: "2026-08",
     notes: ["🐞 v8.49の容量削減で面積がわずかにずれてしまう問題を修正しました。位置情報を丸める桁数が粗く、実測で4枚に1枚以上の圃場で表示面積が0.01a単位で変わっていました。桁数を上げ(最大ずれ 0.0147a→0.0002a)、面積は丸める前の座標から計算するようにしたので、作図中に見えていた面積がそのまま保存されます", "🗺 地図の面積表示が、圃場に登録された面積を出すようになりました。これまでは地図だけ囲んだ形から計算し直した数字を出していたため、データベースで面積を手直しすると地図と食い違っていました。散布量の計算に使われるのは登録面積なので、そちらに揃えています", "🗺 地図の面積が表示単位(a/ha/反/町)に従うようになりました。これまで地図だけアール固定で、反や町に設定していても変わりませんでした", "🗺 登録面積と囲んだ形の面積が1%以上ずれている圃場は、一覧に「(囲んだ形は ◯◯)」と併記して、食い違いが隠れないようにしました", "🗺 地図で圃場をタップして形を変えずに保存したとき、手入力した面積が計算値で上書きされないようにしました"]
   }, {
     ver: "v8.49",
@@ -7391,6 +7930,399 @@ function SettingsTab(p) {
       }
     }, n))));
   })));
+}
+
+// ═══════════════════ 進捗マップタブ ═══════════════════
+// 圃場の位置を作図・編集する地図タブとは別に、その日の進み具合だけを見る地図。
+// 編集の操作は一切置いていない。散布の最中に地図を触って、囲んだ形を壊す事故を
+// 避けるため(作図・編集は地図タブでしかできない)。
+//
+// 色は「実績が入ったかどうか」を最短で読めることだけを狙う。屋外の直射日光下では
+// 微妙な色差は判別できないので明度が大きく違う4色に絞り、色だけに頼らないよう
+// 記号も併記する(色覚特性への配慮も兼ねる)。
+const PROGRESS_STATES = {
+  done: {
+    fill: "#2E7D4F",
+    stroke: "#14532B",
+    mark: "✓",
+    label: "実績済"
+  },
+  local: {
+    fill: "#E08A1E",
+    stroke: "#8A5108",
+    mark: "△",
+    label: "実績済(未送信)"
+  },
+  mixed: {
+    fill: "#F2D64B",
+    stroke: "#8A7212",
+    mark: "・",
+    label: "調合済"
+  },
+  planned: {
+    fill: "#FFFFFF",
+    stroke: "#D81111",
+    mark: "",
+    label: "未実績"
+  },
+  none: {
+    fill: "#9AA69E",
+    stroke: "#68746C",
+    mark: "",
+    label: "対象外"
+  }
+};
+// 同じ圃場に複数の作業がぶら下がることがある(午前と午後で分けた等)。
+// そのときは「いちばん進んでいる状態」を圃場の色にする。
+const PROGRESS_RANK = {
+  none: 0,
+  planned: 1,
+  mixed: 2,
+  local: 3,
+  done: 4
+};
+const PROGRESS_ORDER = ["done", "local", "mixed", "planned", "none"];
+
+function ProgressMapTab(p) {
+  const mapRef = React.useRef(null);
+  const containerRef = React.useRef(null);
+  const layerRef = React.useRef(null);
+  const mapWrapRef = React.useRef(null);
+  const fittedRef = React.useRef(false); // 最初の1回だけ圃場全体が入るように寄せる
+  const [ready, setReady] = React.useState(false);
+  const [zoom, setZoom] = React.useState(15);
+  const [fullMap, setFullMap] = React.useState(false);
+  const [range, setRange] = React.useState("day");
+  // 既定は全部出す。周りの圃場が見えていないと、どこを見ているのか分からなくなるため。
+  // 圃場が多くて対象が埋もれるときのために、絞り込めるようにしてある。
+  const [onlyTarget, setOnlyTarget] = React.useState(false);
+  const [loading, setLoading] = React.useState(false);
+  const [err, setErr] = React.useState("");
+  const [sel, setSel] = React.useState(null);
+  // 最後に取れた内容は端末に残す。圏外では取り直せないので、
+  // 「いつ時点のものか」を添えてそのまま出す(古い情報を今の状態として見せない)
+  const [snap, setSnap] = React.useState(() => load("tankmix:progresssnap", {
+    items: [],
+    at: "",
+    from: "",
+    to: ""
+  }));
+  const LABEL_MIN_ZOOM = 15;
+
+  const to = p.workDate;
+  const from = range === "day" ? p.workDate : range === "week" ? shiftDate(p.workDate, -6) : p.seasonStart || p.workDate;
+
+  const refresh = async () => {
+    if (loading) return;
+    setLoading(true);
+    setErr("");
+    const r = await p.fetchProgress(from, to);
+    setLoading(false);
+    if (!r || r.error) {
+      const e = r && r.error;
+      setErr(e === "設定" ? "設定タブで「送信先URL」と「チームコード」を入れてください" : e === "通信" ? "取得できません。電波の届く場所でもう一度お試しください" : e === "GAS" ? "スプレッドシート側のスクリプトが古い版です。Code.gs を貼り直して「新バージョン」でデプロイしてください" : e === "auth" ? "共有パスワードが違います。設定タブで確認してください" : "取得できません(" + (e || "不明") + ")");
+      return;
+    }
+    const next = {
+      items: r.items || [],
+      at: new Date().toISOString(),
+      from,
+      to
+    };
+    setSnap(next);
+    save("tankmix:progresssnap", next);
+  };
+
+  // タブを開いたとき、まだ一度も取っていなければ自動で1回だけ取りに行く。
+  // 以後は手動のボタンだけ(自動で回し続けると通信量とGASの実行回数が増える)
+  const autoRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!p.active || autoRef.current) return;
+    autoRef.current = true;
+    refresh();
+  }, [p.active]);
+
+  // ── 圃場ごとの状態を決める ──
+  // サーバーから来た内容を土台にし、この端末にしかない未送信の実績を上へ重ねる。
+  // 自分で入れた実績が、送信するまで地図に出ないのはかえって迷うため。
+  const statusByField = React.useMemo(() => {
+    const m = new Map();
+    const put = (fieldId, st) => {
+      const cur = m.get(fieldId);
+      if (!cur || PROGRESS_RANK[st.status] > PROGRESS_RANK[cur.status]) m.set(fieldId, st);
+    };
+    (snap.items || []).forEach(it => put(it.fieldId, {
+      status: it.status || "planned",
+      by: it.by || "",
+      at: it.at || "",
+      sprayedL: it.sprayedL || 0,
+      areaA: it.areaA || "",
+      local: false
+    }));
+    (p.works || []).forEach(w => {
+      if (!w.workDate || w.workDate < from || w.workDate > to) return;
+      const pending = w.updatedAt && w.updatedAt !== w.pushedAt;
+      const st = w.reported ? pending ? "local" : "done" : (w.chems || []).length > 0 ? "mixed" : "planned";
+      put(w.fieldId, {
+        status: st,
+        by: p.recorder || "",
+        at: w.reportDate || "",
+        sprayedL: parseFloat(w.sprayedL) || 0,
+        areaA: w.reportAreaA || "",
+        local: !!pending
+      });
+    });
+    return m;
+  }, [snap, p.works, from, to, p.recorder]);
+
+  const counts = React.useMemo(() => {
+    const c = {
+      done: 0,
+      local: 0,
+      mixed: 0,
+      planned: 0,
+      total: 0,
+      areaA: 0
+    };
+    statusByField.forEach(v => {
+      c.total++;
+      c[v.status] = (c[v.status] || 0) + 1;
+      if (v.status === "done" || v.status === "local") c.areaA += parseFloat(v.areaA) || 0;
+    });
+    return c;
+  }, [statusByField]);
+
+  // ── 地図の初期化(1回だけ) ──
+  React.useEffect(() => {
+    if (!window.L || !containerRef.current || mapRef.current) return;
+    const L = window.L;
+    const withPoly = (p.fields || []).filter(f => f.center);
+    const map = L.map(containerRef.current, {
+      zoomControl: true,
+      attributionControl: true,
+      maxZoom: 21
+    }).setView(withPoly.length ? withPoly[0].center : [35.0, 137.0], withPoly.length ? 16 : 5);
+    // タイルは地図タブと同じ国土地理院タイル(出典表示も同じ)。
+    // 進捗マップのためだけに別の配信元を足さない
+    L.tileLayer("https://cyberjapandata.gsi.go.jp/xyz/seamlessphoto/{z}/{x}/{y}.jpg", {
+      attribution: "地理院タイル",
+      maxZoom: 21,
+      maxNativeZoom: 18
+    }).addTo(map);
+    layerRef.current = L.layerGroup().addTo(map);
+    map.on("zoomend", () => setZoom(map.getZoom()));
+    mapRef.current = map;
+    setZoom(map.getZoom());
+    setReady(true);
+    setTimeout(() => map.invalidateSize(), 200);
+    return () => {
+      map.remove();
+      mapRef.current = null;
+    };
+  }, []);
+
+  useMapHeightFit(mapWrapRef, !p.active, false, ready, fullMap, () => {
+    if (mapRef.current) mapRef.current.invalidateSize();
+  });
+
+  // ── ポリゴンの塗り分け ──
+  React.useEffect(() => {
+    if (!ready || !window.L || !layerRef.current) return;
+    const L = window.L;
+    const grp = layerRef.current;
+    grp.clearLayers();
+    const showLabel = zoom >= LABEL_MIN_ZOOM;
+    const bounds = [];
+    (p.fields || []).forEach(f => {
+      if (!f.polygon || f.polygon.length < 3) return;
+      const st = statusByField.get(f.id);
+      const key = st ? st.status : "none";
+      if (onlyTarget && key === "none") return;
+      const c = PROGRESS_STATES[key] || PROGRESS_STATES.none;
+      const poly = L.polygon(f.polygon, {
+        color: c.stroke,
+        weight: key === "none" ? 1.5 : 3,
+        fillColor: c.fill,
+        fillOpacity: key === "none" ? 0.15 : key === "planned" ? 0.35 : 0.6
+      }).addTo(grp);
+      bounds.push(f.polygon);
+      if (showLabel) {
+        // 圃場名は他の端末から受け取った文字列でもあるので、必ずエスケープしてから
+        // 札のHTMLに入れる(そのまま入れるとXSSになる)
+        poly.bindTooltip(escapeHtml((c.mark ? c.mark + " " : "") + f.name), {
+          permanent: true,
+          direction: "center",
+          className: "field-label"
+        });
+      }
+      poly.on("click", () => setSel({
+        field: f,
+        st: st || null
+      }));
+    });
+    // 初回だけ、登録されている圃場が全部入る範囲へ寄せる
+    if (!fittedRef.current && bounds.length) {
+      fittedRef.current = true;
+      try {
+        mapRef.current.fitBounds(L.latLngBounds(bounds.flat()), {
+          padding: [24, 24],
+          maxZoom: 17
+        });
+      } catch (e) {
+        // 座標が壊れている圃場が混ざっている場合。初期表示位置だけの話なので
+        // ここで落とさず、既定の中心のままにする
+      }
+    }
+  }, [ready, p.fields, statusByField, zoom, onlyTarget]);
+
+  const legend = /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      flexWrap: "wrap",
+      gap: 8,
+      marginTop: 10
+    }
+  }, PROGRESS_ORDER.map(k => /*#__PURE__*/React.createElement("span", {
+    key: k,
+    style: {
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 5,
+      fontSize: 12.5,
+      fontWeight: 700,
+      color: "#3d4a42"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      width: 15,
+      height: 15,
+      borderRadius: 4,
+      background: PROGRESS_STATES[k].fill,
+      border: "2px solid " + PROGRESS_STATES[k].stroke,
+      display: "inline-block"
+    }
+  }), PROGRESS_STATES[k].mark ? PROGRESS_STATES[k].mark + " " : "", PROGRESS_STATES[k].label)));
+
+  const fetchedLabel = snap.at ? new Date(snap.at).toLocaleString("ja-JP", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }) : "未取得";
+
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.card,
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      flexWrap: "wrap"
+    }
+  }, [["day", "当日"], ["week", "7日間"], ["season", "シーズン"]].map(r => /*#__PURE__*/React.createElement("button", {
+    key: r[0],
+    onClick: () => setRange(r[0]),
+    style: {
+      ...S.mapSeg,
+      ...(range === r[0] ? S.segOn : {})
+    }
+  }, r[1])), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOnlyTarget(!onlyTarget),
+    style: {
+      ...S.mapSeg,
+      ...(onlyTarget ? S.segOn : {})
+    },
+    title: "この期間に作業がある圃場だけを地図に出す"
+  }, onlyTarget ? "◉ 対象だけ" : "○ 全圃場"), /*#__PURE__*/React.createElement("button", {
+    onClick: refresh,
+    disabled: loading,
+    style: {
+      ...S.smallSecondary,
+      marginLeft: "auto"
+    }
+  }, loading ? "取得中…" : "🔄 最新を取得")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.smallLabel,
+      marginTop: 8
+    },
+    className: "num"
+  }, from === to ? dateLabel(to) : from + " 〜 " + to, " ／ 最終取得 ", fetchedLabel), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 14,
+      marginTop: 8,
+      fontSize: 15,
+      fontWeight: 800,
+      color: "#1C2B21",
+      flexWrap: "wrap"
+    },
+    className: "num"
+  }, /*#__PURE__*/React.createElement("span", null, "実績 ", counts.done + counts.local, " / ", counts.total, " 圃場"), /*#__PURE__*/React.createElement("span", null, "実績面積 ", dispArea(counts.areaA, p.areaUnitKey), areaSuffix(p.areaUnitKey)), counts.local > 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#A15E08"
+    }
+  }, "未送信 ", counts.local)), err && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.smallLabel,
+      color: "#C74E36",
+      marginTop: 8,
+      fontWeight: 700
+    }
+  }, err), legend), !window.L && /*#__PURE__*/React.createElement("p", {
+    style: S.empty
+  }, "地図ライブラリを読み込めませんでした。オンラインで開き直してください。"), /*#__PURE__*/React.createElement("div", {
+    ref: mapWrapRef,
+    style: fullMap ? S.mapWrapFull : S.mapWrap
+  }, /*#__PURE__*/React.createElement("div", {
+    ref: containerRef,
+    style: fullMap ? {
+      ...S.mapBox,
+      borderRadius: 0,
+      border: "none"
+    } : S.mapBox,
+    "data-map-box": ""
+  }), fullMap ? /*#__PURE__*/React.createElement("button", {
+    onClick: () => setFullMap(false),
+    style: S.mapFullExit
+  }, "✕ 全画面をやめる") : null), !fullMap && /*#__PURE__*/React.createElement("button", {
+    onClick: () => setFullMap(true),
+    style: {
+      ...S.smallSecondary,
+      marginTop: 8
+    }
+  }, "⛶ 地図を全画面で見る"), sel && /*#__PURE__*/React.createElement("div", {
+    style: S.modalOverlay,
+    onClick: () => setSel(null)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.modalBox,
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.listTitle
+  }, sel.field.name), /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, sel.field.crop || "作物未設定", " ／ ", dispArea(parseFloat(sel.field.areaA) || 0, p.areaUnitKey), areaSuffix(p.areaUnitKey)), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      fontSize: 16,
+      fontWeight: 800
+    }
+  }, sel.st ? (PROGRESS_STATES[sel.st.status] || PROGRESS_STATES.none).label : "この期間の作業はありません"), sel.st && sel.st.status !== "planned" && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.smallLabel,
+      marginTop: 6
+    },
+    className: "num"
+  }, sel.st.sprayedL > 0 ? "実散布量 " + fmt(sel.st.sprayedL, 1) + " L／" : "", "入力者 ", sel.st.by || "(不明)", sel.st.at ? " ／ " + sel.st.at : ""), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSel(null),
+    style: {
+      ...S.smallSecondary,
+      width: "100%",
+      marginTop: 14
+    }
+  }, "閉じる"))));
 }
 
 // ═══════════════════ スタイル ═══════════════════
@@ -8649,6 +9581,22 @@ const S = {
     flexDirection: "column",
     background: "#dfe6da",
     padding: "0 0 env(safe-area-inset-bottom)"
+  },
+  // 全画面のまま作図するときの操作パネル。地図の覆い(mapWrapFull, zIndex 900)より
+  // 前に出す。画面の半分強までにして、上半分は地図をタップできる状態を残す。
+  drawPanelFull: {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 920,
+    maxHeight: "58vh",
+    overflowY: "auto",
+    background: "rgba(255,255,255,0.97)",
+    borderTop: "1.5px solid #D8E0D2",
+    borderRadius: "14px 14px 0 0",
+    padding: "12px 12px calc(14px + env(safe-area-inset-bottom))",
+    boxShadow: "0 -4px 18px rgba(0,0,0,0.22)"
   },
   mapFullExit: {
     position: "fixed",

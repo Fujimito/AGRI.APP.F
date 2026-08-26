@@ -1,0 +1,149 @@
+// Code.gs を Node 上で動かすための張りぼて。
+//
+// Google Apps Script でしか動かないコードを、テスト(tools/gastest.cjs)と
+// ローカル確認用サーバー(tools/fakegas.cjs)の両方から呼べるようにする。
+// Code.gs 本体には手を入れない。検証したいのは「シートに何を書いたか」
+// 「何を返したか」であって、Googleの実装そのものではないため張りぼてで足りる。
+//
+// 配布物ではない(GitHub Pages には置かれない)。
+"use strict";
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+
+const SRC = path.join(__dirname, "..", "Code.gs");
+
+// ─────────── スプレッドシートの張りぼて ───────────
+// 実物と同じく「2次元配列 + 1始まりの行列番号」で持つ。
+class FakeSheet {
+  constructor(name) {
+    this.name = name;
+    this.rows = [];      // rows[r][c] (0始まり)
+    this.frozen = 0;
+  }
+  getName() { return this.name; }
+  getLastRow() {
+    for (let r = this.rows.length - 1; r >= 0; r--) {
+      const row = this.rows[r] || [];
+      if (row.some(v => v !== "" && v !== undefined && v !== null)) return r + 1;
+    }
+    return 0;
+  }
+  getLastColumn() {
+    let n = 0;
+    this.rows.forEach(row => { if (row && row.length > n) n = row.length; });
+    return n;
+  }
+  _cell(r, c) {
+    if (!this.rows[r]) this.rows[r] = [];
+    const v = this.rows[r][c];
+    return v === undefined ? "" : v;
+  }
+  getRange(row, col, numRows, numCols) {
+    const sh = this;
+    const r0 = row - 1, c0 = col - 1;
+    const nr = numRows === undefined ? 1 : numRows;
+    const nc = numCols === undefined ? 1 : numCols;
+    const range = {
+      getValues() {
+        const out = [];
+        for (let i = 0; i < nr; i++) {
+          const line = [];
+          for (let j = 0; j < nc; j++) line.push(sh._cell(r0 + i, c0 + j));
+          out.push(line);
+        }
+        return out;
+      },
+      setValues(vals) {
+        for (let i = 0; i < nr; i++) {
+          if (!sh.rows[r0 + i]) sh.rows[r0 + i] = [];
+          for (let j = 0; j < nc; j++) sh.rows[r0 + i][c0 + j] = vals[i][j];
+        }
+        return range;
+      },
+      getValue() { return sh._cell(r0, c0); },
+      setValue(v) {
+        if (!sh.rows[r0]) sh.rows[r0] = [];
+        sh.rows[r0][c0] = v;
+        return range;
+      },
+      setFontWeight() { return range; },
+      setBackground() { return range; },
+      setBackgrounds() { return range; },
+      clearContent() {
+        for (let i = 0; i < nr; i++) {
+          if (!sh.rows[r0 + i]) continue;
+          for (let j = 0; j < nc; j++) sh.rows[r0 + i][c0 + j] = "";
+        }
+        return range;
+      },
+    };
+    return range;
+  }
+  appendRow(values) {
+    this.rows[this.getLastRow()] = values.slice();
+  }
+  setFrozenRows(n) { this.frozen = n; }
+  deleteRows(start, count) { this.rows.splice(start - 1, count); }
+}
+
+class FakeSpreadsheet {
+  constructor() { this.sheets = {}; }
+  getSheetByName(n) { return this.sheets[n] || null; }
+  insertSheet(n) { this.sheets[n] = new FakeSheet(n); return this.sheets[n]; }
+}
+
+function makeContext(props) {
+  const ss = new FakeSpreadsheet();
+  const scriptProps = Object.assign({}, props);
+  const ctx = {
+    console,
+    SHEET_STATE: ss,          // テスト側から中身を覗くための参照
+    LOCK_FREE: true,          // false にするとロックが取れない状況を再現する
+    SpreadsheetApp: { getActiveSpreadsheet: () => ss },
+    PropertiesService: {
+      getScriptProperties: () => ({
+        getProperty: k => (k in scriptProps ? scriptProps[k] : null),
+      }),
+    },
+    LockService: {
+      getScriptLock: () => ({
+        tryLock: () => ctx.LOCK_FREE,
+        releaseLock: () => {},
+      }),
+    },
+    ContentService: {
+      MimeType: { JSON: "application/json" },
+      createTextOutput: s => ({ _s: s, setMimeType() { return this; }, getContent() { return this._s; } }),
+    },
+    Utilities: {
+      formatDate: (d, tz, fmt) => new Date(d).toISOString().slice(0, 19).replace("T", " "),
+    },
+    DriveApp: {
+      getFileById() { throw new Error("no drive in test"); },
+      getFilesByName: () => ({ hasNext: () => false }),
+    },
+  };
+  ctx.globalThis = ctx;
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(SRC, "utf8"), ctx, { filename: "Code.gs" });
+  // トップレベルの const はコンテキストのプロパティにならないので、
+  // テストから参照したい定数は式として取り出す
+  ctx.read = expr => vm.runInContext(expr, ctx);
+  return ctx;
+}
+
+// doPost を呼んで、返ってきたJSONをオブジェクトで受け取る
+function post(ctx, body) {
+  const out = ctx.doPost({ postData: { contents: JSON.stringify(body) } });
+  return JSON.parse(out.getContent());
+}
+
+
+// doPost を呼んで、返ってきたJSONをオブジェクトで受け取る
+function post(ctx, body) {
+  const out = ctx.doPost({ postData: { contents: JSON.stringify(body) } });
+  return JSON.parse(out.getContent());
+}
+
+module.exports = { makeContext, post, FakeSheet, FakeSpreadsheet };
