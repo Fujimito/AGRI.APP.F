@@ -1,6 +1,6 @@
 // 薬液調合ノート — Service Worker(完全オフライン対応)
 // 更新を配布するときは CACHE_VERSION の数字を上げてください
-const CACHE_VERSION = "tankmix-v8.65";
+const CACHE_VERSION = "tankmix-v8.66";
 
 // これが1つでも欠けるとアプリが起動しないので、揃わなければ更新を見送る。
 const CORE_ASSETS = [
