@@ -228,6 +228,311 @@ function findShareRow_(sh, team) {
   return 0;
 }
 
+// ══════════ 進捗共有:圃場・作業を「1件1行」で持つ ══════════
+// 旧 cloudSave は 1チーム=1セルにJSON全体を詰め、丸ごと置き換える方式だった。
+// この方式だと次の3つが同時に起きる。
+//   (1) 誰かの保存が、他の人が入れた実績をまとめて消す(last-write-wins)
+//   (2) 1セル上限に当たり、圃場を増やすと保存できなくなる(45,000文字で断っている)
+//   (3) 他の端末の進捗を読む手段がない
+// 進捗マップは(3)が要るので、レコード単位の表に作り直す。
+// 旧方式(cloudSave / cloudLoad)は残す。並行稼働させて段階的に移行するため。
+
+const FIELD_SHEET = "圃場マスタ";
+const WORK_SHEET = "作業";
+
+// ── 「編集日時」と「更新日時」を分けている理由 ──
+// 編集日時 = その端末が値を書き換えた時刻(アプリが付ける)。競合の勝ち負けに使う。
+// 更新日時 = サーバーが行を書いた時刻(GASが付ける)。差分取得(since)に使う。
+// 1つにまとめると、pull した端末が次に push したとき「サーバーが付けた時刻」を
+// 編集時刻として送り返すことになり、自分の更新が常に最新と判定されて
+// 他人の変更を踏み潰す。逆に編集日時だけにすると、時計のずれた端末の行が
+// since の範囲から漏れて永久に配られない。用途が違うので列を分ける。
+const FIELD_HEADERS = [
+  "圃場ID",   // 0
+  "チームコード", // 1
+  "名称",     // 2
+  "作物",     // 3
+  "地区",     // 4
+  "面積a",    // 5
+  "中心lat",  // 6
+  "中心lng",  // 7
+  "ポリゴン", // 8  座標配列のJSON
+  "編集日時", // 9  端末が付けた時刻(ISO)
+  "更新日時", // 10 サーバーが付けた時刻(ISO)
+  "更新者",   // 11
+  "更新端末", // 12
+  "削除",     // 13 論理削除
+];
+const FIELD_ID_COL = 0, FIELD_EDIT_COL = 9, FIELD_AT_COL = 10;
+
+const WORK_HEADERS = [
+  "作業ID",     // 0
+  "チームコード", // 1
+  "作業日",     // 2
+  "圃場ID",     // 3
+  "圃場名",     // 4
+  "状態",       // 5  planned / mixed / done
+  "予定L",      // 6
+  "実績L",      // 7
+  "実績面積a",  // 8
+  "薬剤数",     // 9
+  "薬剤内容",   // 10
+  "記録者",     // 11
+  "更新端末",   // 12
+  "実績入力日時", // 13
+  "編集日時",   // 14
+  "更新日時",   // 15
+  "削除",       // 16
+];
+const WORK_ID_COL = 0, WORK_EDIT_COL = 14, WORK_AT_COL = 15;
+
+// 1回の push で受け付ける最大件数。GASの実行時間(6分)に当たる前に断る。
+// 超えたぶんはアプリ側が分割して送り直す。無言で切り捨てない。
+const PUSH_MAX = 300;
+
+// 更新日時は ISO8601 の文字列で持つ。Date のまま入れるとシートのタイムゾーンや
+// 表示形式に引きずられ、差分取得(since より新しい行)の比較がずれる。
+// ISO文字列なら辞書順の比較がそのまま時刻の比較になる。
+function isoNow_() {
+  return new Date().toISOString();
+}
+
+// ヘッダー行を現行の定義に合わせる。列を増やした版へ差し替えたとき、
+// 古いヘッダーのまま新しい幅で書き込むと見出しと中身がずれるため、
+// シートを掴むたびに幅だけ確認する。
+function getRecSheet_(name, headers, headBg) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(name);
+  if (!sh) sh = ss.insertSheet(name);
+  if (sh.getLastRow() === 0) {
+    sh.appendRow(headers);
+    sh.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground(headBg);
+    sh.setFrozenRows(1);
+    return sh;
+  }
+  const cur = sh.getRange(1, 1, 1, headers.length).getValues()[0];
+  let same = true;
+  for (let i = 0; i < headers.length; i++) {
+    if (String(cur[i]) !== headers[i]) { same = false; break; }
+  }
+  if (!same) {
+    sh.getRange(1, 1, 1, headers.length).setValues([headers])
+      .setFontWeight("bold").setBackground(headBg);
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+function getFieldSheet_() { return getRecSheet_(FIELD_SHEET, FIELD_HEADERS, "#EDF5EE"); }
+function getWorkSheet_()  { return getRecSheet_(WORK_SHEET,  WORK_HEADERS,  "#EAF3FA"); }
+
+// ── 圃場1件 → 行 ──
+// 文字列はすべて safeCell_ を通す。圃場名・地区はユーザーの自由入力で、
+// "=" 始まりだとシート側で数式として評価される(数式インジェクション)。
+function fieldRow_(f, team, at) {
+  const c = Array.isArray(f.center) ? f.center : [];
+  return [
+    String(f.id),
+    safeCell_(team),
+    safeCell_(f.name || ""),
+    safeCell_(f.crop || ""),
+    safeCell_(f.area || ""),
+    Number(f.areaA) || "",
+    Number(c[0]) || "",
+    Number(c[1]) || "",
+    safeCell_(JSON.stringify(f.polygon || [])),
+    safeCell_(String(f.updatedAt || "")),
+    at,
+    safeCell_(f.by || ""),
+    safeCell_(f.deviceId || ""),
+    f.deleted ? 1 : "",
+  ];
+}
+
+function fieldObj_(r) {
+  // ポリゴンが壊れていても、その圃場1件を落とすだけで済ませる。
+  // ここで例外を投げると pull 全体が失敗し、他の圃場まで配られなくなる。
+  let poly = [];
+  try {
+    const raw = String(r[8] || "");
+    if (raw) poly = JSON.parse(raw);
+  } catch (err) {
+    poly = [];
+  }
+  const lat = r[6], lng = r[7];
+  return {
+    id: Number(r[0]),
+    name: String(r[2] || ""),
+    crop: String(r[3] || ""),
+    area: String(r[4] || ""),
+    areaA: r[5] === "" ? "" : Number(r[5]),
+    center: (lat === "" || lng === "") ? null : [Number(lat), Number(lng)],
+    polygon: Array.isArray(poly) ? poly : [],
+    updatedAt: String(r[FIELD_EDIT_COL] || ""),
+    serverAt: String(r[FIELD_AT_COL] || ""),
+    by: String(r[11] || ""),
+    deleted: !!r[13],
+  };
+}
+
+// ── 作業1件 → 行 ──
+function workRow_(w, team, at) {
+  return [
+    String(w.id),
+    safeCell_(team),
+    safeCell_(w.workDate || ""),
+    String(w.fieldId),
+    safeCell_(w.fieldName || ""),
+    safeCell_(w.status || "planned"),
+    Number(w.plannedL) || "",
+    Number(w.sprayedL) || "",
+    Number(w.reportAreaA) || "",
+    Number(w.chemCount) || 0,
+    safeCell_(w.chemText || ""),
+    safeCell_(w.by || ""),
+    safeCell_(w.deviceId || ""),
+    safeCell_(String(w.reportedAt || "")),
+    safeCell_(String(w.updatedAt || "")),
+    at,
+    w.deleted ? 1 : "",
+  ];
+}
+
+function workObj_(r) {
+  return {
+    id: Number(r[0]),
+    workDate: String(r[2] || ""),
+    fieldId: Number(r[3]),
+    fieldName: String(r[4] || ""),
+    status: String(r[5] || "planned"),
+    plannedL: r[6] === "" ? 0 : Number(r[6]),
+    sprayedL: r[7] === "" ? 0 : Number(r[7]),
+    reportAreaA: r[8] === "" ? "" : Number(r[8]),
+    chemCount: Number(r[9]) || 0,
+    chemText: String(r[10] || ""),
+    by: String(r[11] || ""),
+    reportedAt: String(r[13] || ""),
+    updatedAt: String(r[WORK_EDIT_COL] || ""),
+    serverAt: String(r[WORK_AT_COL] || ""),
+    deleted: !!r[16],
+  };
+}
+
+// ── 上書き前の値を履歴シートへ退避する ──
+// 圃場だけを対象にしている。圃場のポリゴンは現場で1枚ずつ手で囲んだもので、
+// 消えると囲み直すしかない。作業は日ごとに作られ、確定した内容は「防除記録」
+// シートにも残るため、ここで二重に積むとログが作業で埋まって
+// 肝心の圃場の履歴が SHARE_LOG_MAX で押し出される。
+function pushRecLogs_(logs) {
+  if (!logs.length) return;
+  const sh = getShareLogSheet_();
+  sh.getRange(sh.getLastRow() + 1, 1, logs.length, 4).setValues(logs);
+  const over = (sh.getLastRow() - 1) - SHARE_LOG_MAX;
+  if (over > 0) sh.deleteRows(2, over);
+}
+
+// ── upsert:IDが一致する行は上書き、無ければ追記 ──
+//
+// 上書きするかどうかは「編集日時」の比較で決める。後から届いたほうが必ず勝つ、
+// にはしない。圏外に長く居た端末が電波復帰時に古い内容を送り返してきたとき、
+// 新しい実績を巻き戻してしまうため。編集日時が空(旧版の端末)のときだけ、
+// 判定材料が無いので素通しする。
+//
+// 書き込みは最後に1回の setValues でまとめる。1行ずつ setValue を呼ぶと
+// 件数ぶんラウンドトリップが発生し、初回の一括投入で6分制限に当たる。
+function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind) {
+  const width = headers.length;
+  const last = sh.getLastRow();
+  const rows = last >= 2 ? sh.getRange(2, 1, last - 1, width).getValues() : [];
+  const idx = {};
+  for (let i = 0; i < rows.length; i++) idx[String(rows[i][idCol])] = i;
+
+  const at = isoNow_();
+  const logs = [];
+  let updated = 0, added = 0, skipped = 0;
+
+  for (let k = 0; k < incoming.length; k++) {
+    const item = incoming[k];
+    if (!item || item.id === undefined || item.id === null || item.id === "") {
+      skipped++;
+      continue;
+    }
+    const key = String(item.id);
+    const values = toRow(item, team, at);
+    if (key in idx) {
+      const i = idx[key];
+      const prevEdit = String(rows[i][editCol] || "");
+      const newEdit = String(item.updatedAt || "");
+      if (newEdit && prevEdit && newEdit < prevEdit) {
+        skipped++;
+        continue;
+      }
+      if (logKind) {
+        logs.push([at, safeCell_(team), safeCell_(item.by || ""),
+                   safeCell_(logKind + " " + JSON.stringify(rows[i]))]);
+      }
+      rows[i] = values;
+      updated++;
+    } else {
+      idx[key] = rows.length;
+      rows.push(values);
+      added++;
+    }
+  }
+
+  if (updated > 0 || added > 0) {
+    sh.getRange(2, 1, rows.length, width).setValues(rows);
+  }
+  pushRecLogs_(logs);
+  return { ok: true, added: added, updated: updated, skipped: skipped, serverTime: at };
+}
+
+// ── 差分取得:since より後にサーバーが書いた行だけ返す ──
+function pullRows_(sh, headers, atCol, team, since, mapper) {
+  const last = sh.getLastRow();
+  if (last < 2) return [];
+  const rows = sh.getRange(2, 1, last - 1, headers.length).getValues();
+  const s = String(since || "");
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r[0] && r[0] !== 0) continue;              // 空行
+    if (team && String(r[1]) !== String(team)) continue;
+    if (s && String(r[atCol] || "") <= s) continue;
+    out.push(mapper(r));
+  }
+  return out;
+}
+
+// ── 進捗マップ用の軽い応答 ──
+// ポリゴンを返さない。座標は各端末が既に持っていて、地図が要るのは
+// 「どの圃場が何色か」だけ。応答が小さいほど電波の弱い場所でも通る。
+function progressItems_(team, from, to) {
+  const sh = getWorkSheet_();
+  const last = sh.getLastRow();
+  if (last < 2) return [];
+  const rows = sh.getRange(2, 1, last - 1, WORK_HEADERS.length).getValues();
+  const out = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r[0] && r[0] !== 0) continue;
+    if (team && String(r[1]) !== String(team)) continue;
+    if (r[16]) continue;                            // 削除済み
+    const d = String(r[2] || "");
+    if (from && d < from) continue;
+    if (to && d > to) continue;
+    out.push({
+      fieldId: Number(r[3]),
+      workDate: d,
+      status: String(r[5] || "planned"),
+      sprayedL: r[7] === "" ? 0 : Number(r[7]),
+      areaA: r[8] === "" ? "" : Number(r[8]),
+      by: String(r[11] || ""),
+      at: String(r[13] || r[WORK_AT_COL] || ""),
+    });
+  }
+  return out;
+}
+
 // ══════════ 農薬データ(chemdb.json)の配信 ══════════
 // Googleドライブに置いた chemdb.json を読み、分割して返す。
 // アプリ側は part=0 から順に呼び、chunk を連結して JSON.parse する。
@@ -353,8 +658,80 @@ function buildRow_(data, status) {
   ];
 }
 
+// ── 読み取り専用の処理 ──
+// 呼び出し元(doPost)で合言葉の照合を済ませてから入る。ここでは認証しない。
+// シートに書き込む処理を絶対に足さないこと。ロックを取らずに走るため、
+// ここで書くと他の端末の書き込みと競合してデータが壊れる。
+function doRead_(type, data) {
+  if (type === "chemdbLoad") {
+    return json_(chemdbChunk_(data.part, data.size));
+  }
+
+  if (type === "cloudLoad") {
+    if (!data.team) return json_({ ok: false, error: "team required" });
+    const sh = getShareSheet_();
+    const row = findShareRow_(sh, data.team);
+    if (row <= 0) return json_({ ok: true, payload: null });
+    const payload = sh.getRange(row, 2).getValue();
+    return json_({ ok: true, payload: payload || null });
+  }
+
+  if (type === "pull") {
+    if (!data.team) return json_({ ok: false, error: "team required" });
+    const since = String(data.since || "");
+    // serverTime は「この応答が含む範囲の終わり」。次回の since に使う。
+    // 読む前に採っておく。読んでいる最中に他の端末が書いた行は、次回もう一度
+    // 配られるだけで済む。読んだ後に採ると、その行を永久に取りこぼす。
+    const serverTime = isoNow_();
+    return json_({
+      ok: true,
+      fields: pullRows_(getFieldSheet_(), FIELD_HEADERS, FIELD_AT_COL, data.team, since, fieldObj_),
+      works:  pullRows_(getWorkSheet_(),  WORK_HEADERS,  WORK_AT_COL,  data.team, since, workObj_),
+      serverTime: serverTime,
+    });
+  }
+
+  if (type === "progress") {
+    if (!data.team) return json_({ ok: false, error: "team required" });
+    const from = String(data.from || data.date || "");
+    const to = String(data.to || data.date || "");
+    return json_({
+      ok: true,
+      items: progressItems_(data.team, from, to),
+      serverTime: isoNow_(),
+    });
+  }
+
+  return json_({ ok: false, error: "unknown type" });
+}
+
 // ── 受信(アプリからのPOST) ──
 function doPost(e) {
+  // ── 読み取りだけのリクエストはロックを取らずに先に処理する ──
+  // 以前は全種類がスクリプトロックを取っていた。進捗マップの「最新を取得」は
+  // 散布中に何度も押されるが、そのとき他の端末が実績を送っていると
+  // ロック待ちで10秒たって "busy" が返る。読むだけの処理は他と競合しないので、
+  // 書き込み系より前で返してしまう。
+  let head = null;
+  try {
+    head = JSON.parse(e.postData.contents);
+  } catch (err) {
+    return json_({ ok: false, error: "invalid json" });
+  }
+  const headSecret = sharedSecret_();
+  if (headSecret && !secretEquals_(headSecret, head.auth)) {
+    return json_({ ok: false, error: "auth" });
+  }
+  const headType = head.type || "record";
+  if (headType === "pull" || headType === "progress" || headType === "cloudLoad" ||
+      headType === "chemdbLoad") {
+    try {
+      return doRead_(headType, head);
+    } catch (err) {
+      return json_({ ok: false, error: String(err) });
+    }
+  }
+
   const lock = LockService.getScriptLock();
   // tryLock はロックを取れなくても例外を投げない。以前は waitLock を try の外で
   // 呼んでいたため、取得に失敗すると finally の releaseLock() が
@@ -377,12 +754,8 @@ function doPost(e) {
 
     const type = data.type || "record";
 
-    // ── 農薬データの配信(分割) ──
-    // 合言葉の照合より後に置いてある。URLを知る第三者にドライブのファイルを
-    // 読ませないため、記録の書き込みと同じ認証を通す。
-    if (type === "chemdbLoad") {
-      return json_(chemdbChunk_(data.part, data.size));
-    }
+    // 読み取り専用の種類(chemdbLoad / cloudLoad / pull / progress)は
+    // ロックを取る前に doRead_ で処理済み。ここには来ない。
 
     // ── チーム共有:圃場・薬剤・作業リストのまとめ保存/読込 ──
     // 専用シート「_共有データ」に保存(PropertiesServiceの9KB上限を回避)
@@ -411,13 +784,24 @@ function doPost(e) {
       }
       return json_({ ok: true, saved: true, size: payload.length });
     }
-    if (type === "cloudLoad") {
+    // ── 進捗共有(レコード単位) ──
+    // cloudSave/cloudLoad と違い、送った件数ぶんだけを反映する。
+    // 他の端末が入れた圃場・実績には触らない。
+    if (type === "pushFields" || type === "pushWorks") {
       if (!data.team) return json_({ ok: false, error: "team required" });
-      const sh = getShareSheet_();
-      const row = findShareRow_(sh, data.team);
-      if (row <= 0) return json_({ ok: true, payload: null });
-      const payload = sh.getRange(row, 2).getValue();
-      return json_({ ok: true, payload: payload || null });
+      const list = data.items;
+      if (!Array.isArray(list)) return json_({ ok: false, error: "items required" });
+      // 多すぎるぶんを黙って捨てると、送った側は成功したと思って再送しない。
+      // 件数を返して、アプリ側に分割して送り直させる。
+      if (list.length > PUSH_MAX) {
+        return json_({ ok: false, error: "too many", max: PUSH_MAX, got: list.length });
+      }
+      if (type === "pushFields") {
+        return json_(upsertRows_(getFieldSheet_(), FIELD_HEADERS, FIELD_ID_COL, FIELD_EDIT_COL,
+                                 list, fieldRow_, data.team, "圃場"));
+      }
+      return json_(upsertRows_(getWorkSheet_(), WORK_HEADERS, WORK_ID_COL, WORK_EDIT_COL,
+                               list, workRow_, data.team, null));
     }
 
     const rec = data.record;
@@ -474,9 +858,13 @@ function doGet() {
   // 「合言葉が未設定です」と出せるようにするための情報で、合言葉そのものは返さない。
   return json_({
     ok: true,
-    app: "薬液調合ノート 受信口 v8(1散布=1行・チーム共有対応)",
+    app: "薬液調合ノート 受信口 v9(1散布=1行・進捗共有対応)",
     sheet: SHEET_NAME,
     secured: !!sharedSecret_(),
+    // アプリ側が「このGASは進捗マップに対応しているか」を判定するための印。
+    // 古いGASのまま進捗マップを開くと unknown type が返るだけで理由が分からない。
+    features: ["record", "report", "chemdbLoad", "cloudSave", "cloudLoad",
+               "pushFields", "pushWorks", "pull", "progress"],
   });
 }
 
