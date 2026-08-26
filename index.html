@@ -35,6 +35,16 @@
   * { box-sizing: border-box; margin: 0; }
   html, body { height: 100%; }
   body { background: #F0F3EC; overflow-x: hidden; }
+  /* 画面の高さぴったりの器を作り、中身(main)だけをスクロールさせる。
+     タブバーを position:fixed で下に貼ると、アドレスバーの出入りや
+     キーボードで位置が動く(特にタブレット)。器の中の一番下に置けば動かない。
+     dvh は対応していないブラウザで無視され、上の vh が残る */
+  .app-shell { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; }
+  .app-shell > * { flex: 0 0 auto; }
+  .app-shell > main { flex: 1 1 auto; overflow-y: auto; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+  /* 幅の狭い端末でボタンが見切れないようにする。
+     flex の子は既定では中身より小さくならず、外へ押し出す */
+  .app-shell main button, .app-shell main input, .app-shell main select { max-width: 100%; }
   .num { font-variant-numeric: tabular-nums; }
   input:focus-visible, button:focus-visible, select:focus-visible { outline: 3px solid #2E7D4F; outline-offset: 1px; }
   button { touch-action: manipulation; }
