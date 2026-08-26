@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.51";
+const APP_VERSION = "v8.52";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -256,6 +256,34 @@ const polygonCenter = latlngs => {
   });
   return [lat / latlngs.length, lng / latlngs.length];
 };
+// ねじれ(蝶ネクタイ形)を、頂点の並べ替えだけで直す。座標そのものは1つも動かさない。
+//
+// ねじれる原因は回り方(時計回り/反時計回り)ではなく、外周をたどる順に打っていない
+// ことにある。実測で、同じ四角形を時計回り・反時計回りのどちらで打っても
+// polygonSelfIntersects の判定は false で一致する。交差するのは、たとえば
+// 左 → 右上 → 左下 → 右 のように、周を一周せず行き来する順で打ったとき。
+//
+// 重心から見た角度の順に並べ直すと、その並びは必ず一周する順になる。
+//
+// ただし万能ではない。大きくへこんだ(凹んだ)圃場では、角度順が本人の意図した
+// 形と変わることがある。そのため自動では適用せず、ボタンを押したときだけ実行し、
+// 履歴に積んで「↩ 1つ戻す」で戻せるようにしている。
+// 直しきれなかった場合(並べ替えてもまだ交差する)は呼び出し側で断ること。
+const untwistPts = pts => {
+  if (!Array.isArray(pts) || pts.length < 4) return pts;
+  const c = polygonCenter(pts);
+  if (!c) return pts;
+  // 経度は緯度が上がるほど実距離が縮む。cos で補正しないと、南北に細長い圃場で
+  // 角度が歪んで並び順を間違える
+  const k = Math.cos(c[0] * Math.PI / 180) || 1;
+  return pts.map((pt, i) => ({
+    pt,
+    i,
+    a: Math.atan2(pt[0] - c[0], (pt[1] - c[1]) * k)
+  })).sort((x, y) => x.a - y.a || x.i - y.i) // 同じ角度なら元の順を保つ(並びが毎回変わらないように)
+  .map(x => x.pt);
+};
+
 
 // 緯度経度を小数第9位に丸める。
 // 地図から受け取る座標は倍精度のままなので 35.68123456789012 のような
@@ -969,6 +997,11 @@ function App() {
   const removeWork = id => {
     addTomb("works", id);
     setWorksSave(works.filter(w => w.id !== id));
+    // 墓標を積むだけでは、他の端末の進捗マップはその圃場を実績済のまま出し続ける。
+    // 送るところまでやって初めて色が戻る
+    pushProgress({
+      quiet: true
+    });
   };
   // 複数の作業をまとめて外す(選択削除・一括削除用)。
   // 1件ずつremoveWorkを呼ぶと古いworksを元に上書きし合って1件しか消えないため、必ずまとめて処理する。
@@ -1308,6 +1341,9 @@ function App() {
   const deleteWork = id => {
     addTomb("works", id);
     setWorksSave(works.filter(w => w.id !== id));
+    pushProgress({
+      quiet: true
+    });
   };
   const buildPayload = w => {
     const f = resolveWork(w);
@@ -5604,10 +5640,8 @@ function GoogleMapTab(p) {
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
   const mapWrapRef = React.useRef(null); // 地図+凡例の枠。高さを実測して決める
-  // 作図はパネルが画面外に出てしまうので、始めたら全画面を解除する
-  React.useEffect(() => {
-    if (drawing) setFullMap(false);
-  }, [drawing]);
+  // 全画面のまま作図できる。作図パネルは全画面のとき、地図の上に
+  // 下からのシートとして重なる(S.drawPanelFull)。
   const [gpsOn, setGpsOn] = React.useState(false);
   const [mapType, setMapType] = React.useState("hybrid"); // hybrid=衛星+地名, roadmap=地図のみ
   const drawingRef = React.useRef(false);
@@ -5643,6 +5677,21 @@ function GoogleMapTab(p) {
     const sel = typeof o.select === "number" ? o.select : -1;
     selPtRef.current = sel;
     setSelPt(sel);
+  };
+  // ねじれを、頂点の並べ替えだけで直す。座標は1つも動かさない。
+  // 自動では走らせない。凹んだ圃場では意図した形と変わりうるので、
+  // 押した本人が結果を見て「↩ 1つ戻す」で戻せる形にしている。
+  const fixTwist = () => {
+    const cur = drawPtsRef.current;
+    const next = untwistPts(cur);
+    if (polygonSelfIntersects(next)) {
+      // 並べ替えでは解けない形(頂点が重なっている等)。できなかったと伝えて、
+      // 黙って何もしないことはしない
+      p.flash && p.flash("並び順では直せませんでした。頂点をドラッグして直してください");
+      return;
+    }
+    commitPts(next);
+    p.flash && p.flash("頂点の並び順を直しました(戻すには「↩ 1つ戻す」)");
   };
   // 頂点は変えず選択だけ切り替える。編集ではないので履歴には積まない
   const selectPt = i => {
@@ -6186,7 +6235,7 @@ function GoogleMapTab(p) {
       display: "flex",
       gap: 8
     }
-  }, !listOnly && !drawing && /*#__PURE__*/React.createElement("button", {
+  }, !listOnly && /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(true),
     style: S.smallSecondary,
     title: "地図を全画面で見る"
@@ -6261,7 +6310,7 @@ function GoogleMapTab(p) {
     onClick: () => setFullMap(false),
     style: S.mapFullExit
   }, "✕ 全画面をやめる")), drawing && /*#__PURE__*/React.createElement("div", {
-    style: {
+    style: fullMap ? S.drawPanelFull : {
       ...S.settingsBox,
       marginTop: 12
     }
@@ -6288,7 +6337,17 @@ function GoogleMapTab(p) {
       ...S.drawWarn,
       display: drawCrossed ? "" : "none"
     }
-  }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。頂点をドラッグしてねじれを直すか、「↩ 1つ戻す」で戻してください。"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
+  }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。下の「並び順を直す」を押すか、頂点をドラッグして直してください。"),
+  // 警告と同じく、常に置いて display だけを切り替える(ドラッグ中はReactを動かせない)
+  /*#__PURE__*/React.createElement("button", {
+    onClick: fixTwist,
+    style: {
+      ...S.secondaryBtn,
+      width: "100%",
+      marginTop: 8,
+      display: drawCrossed ? "" : "none"
+    }
+  }, "🔀 並び順を直す"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
     style: S.selPtRow
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -6374,7 +6433,14 @@ function GoogleMapTab(p) {
       ...S.primaryBtn,
       width: "100%",
       marginTop: 10,
-      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
+      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4,
+      // 全画面ではパネルがスクロールするので、一番押したいこのボタンが
+      // 下に隠れてしまう。パネルの底に張り付けて常に見えるようにする
+      ...(fullMap ? {
+        position: "sticky",
+        bottom: 0,
+        zIndex: 1
+      } : {})
     }
   }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
     style: S.card,
@@ -6428,10 +6494,8 @@ function LeafletMapTab(p) {
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
   const mapWrapRef = React.useRef(null); // 地図+凡例の枠。高さを実測して決める
-  // 作図はパネルが画面外に出てしまうので、始めたら全画面を解除する
-  React.useEffect(() => {
-    if (drawing) setFullMap(false);
-  }, [drawing]);
+  // 全画面のまま作図できる。作図パネルは全画面のとき、地図の上に
+  // 下からのシートとして重なる(S.drawPanelFull)。
   const [gpsOn, setGpsOn] = React.useState(false);
   const [zoom, setZoom] = React.useState(15);
   const [tileMode, setTileMode] = React.useState("photo"); // "photo" | "map"
@@ -6467,6 +6531,21 @@ function LeafletMapTab(p) {
     const sel = typeof o.select === "number" ? o.select : -1;
     selPtRef.current = sel;
     setSelPt(sel);
+  };
+  // ねじれを、頂点の並べ替えだけで直す。座標は1つも動かさない。
+  // 自動では走らせない。凹んだ圃場では意図した形と変わりうるので、
+  // 押した本人が結果を見て「↩ 1つ戻す」で戻せる形にしている。
+  const fixTwist = () => {
+    const cur = drawPtsRef.current;
+    const next = untwistPts(cur);
+    if (polygonSelfIntersects(next)) {
+      // 並べ替えでは解けない形(頂点が重なっている等)。できなかったと伝えて、
+      // 黙って何もしないことはしない
+      p.flash && p.flash("並び順では直せませんでした。頂点をドラッグして直してください");
+      return;
+    }
+    commitPts(next);
+    p.flash && p.flash("頂点の並び順を直しました(戻すには「↩ 1つ戻す」)");
   };
   // 頂点は変えず選択だけ切り替える。編集ではないので履歴には積まない
   const selectPt = i => {
@@ -6925,7 +7004,7 @@ function LeafletMapTab(p) {
       display: "flex",
       gap: 8
     }
-  }, !listOnly && !drawing && /*#__PURE__*/React.createElement("button", {
+  }, !listOnly && /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(true),
     style: S.smallSecondary,
     title: "地図を全画面で見る"
@@ -6981,7 +7060,7 @@ function LeafletMapTab(p) {
     onClick: () => setFullMap(false),
     style: S.mapFullExit
   }, "✕ 全画面をやめる")), drawing && /*#__PURE__*/React.createElement("div", {
-    style: {
+    style: fullMap ? S.drawPanelFull : {
       ...S.settingsBox,
       marginTop: 12
     }
@@ -7008,7 +7087,17 @@ function LeafletMapTab(p) {
       ...S.drawWarn,
       display: drawCrossed ? "" : "none"
     }
-  }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。頂点をドラッグしてねじれを直すか、「↩ 1つ戻す」で戻してください。"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
+  }, "⚠ 線が交差しています。このままでは面積を正しく計算できないため登録できません。下の「並び順を直す」を押すか、頂点をドラッグして直してください。"),
+  // 警告と同じく、常に置いて display だけを切り替える(ドラッグ中はReactを動かせない)
+  /*#__PURE__*/React.createElement("button", {
+    onClick: fixTwist,
+    style: {
+      ...S.secondaryBtn,
+      width: "100%",
+      marginTop: 8,
+      display: drawCrossed ? "" : "none"
+    }
+  }, "🔀 並び順を直す"), selPt >= 0 && selPt < drawPts.length && /*#__PURE__*/React.createElement("div", {
     style: S.selPtRow
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -7094,7 +7183,14 @@ function LeafletMapTab(p) {
       ...S.primaryBtn,
       width: "100%",
       marginTop: 10,
-      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
+      opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4,
+      // 全画面ではパネルがスクロールするので、一番押したいこのボタンが
+      // 下に隠れてしまう。パネルの底に張り付けて常に見えるようにする
+      ...(fullMap ? {
+        position: "sticky",
+        bottom: 0,
+        zIndex: 1
+      } : {})
     }
   }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
     style: S.card,
@@ -7556,9 +7652,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.51",
+    ver: "v8.52",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 線が交差したときに「🔀 並び順を直す」ボタンが出るようになりました。頂点の座標は1つも動かさず、外周をたどる順に並べ替えるだけです。押したあと「↩ 1つ戻す」で元に戻せます。※大きくへこんだ形の圃場では意図した形と変わることがあるので、結果を見てから登録してください", "🗺 全画面のまま圃場を囲めるようになりました。これまでは作図を始めると全画面が解除されていました。全画面のときは操作パネルが下から重なり、「この圃場を登録」は常に画面の下端に出ます", "🚦 進捗マップに「◉ 対象だけ／○ 全圃場」の切り替えを追加しました。その期間に作業がある圃場だけを出せます(既定は全圃場)", "🐞 作業をその日のリストから外したとき、他の端末の進捗マップでその圃場が実績済のまま残る不具合を修正しました。外した時点で送るようにしています"]
+  }, {
+    ver: "v8.51",
+    date: "2026-08",
     notes: ["🚦 進捗マップを追加しました。実績を入力した圃場が緑に変わり、チームの誰がどこまで終えたかを1枚の地図で見られます。位置を作図する地図タブとは別のタブなので、散布中に触っても圃場の形が変わることはありません。更新は「🔄 最新を取得」を押したときだけです", "🚦 実績を保存すると、進捗ぶんが自動でスプレッドシートへ送られます。圏外だったときは未送信のまま残り、設定タブの「🚦 進捗を送信」で送り直せます。地図では未送信の実績を橙で表示します", "☁ 設定タブに「🔁 圃場を同期」を追加しました。変わった圃場だけを送って受け取るので、他の人が足した圃場や実績を消しません。従来の「☁↑ 端末→共有へ保存」は全部を置き換える方式で、同時に作業していると消える事故と、圃場が増えると保存できなくなる上限がありました。今後はこちらをお使いください", "⚙ スプレッドシート側に「圃場マスタ」「作業」シートが自動で追加されます。既存の「防除記録」シートはそのまま残り、内容も変わりません。Code.gsを最新に差し替えて「新バージョン」でデプロイし直してください"]
   }, {
     ver: "v8.50",
@@ -7893,6 +7993,9 @@ function ProgressMapTab(p) {
   const [zoom, setZoom] = React.useState(15);
   const [fullMap, setFullMap] = React.useState(false);
   const [range, setRange] = React.useState("day");
+  // 既定は全部出す。周りの圃場が見えていないと、どこを見ているのか分からなくなるため。
+  // 圃場が多くて対象が埋もれるときのために、絞り込めるようにしてある。
+  const [onlyTarget, setOnlyTarget] = React.useState(false);
   const [loading, setLoading] = React.useState(false);
   const [err, setErr] = React.useState("");
   const [sel, setSel] = React.useState(null);
@@ -8034,6 +8137,7 @@ function ProgressMapTab(p) {
       if (!f.polygon || f.polygon.length < 3) return;
       const st = statusByField.get(f.id);
       const key = st ? st.status : "none";
+      if (onlyTarget && key === "none") return;
       const c = PROGRESS_STATES[key] || PROGRESS_STATES.none;
       const poly = L.polygon(f.polygon, {
         color: c.stroke,
@@ -8069,7 +8173,7 @@ function ProgressMapTab(p) {
         // ここで落とさず、既定の中心のままにする
       }
     }
-  }, [ready, p.fields, statusByField, zoom]);
+  }, [ready, p.fields, statusByField, zoom, onlyTarget]);
 
   const legend = /*#__PURE__*/React.createElement("div", {
     style: {
@@ -8126,6 +8230,13 @@ function ProgressMapTab(p) {
       ...(range === r[0] ? S.segOn : {})
     }
   }, r[1])), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOnlyTarget(!onlyTarget),
+    style: {
+      ...S.mapSeg,
+      ...(onlyTarget ? S.segOn : {})
+    },
+    title: "この期間に作業がある圃場だけを地図に出す"
+  }, onlyTarget ? "◉ 対象だけ" : "○ 全圃場"), /*#__PURE__*/React.createElement("button", {
     onClick: refresh,
     disabled: loading,
     style: {
@@ -9470,6 +9581,22 @@ const S = {
     flexDirection: "column",
     background: "#dfe6da",
     padding: "0 0 env(safe-area-inset-bottom)"
+  },
+  // 全画面のまま作図するときの操作パネル。地図の覆い(mapWrapFull, zIndex 900)より
+  // 前に出す。画面の半分強までにして、上半分は地図をタップできる状態を残す。
+  drawPanelFull: {
+    position: "fixed",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 920,
+    maxHeight: "58vh",
+    overflowY: "auto",
+    background: "rgba(255,255,255,0.97)",
+    borderTop: "1.5px solid #D8E0D2",
+    borderRadius: "14px 14px 0 0",
+    padding: "12px 12px calc(14px + env(safe-area-inset-bottom))",
+    boxShadow: "0 -4px 18px rgba(0,0,0,0.22)"
   },
   mapFullExit: {
     position: "fixed",
