@@ -286,6 +286,25 @@ const WORK_HEADERS = [
 ];
 const WORK_ID_COL = 0, WORK_EDIT_COL = 14, WORK_AT_COL = 15;
 
+// 薬剤マスタ。ID は「薬剤名を正規化した文字列」で、アプリ側が付ける。
+// 圃場・作業は数字のIDを持つが、薬剤はもともと名前が主キーで、
+// 同じ薬剤を別のIDで二重登録させないために名前をそのままIDにする。
+const CHEM_SHEET = "薬剤マスタ";
+const CHEM_HEADERS = [
+  "薬剤ID",   // 0  正規化した薬剤名
+  "チームコード", // 1
+  "薬剤名",   // 2
+  "種類",     // 3  fungicide / insecticide など
+  "剤型",     // 4  sc / wp など
+  "使用回数の上限", // 5
+  "編集日時", // 6  端末が付けた時刻(ISO)
+  "更新日時", // 7  サーバーが付けた時刻(ISO)
+  "更新者",   // 8
+  "更新端末", // 9
+  "削除",     // 10 論理削除
+];
+const CHEM_ID_COL = 0, CHEM_EDIT_COL = 6, CHEM_AT_COL = 7;
+
 // 1回の push で受け付ける最大件数。GASの実行時間(6分)に当たる前に断る。
 // 超えたぶんはアプリ側が分割して送り直す。無言で切り捨てない。
 const PUSH_MAX = 300;
@@ -324,6 +343,7 @@ function getRecSheet_(name, headers, headBg) {
 }
 function getFieldSheet_() { return getRecSheet_(FIELD_SHEET, FIELD_HEADERS, "#EDF5EE"); }
 function getWorkSheet_()  { return getRecSheet_(WORK_SHEET,  WORK_HEADERS,  "#EAF3FA"); }
+function getChemSheet_()  { return getRecSheet_(CHEM_SHEET,  CHEM_HEADERS,  "#F3EEF8"); }
 
 // ── 圃場1件 → 行 ──
 // 文字列はすべて safeCell_ を通す。圃場名・地区はユーザーの自由入力で、
@@ -414,6 +434,36 @@ function workObj_(r) {
     updatedAt: String(r[WORK_EDIT_COL] || ""),
     serverAt: String(r[WORK_AT_COL] || ""),
     deleted: !!r[16],
+  };
+}
+
+// ── 薬剤1件 → 行 ──
+function chemRow_(c, team, at) {
+  return [
+    safeCell_(String(c.id)),
+    safeCell_(team),
+    safeCell_(c.name || ""),
+    safeCell_(c.use || ""),
+    safeCell_(c.form || ""),
+    Number(c.maxUse) || "",
+    safeCell_(String(c.updatedAt || "")),
+    at,
+    safeCell_(c.by || ""),
+    safeCell_(c.deviceId || ""),
+    c.deleted ? 1 : "",
+  ];
+}
+
+function chemObj_(r) {
+  return {
+    id: String(r[0]),
+    name: String(r[2] || ""),
+    use: String(r[3] || ""),
+    form: String(r[4] || ""),
+    maxUse: r[5] === "" ? "" : Number(r[5]),
+    updatedAt: String(r[CHEM_EDIT_COL] || ""),
+    serverAt: String(r[CHEM_AT_COL] || ""),
+    deleted: !!r[10],
   };
 }
 
@@ -687,6 +737,7 @@ function doRead_(type, data) {
       ok: true,
       fields: pullRows_(getFieldSheet_(), FIELD_HEADERS, FIELD_AT_COL, data.team, since, fieldObj_),
       works:  pullRows_(getWorkSheet_(),  WORK_HEADERS,  WORK_AT_COL,  data.team, since, workObj_),
+      chems:  pullRows_(getChemSheet_(),  CHEM_HEADERS,  CHEM_AT_COL,  data.team, since, chemObj_),
       serverTime: serverTime,
     });
   }
@@ -787,7 +838,7 @@ function doPost(e) {
     // ── 進捗共有(レコード単位) ──
     // cloudSave/cloudLoad と違い、送った件数ぶんだけを反映する。
     // 他の端末が入れた圃場・実績には触らない。
-    if (type === "pushFields" || type === "pushWorks") {
+    if (type === "pushFields" || type === "pushWorks" || type === "pushChems") {
       if (!data.team) return json_({ ok: false, error: "team required" });
       const list = data.items;
       if (!Array.isArray(list)) return json_({ ok: false, error: "items required" });
@@ -799,6 +850,10 @@ function doPost(e) {
       if (type === "pushFields") {
         return json_(upsertRows_(getFieldSheet_(), FIELD_HEADERS, FIELD_ID_COL, FIELD_EDIT_COL,
                                  list, fieldRow_, data.team, "圃場"));
+      }
+      if (type === "pushChems") {
+        return json_(upsertRows_(getChemSheet_(), CHEM_HEADERS, CHEM_ID_COL, CHEM_EDIT_COL,
+                                 list, chemRow_, data.team, null));
       }
       return json_(upsertRows_(getWorkSheet_(), WORK_HEADERS, WORK_ID_COL, WORK_EDIT_COL,
                                list, workRow_, data.team, null));
@@ -882,7 +937,7 @@ function doGet() {
     // アプリ側が「このGASは進捗マップに対応しているか」を判定するための印。
     // 古いGASのまま進捗マップを開くと unknown type が返るだけで理由が分からない。
     features: ["record", "report", "unreport", "chemdbLoad", "cloudSave", "cloudLoad",
-               "pushFields", "pushWorks", "pull", "progress"],
+               "pushFields", "pushWorks", "pushChems", "pull", "progress"],
   });
 }
 

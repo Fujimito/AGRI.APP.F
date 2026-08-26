@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.56";
+const APP_VERSION = "v8.57";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -550,16 +550,30 @@ const stampUpdated = (next, prev) => {
 // 端末Aで消しただけでは、端末Bは「自分が持っている＝まだある」としか判断できず、
 // 次の同期で消したはずのものが復活する。消したという事実そのものを送るために、
 // IDと時刻だけを残す。実データは消えるので容量は増えない。
+// 薬剤のIDは「名前を正規化した文字列」。薬剤はもともと名前が主キーで、
+// 別の端末で同じ薬剤を登録しても同じIDになる必要がある。
+// 連番や乱数を使うと、同じ薬剤が2件に分裂して戻らなくなる。
+const chemIdOf = c => normalizeChemName(c.name || "");
+// 旧バージョンで登録した薬剤にIDと時刻を付ける(起動時に1度だけ)。
+// 付けないと pendingOf に拾われず、一度も共有されないままになる。
+const migrateChems = list => (Array.isArray(list) ? list : []).map(c => c.id && c.updatedAt ? c : {
+  ...c,
+  id: c.id || chemIdOf(c),
+  updatedAt: c.updatedAt || nowIso()
+});
+
 const TOMB_KEY = "tankmix:tombs";
 const TOMB_MAX = 500; // 古い墓標から捨てる。復活は「同期していない端末が残っていた」時だけ起きる
 const loadTombs = () => {
   const t = load(TOMB_KEY, {
     fields: [],
-    works: []
+    works: [],
+    chems: []
   });
   return {
     fields: Array.isArray(t.fields) ? t.fields : [],
-    works: Array.isArray(t.works) ? t.works : []
+    works: Array.isArray(t.works) ? t.works : [],
+    chems: Array.isArray(t.chems) ? t.chems : []
   };
 };
 const addTomb = (kind, ids) => {
@@ -686,7 +700,14 @@ function App() {
   }]);
   const [fields, setFields] = useState(() => load("tankmix:fields", []));
   const [works, setWorks] = useState(() => load("tankmix:works", []));
-  const [chemMaster, setChemMaster] = useState(() => load("tankmix:chemmaster", []));
+  const [chemMaster, setChemMaster] = useState(() => {
+    const cur = load("tankmix:chemmaster", []);
+    const next = migrateChems(cur);
+    // 端末に保存されている側にも書き戻す。送信の判定(pendingOf)は
+    // 保存済みの内容を見るので、画面の中だけIDを付けても共有に乗らない。
+    if (next.some((c, i) => c !== cur[i])) save("tankmix:chemmaster", next);
+    return next;
+  });
   const [lastMix, setLastMix] = useState(() => load("tankmix:lastmix", null));
   const [presets, setPresets] = useState(() => load("tankmix:presets", []));
   const [crops, setCrops] = useState(() => load("tankmix:crops", []));
@@ -853,13 +874,24 @@ function App() {
   // いなければ省く(連打・タブの行き来でGASの実行回数を増やさない)。
   // 常時取りに行かないのは同じ理由。手で確かめたいときは設定タブの
   // 「🔁 圃場を同期」がこれまでどおり使える。
+  const autoPushChemRef = useRef(null);
+  const autoPushChems = () => {
+    if (!syncReady()) return;
+    if (autoPushChemRef.current) clearTimeout(autoPushChemRef.current);
+    autoPushChemRef.current = setTimeout(() => {
+      autoPushChemRef.current = null;
+      pushChemsSync({
+        quiet: true
+      });
+    }, 1500);
+  };
   const autoPullAtRef = useRef(0);
   const autoPullFields = () => {
     if (!syncReady()) return;
     const now = Date.now();
     if (now - autoPullAtRef.current < 60000) return;
     autoPullAtRef.current = now;
-    pullFieldsSync({
+    pullSharedSync({
       quiet: true
     });
   };
@@ -879,8 +911,14 @@ function App() {
     setWorksRaw(stampUpdated(fn(cur), cur));
   };
   const setChemMasterSave = next => {
-    setChemMaster(next);
-    save("tankmix:chemmaster", next);
+    // 圃場・作業と同じ仕組みに乗せる。変わったものだけ送るために
+    // 編集時刻が要る(中身が同じなら stampUpdated が時刻を進めない)。
+    const stamped = stampUpdated(next.map(c => ({
+      ...c,
+      id: c.id || chemIdOf(c)
+    })), load("tankmix:chemmaster", []));
+    setChemMaster(stamped);
+    save("tankmix:chemmaster", stamped);
   };
   const setPresetsSave = next => {
     setPresets(next);
@@ -1385,6 +1423,7 @@ function App() {
       if (i >= 0) next[i] = item;else next.push(item);
     });
     setChemMasterSave(next);
+    autoPushChems();
   };
   const addChemMaster = data => {
     const name = (data.name || "").trim();
@@ -1682,7 +1721,10 @@ function App() {
       // Code.gs を貼り替えただけでデプロイし直していないと、ウェブアプリは
       // 古い版を返し続ける(貼った内容は反映されない)。ここで見分けられるようにする。
       const feats = j && Array.isArray(j.features) ? j.features : [];
-      const oldGas = j && j.ok && feats.indexOf("progress") < 0;
+      // 目安にする印は、その時点で一番新しい機能の名前。
+      // v8.57 で薬剤の共有(pushChems)を足したので、これが無ければ
+      // 進捗地図は動いても薬剤だけ共有されない状態になる。
+      const oldGas = j && j.ok && feats.indexOf("pushChems") < 0;
       if (oldGas) flash("⚠ つながりましたが、動いているのは古い版のスクリプトです。Apps Scriptで「デプロイ」→「デプロイを管理」→ 鉛筆 → バージョン「新バージョン」で更新してください" + urlWarn);else if (j && j.ok && j.secured === false) flash("✅ 接続OK(ただし共有パスワード未設定：URLを知る人は誰でも記録を書き込めます)" + urlWarn);else flash((j && j.ok ? "✅ 接続OK！" : "応答が不正です。URLを確認してください") + urlWarn);
     } catch {
       flash("❌ 接続できません。URLとデプロイ設定を確認してください");
@@ -1940,8 +1982,70 @@ function App() {
     return true;
   };
 
+  // ── 薬剤マスタを送る ──
+  const chemToItem = c => ({
+    id: c.id || chemIdOf(c),
+    name: c.name || "",
+    use: c.use || "",
+    form: c.form || "",
+    maxUse: c.maxUse || "",
+    updatedAt: c.updatedAt || "",
+    by: recorder,
+    deviceId
+  });
+  const itemToChem = it => {
+    const o = {
+      id: it.id,
+      name: it.name || "",
+      use: it.use || "other",
+      form: it.form || "",
+      updatedAt: it.updatedAt || "",
+      // 受け取った時点で「送信済み」にしておく(圃場と同じ理由)
+      pushedAt: it.updatedAt || ""
+    };
+    if (it.maxUse) o.maxUse = Number(it.maxUse);
+    return o;
+  };
+  const pushChemsSync = async opt => {
+    const quiet = opt && opt.quiet;
+    if (!syncReady()) {
+      if (!quiet) flash("送信先URLとチームコードを設定してください");
+      return false;
+    }
+    const cur = load("tankmix:chemmaster", []);
+    const pend = pendingOf(cur);
+    const tombs = loadTombs().chems;
+    if (pend.length === 0 && tombs.length === 0) return true;
+    const items = pend.map(chemToItem).concat(tombs.map(t => ({
+      id: t.id,
+      name: "",
+      deleted: true,
+      updatedAt: t.updatedAt,
+      by: recorder,
+      deviceId
+    })));
+    const r = await pushItems("pushChems", items);
+    if (!r.ok) {
+      if (!quiet && r.error !== "auth") flash("薬剤の送信に失敗しました" + (r.error ? "(" + r.error + ")" : ""));
+      return false;
+    }
+    // 送れたものだけ pushedAt を進める。送信中に編集された行は次回もう一度送られる
+    const done = new Map(pend.map(c => [c.id, c.updatedAt]));
+    const nextC = load("tankmix:chemmaster", []).map(c => done.has(c.id) ? {
+      ...c,
+      pushedAt: done.get(c.id)
+    } : c);
+    setChemMaster(nextC);
+    save("tankmix:chemmaster", nextC);
+    const t = loadTombs();
+    t.chems = [];
+    save(TOMB_KEY, t);
+    if (!quiet) flash("薬剤を送信しました(" + items.length + "件)");
+    return true;
+  };
+
   // ── 圃場マスタを受け取る(差分) ──
-  const pullFieldsSync = async opt => {
+  const pullSharedSync = async opt => {
     const quiet = opt && opt.quiet;
     if (!syncReady()) {
       if (!quiet) flash("送信先URLとチームコードを設定してください");
@@ -1987,6 +2091,35 @@ function App() {
       updated++;
     });
     if (added || updated || removed) setFieldsRaw(Array.from(byId.values()));
+    // 薬剤も同じ応答で配られる。古いGASは chems を返さないので、
+    // 無いときは何もしない(ここで空配列として扱うと全件消えることになる)
+    if (Array.isArray(j.chems) && j.chems.length) {
+      const curC = load("tankmix:chemmaster", []);
+      const byC = new Map(curC.map(c => [String(c.id || chemIdOf(c)), c]));
+      let cChanged = 0;
+      j.chems.forEach(inc => {
+        const key = String(inc.id);
+        const old = byC.get(key);
+        if (inc.deleted) {
+          if (old) {
+            byC.delete(key);
+            cChanged++;
+          }
+          return;
+        }
+        if (old && String(old.updatedAt || "") > String(inc.updatedAt || "")) return;
+        byC.set(key, old ? {
+          ...old,
+          ...itemToChem(inc)
+        } : itemToChem(inc));
+        cChanged++;
+      });
+      if (cChanged) {
+        const nextC = Array.from(byC.values());
+        setChemMaster(nextC);
+        save("tankmix:chemmaster", nextC);
+      }
+    }
     // serverTime は応答が含む範囲の終わり。次回はここから先だけを受け取る
     if (j.serverTime) localStorage.setItem("tankmix:pullat", j.serverTime);
     if (!quiet) flash("受信しました(追加" + added + "・更新" + updated + "・削除" + removed + ")");
@@ -1995,7 +2128,7 @@ function App() {
 
   // 送ってから受け取る。順番が逆だと、自分の未送信の変更が
   // 受け取った内容で埋もれたまま送られない
-  const syncFields = async () => {
+  const syncShared = async () => {
     if (!syncReady()) {
       flash("送信先URLとチームコードを設定してください");
       return;
@@ -2004,11 +2137,14 @@ function App() {
     const okPush = await pushFieldsSync({
       quiet: true
     });
-    const okPull = await pullFieldsSync({
+    const okChem = await pushChemsSync({
+      quiet: true
+    });
+    const okPull = await pullSharedSync({
       quiet: true
     });
     setSyncing(false);
-    if (okPush && okPull) flash("☁ 圃場を同期しました");else flash("同期に失敗しました。電波とGASの版数を確認してください");
+    if (okPush && okChem && okPull) flash("☁ 圃場と薬剤を同期しました");else flash("同期に失敗しました。電波とGASの版数を確認してください");
   };
 
   // ── 進捗マップ用の読み取り ──
@@ -2166,11 +2302,20 @@ function App() {
     flash("前回と同じ薬液を読み込みました");
   };
   const deletePreset = id => setPresetsSave(presets.filter(p => p.id !== id));
-  const deleteChemMaster = name => setChemMasterSave(chemMaster.filter(c => c.name !== name));
-  const editChemMaster = (name, data) => setChemMasterSave(chemMaster.map(c => c.name === name ? {
-    ...c,
-    ...data
-  } : c));
+  const deleteChemMaster = name => {
+    // 消したこと自体を送らないと、他の端末から次の同期で復活する
+    const gone = chemMaster.filter(c => c.name === name);
+    if (gone.length) addTomb("chems", gone.map(c => c.id || chemIdOf(c)));
+    setChemMasterSave(chemMaster.filter(c => c.name !== name));
+    autoPushChems();
+  };
+  const editChemMaster = (name, data) => {
+    setChemMasterSave(chemMaster.map(c => c.name === name ? {
+      ...c,
+      ...data
+    } : c));
+    autoPushChems();
+  };
   const exportCSV = () => {
     // 末尾のゼロ落としは stripTrailingZeros に任せる。以前は小数点の有無を見ずに
     // 削っていたため、桁数0で呼ぶと "100" が "1" になる取り違えが起きえた。
@@ -2350,7 +2495,14 @@ function App() {
     savePreset,
     chemMaster,
     lastMix,
-    loadLastMix
+    loadLastMix,
+    // 調合タブの「🧪 薬剤」側で使う(旧データベースタブの中身)
+    addChemMaster,
+    deleteChemMaster,
+    editChemMaster,
+    presets,
+    loadPreset,
+    deletePreset
   }), tab === "work" && /*#__PURE__*/React.createElement(WorkTab, {
     works,
     fields,
@@ -2400,23 +2552,6 @@ function App() {
     fetchProgress,
     mapEngine,
     gmapKey
-  }), tab === "preset" &&/*#__PURE__*/React.createElement(PresetTab, {
-    fields,
-    upsertField,
-    deleteField,
-    addFieldOnly,
-    areas,
-    chemMaster,
-    addChemMaster,
-    deleteChemMaster,
-    editChemMaster,
-    presets,
-    loadPreset,
-    deletePreset,
-    crops,
-    addCrop,
-    areaUnitKey,
-    volUnitKey
   }), mapMounted && /*#__PURE__*/React.createElement("div", {
     style: tab === "map" ? undefined : {
       display: "none"
@@ -2425,6 +2560,9 @@ function App() {
     fields,
     addFieldWithPolygon,
     upsertField,
+    // 「📋 一覧」を圃場マスタにしたため、登録と削除もここで行う
+    deleteField,
+    addFieldOnly,
     areaUnitKey,
     areas,
     crops,
@@ -2454,7 +2592,7 @@ function App() {
     testConnection,
     cloudSave,
     cloudLoad,
-    syncFields,
+    syncShared,
     pushProgress,
     syncing,
     chemDbInfo,
@@ -2478,7 +2616,7 @@ function App() {
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
     className: "no-print"
-  }, [["calc", "🧮", "調合"], ["work", "🚁", "作業"], ["map", "🗺", "地図"], ["preset", "📋", "データベース"], ["settings", "⚙", "設定"]].map(t =>/*#__PURE__*/React.createElement("button", {
+  }, [["calc", "🧮", "調合"], ["work", "🚁", "作業"], ["map", "🗺", "地図"], ["settings", "⚙", "設定"]].map(t =>/*#__PURE__*/React.createElement("button", {
     key: t[0],
     onClick: () => setTab(t[0]),
     style: {
@@ -2503,11 +2641,38 @@ function App() {
 function CalcTab(p) {
   // 登録薬剤の呼び出し先。薬剤行のID、または新しい行として追加する場合は "new"
   const [pickFor, setPickFor] = useState(null);
+  // v8.57 でデータベースタブを畳んだ。薬剤マスタはここの「🧪 薬剤」側。
+  // 選んだ側を覚えておく。登録作業を続けている途中で他のタブへ
+  // 行って戻ると、毎回電卓に戻されるのを防ぐため。
+  const [calcView, setCalcView] = useState(() => load("tankmix:calcview", "calc") === "chem" ? "chem" : "calc");
+  const chooseView = v => {
+    setCalcView(v);
+    save("tankmix:calcview", v);
+  };
   const onPick = m => {
     if (pickFor === "new") p.addChemFromMaster(m);else p.applyChemMaster(pickFor, m);
     setPickFor(null);
   };
-  return /*#__PURE__*/React.createElement(React.Fragment, null, pickFor !== null && /*#__PURE__*/React.createElement(ChemPickModal, {
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    style: S.segWrap,
+    className: "no-print"
+  }, [["calc", "🧮 調合電卓"], ["chem", "🧪 薬剤・プリセット"]].map(v => /*#__PURE__*/React.createElement("button", {
+    key: v[0],
+    onClick: () => chooseView(v[0]),
+    style: {
+      ...S.seg,
+      ...(calcView === v[0] ? S.segOn : {})
+    }
+  }, v[1]))), calcView === "chem" ? /*#__PURE__*/React.createElement(ChemMasterPanel, {
+    chemMaster: p.chemMaster,
+    addChemMaster: p.addChemMaster,
+    deleteChemMaster: p.deleteChemMaster,
+    editChemMaster: p.editChemMaster,
+    presets: p.presets,
+    loadPreset: p.loadPreset,
+    deletePreset: p.deletePreset,
+    volUnitKey: p.volUnitKey
+  }) : /*#__PURE__*/React.createElement(React.Fragment, null, pickFor !== null && /*#__PURE__*/React.createElement(ChemPickModal, {
     chemMaster: p.chemMaster,
     onPick: onPick,
     onCancel: () => setPickFor(null)
@@ -2793,7 +2958,7 @@ function CalcTab(p) {
     }
   }, "⭐ プリセットに保存"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "ここはタンク1杯分を計算するための電卓です。圃場への適用は「作業・記録」タブの「この日に使用した薬剤」で行います。何度も使う組み合わせは「⭐ プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。")));
+  }, "ここはタンク1杯分を計算するための電卓です。圃場への適用は「作業・記録」タブの「この日に使用した薬剤」で行います。何度も使う組み合わせは「⭐ プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。"))));
 }
 function TankViz({
   calc,
@@ -5086,8 +5251,14 @@ function FieldEditModal(p) {
 
 // ═══════════════════ 薬剤タブ ═══════════════════
 // ═══════════════════ データベースタブ(圃場・薬剤) ═══════════════════
-function PresetTab(p) {
-  const [sub, setSub] = useState("field"); // field | chem
+// ═══════════════════ 圃場マスタ ═══════════════════
+// v8.57 でデータベースタブを畳み、ここは地図タブの「📋 一覧」に入った。
+// 地図から使うときだけ p.onFocus / p.hidden / p.setHidden が渡り、
+// 「📍 地図で見る」と表示ON/OFFのボタンが増える。
+// 囲んでいない圃場もここに出す(「位置未登録」の印付き)。
+// 地図に出ている分だけを一覧にしていた頃は、位置のない圃場を
+// 編集する場所がどこにもなくなる。
+function FieldMasterPanel(p) {
   // 圃場フォーム(新規登録用。編集は下のポップアップで行う)
   const [fName, setFName] = useState("");
   const [fCrop, setFCrop] = useState("");
@@ -5102,32 +5273,18 @@ function PresetTab(p) {
     area: "",
     areaA: ""
   });
-  // 薬剤編集
-  const [editChem, setEditChem] = useState(null);
-  const [ec, setEc] = useState({
-    form: "sc",
-    use: "fungicide",
-    maxUse: ""
-  });
-  const [cq, setCq] = useState("");
-  // 薬剤の新規登録フォーム
-  const [nName, setNName] = useState("");
-  const [nUse, setNUse] = useState("fungicide");
-  const [nForm, setNForm] = useState("sc");
-  const [nMax, setNMax] = useState("");
-  const [chemSearchOpen, setChemSearchOpen] = useState(false); // 登録番号検索モーダル
-  const submitChem = () => {
-    if (!nName.trim()) return;
-    const ok = p.addChemMaster({
-      name: nName.trim(),
-      use: nUse,
-      form: nForm,
-      maxUse: nMax
-    });
-    if (ok === false) return;
-    setNName("");
-    setNMax("");
+  const [closed, setClosed] = useState([]); // 閉じている地区名
+  const hidden = p.hidden || [];
+  const hasPoly = f => !!(f.polygon && f.polygon.length) || !!f.center;
+  const isHidden = id => hidden.indexOf(id) >= 0;
+  const toggleHidden = id => p.setHidden(isHidden(id) ? hidden.filter(x => x !== id) : [...hidden, id]);
+  const setZoneVisible = (items, visible) => {
+    const ids = items.map(f => f.id);
+    p.setHidden(visible ? hidden.filter(id => ids.indexOf(id) < 0) : Array.from(new Set([...hidden, ...ids])));
   };
+  // 検索中は畳まない(探しているものが隠れると意味がないため)
+  const isOpen = name => !!fq.trim() || closed.indexOf(name) < 0;
+  const toggleZone = name => setClosed(closed.indexOf(name) < 0 ? [...closed, name] : closed.filter(x => x !== name));
   const fieldList = fq.trim() ? p.fields.filter(f => f.name.includes(fq.trim()) || (f.crop || "").includes(fq.trim()) || (f.area || "").includes(fq.trim())) : p.fields;
   // 地区ごとにまとめて見出しを付ける。地区なしは末尾の「未分類」へ
   const fieldGroups = React.useMemo(() => {
@@ -5144,8 +5301,6 @@ function PresetTab(p) {
   }, [fieldList]);
   // 編集対象の圃場(マスタから消えていたらポップアップは閉じた扱いにする)
   const editField = editId != null ? p.fields.find(f => f.id === editId) : null;
-  const ncq = normalizeChemName(cq);
-  const chemList = ncq ? p.chemMaster.filter(c => normalizeChemName(c.name).includes(ncq)) : p.chemMaster;
   // 新規登録(このカードは登録専用。編集はポップアップで行う)
   const submitField = () => {
     if (!fName.trim()) return;
@@ -5187,16 +5342,7 @@ function PresetTab(p) {
     }, editId);
     setEditId(null);
   };
-  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-    style: S.subTabWrap
-  }, [["field", "🌾 圃場"], ["chem", "🧪 薬剤"]].map(t => /*#__PURE__*/React.createElement("button", {
-    key: t[0],
-    onClick: () => setSub(t[0]),
-    style: {
-      ...S.subTab,
-      ...(sub === t[0] ? S.subTabOn : {})
-    }
-  }, t[1]))), sub === "field" && /*#__PURE__*/React.createElement(React.Fragment, null, editField && /*#__PURE__*/React.createElement(FieldEditModal, {
+  return /*#__PURE__*/React.createElement(React.Fragment, null, editField && /*#__PURE__*/React.createElement(FieldEditModal, {
     mf: mf,
     setMf: setMf,
     crops: p.crops,
@@ -5311,11 +5457,26 @@ function PresetTab(p) {
   }, "まだ圃場が登録されていません。上のフォームから登録してください。"), fieldGroups.map(g => /*#__PURE__*/React.createElement(React.Fragment, {
     key: "zone:" + g.name
   }, /*#__PURE__*/React.createElement("div", {
-    style: S.zoneHead
-  }, g.name, /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...S.zoneHead,
+      cursor: "pointer"
+    },
+    onClick: () => toggleZone(g.name)
+  }, isOpen(g.name) ? "▾ " : "▸ ", g.name, /*#__PURE__*/React.createElement("span", {
     style: S.zoneCount,
     className: "num"
-  }, g.items.length, "圃場")), g.items.map(f => /*#__PURE__*/React.createElement("div", {
+  }, g.items.length, "圃場"), p.setHidden && /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      setZoneVisible(g.items, g.items.every(f => isHidden(f.id)));
+    },
+    style: {
+      ...S.smallSecondary,
+      marginLeft: "auto",
+      padding: "4px 8px"
+    },
+    title: "この地区を地図に出す／隠す"
+  }, g.items.every(f => isHidden(f.id)) ? "🙈" : "👁")), isOpen(g.name) && g.items.map(f => /*#__PURE__*/React.createElement("div", {
     key: f.id,
     style: S.listItem
   }, /*#__PURE__*/React.createElement("div", {
@@ -5328,7 +5489,21 @@ function PresetTab(p) {
   }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
     style: S.listSub,
     className: "num"
-  }, f.areaA ? dispArea(f.areaA, p.areaUnitKey) + " " + areaSuffix(p.areaUnitKey) : "面積未定")), /*#__PURE__*/React.createElement("button", {
+  }, f.areaA ? dispArea(f.areaA, p.areaUnitKey) + " " + areaSuffix(p.areaUnitKey) : "面積未定", !hasPoly(f) && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#A15E08",
+      marginLeft: 6
+    },
+    title: "地図で囲むと、進捗地図にも出るようになります"
+  }, "・位置未登録"))), p.onFocus && hasPoly(f) && /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.onFocus(f),
+    style: S.smallSecondary,
+    title: "地図でこの圃場を見る"
+  }, "📍"), p.setHidden && hasPoly(f) && /*#__PURE__*/React.createElement("button", {
+    onClick: () => toggleHidden(f.id),
+    style: S.smallSecondary,
+    title: isHidden(f.id) ? "地図に出す" : "地図から隠す"
+  }, isHidden(f.id) ? "🙈" : "👁"), /*#__PURE__*/React.createElement("button", {
     onClick: () => startEdit(f),
     style: S.smallSecondary
   }, "編集"), /*#__PURE__*/React.createElement("button", {
@@ -5336,7 +5511,41 @@ function PresetTab(p) {
       if (confirm("圃場「" + f.name + "」を削除しますか？\n(過去の記録は残ります)")) p.deleteField(f.id);
     },
     style: S.smallDanger
-  }, "削除"))))))), sub === "chem" && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+  }, "削除")))))));
+}
+
+// ═══════════════════ 薬剤マスタ ═══════════════════
+// v8.57 で調合タブの「🧪 薬剤」に入った。中身はデータベースタブのときと同じ。
+function ChemMasterPanel(p) {
+  // 薬剤編集
+  const [editChem, setEditChem] = useState(null);
+  const [ec, setEc] = useState({
+    form: "sc",
+    use: "fungicide",
+    maxUse: ""
+  });
+  const [cq, setCq] = useState("");
+  // 薬剤の新規登録フォーム
+  const [nName, setNName] = useState("");
+  const [nUse, setNUse] = useState("fungicide");
+  const [nForm, setNForm] = useState("sc");
+  const [nMax, setNMax] = useState("");
+  const [chemSearchOpen, setChemSearchOpen] = useState(false); // 登録番号検索モーダル
+  const submitChem = () => {
+    if (!nName.trim()) return;
+    const ok = p.addChemMaster({
+      name: nName.trim(),
+      use: nUse,
+      form: nForm,
+      maxUse: nMax
+    });
+    if (ok === false) return;
+    setNName("");
+    setNMax("");
+  };
+  const ncq = normalizeChemName(cq);
+  const chemList = ncq ? p.chemMaster.filter(c => normalizeChemName(c.name).includes(ncq)) : p.chemMaster;
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -5536,8 +5745,9 @@ function PresetTab(p) {
       if (confirm("「" + pr.name + "」を削除しますか？")) p.deletePreset(pr.id);
     },
     style: S.smallDanger
-  }, "削除"))))));
+  }, "削除")))));
 }
+
 
 // ═══════════════════ 設定タブ ═══════════════════
 // ═══════════════════ MAPタブ(圃場を地図で管理) ═══════════════════
@@ -5724,103 +5934,6 @@ function AddressSearchBox(p) {
 // 地図タブの圃場一覧。Google版・Leaflet版で中身が同じなので共通化してある。
 // 地区で折りたたみ、検索で絞り込み、チェックで地図の表示/非表示を切り替える。
 // 圃場が数百件になっても、開いている地区のぶんしか縦に伸びない。
-function MapFieldList(p) {
-  const [q, setQ] = React.useState("");
-  const [closed, setClosed] = React.useState([]); // 閉じている地区名
-  const hidden = p.hidden || [];
-  const list = q.trim() ? p.fields.filter(f => f.name.includes(q.trim()) || (f.crop || "").includes(q.trim()) || (f.area || "").includes(q.trim())) : p.fields;
-  const groups = React.useMemo(() => {
-    const m = new Map();
-    list.forEach(f => {
-      const k = (f.area || "").trim() || "未分類";
-      if (!m.has(k)) m.set(k, []);
-      m.get(k).push(f);
-    });
-    return Array.from(m.entries()).map(e => ({
-      name: e[0],
-      items: e[1]
-    })).sort((a, b) => a.name === "未分類" ? 1 : b.name === "未分類" ? -1 : a.name.localeCompare(b.name, "ja"));
-  }, [list]);
-  // 検索中は畳まない(探しているものが隠れると意味がないため)
-  const isOpen = name => !!q.trim() || closed.indexOf(name) < 0;
-  const toggleZone = name => setClosed(closed.indexOf(name) < 0 ? [...closed, name] : closed.filter(x => x !== name));
-  const setZoneVisible = (items, visible) => {
-    const ids = items.map(f => f.id);
-    p.setHidden(visible ? hidden.filter(id => ids.indexOf(id) < 0) : Array.from(new Set([...hidden, ...ids])));
-  };
-  if (p.fields.length === 0) return /*#__PURE__*/React.createElement("p", {
-    style: S.empty
-  }, "まだ地図上の圃場がありません。", /*#__PURE__*/React.createElement("br", null), "「✏ 圃場を囲む」で登録できます。");
-  return /*#__PURE__*/React.createElement(React.Fragment, null, p.fields.length > 4 && /*#__PURE__*/React.createElement("input", {
-    value: q,
-    placeholder: "🔍 圃場名・作物名・地区で検索",
-    onChange: e => setQ(e.target.value),
-    style: {
-      ...S.fieldInput,
-      marginBottom: 8
-    }
-  }), q.trim() && list.length === 0 && /*#__PURE__*/React.createElement("p", {
-    style: S.empty
-  }, "該当する圃場がありません。"), groups.map(g => {
-    const open = isOpen(g.name);
-    const shownCount = g.items.filter(f => hidden.indexOf(f.id) < 0).length;
-    return /*#__PURE__*/React.createElement(React.Fragment, {
-      key: "zone:" + g.name
-    }, /*#__PURE__*/React.createElement("div", {
-      style: S.zoneHead
-    }, /*#__PURE__*/React.createElement("button", {
-      onClick: () => toggleZone(g.name),
-      style: S.zoneToggle
-    }, open ? "▼ " : "▶ ", g.name, /*#__PURE__*/React.createElement("span", {
-      style: S.zoneCount,
-      className: "num"
-    }, " ", g.items.length, "圃場")), /*#__PURE__*/React.createElement("button", {
-      onClick: () => setZoneVisible(g.items, shownCount === 0),
-      style: S.zoneEye,
-      title: "この地区を地図に表示/非表示"
-    }, shownCount === 0 ? "🚫 非表示" : "👁 表示中")), open && g.items.map(f => {
-      const off = hidden.indexOf(f.id) >= 0;
-      return /*#__PURE__*/React.createElement("div", {
-        key: f.id,
-        style: {
-          ...S.listItem,
-          opacity: off ? 0.45 : 1
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: {
-          flex: 1,
-          minWidth: 0
-        }
-      }, /*#__PURE__*/React.createElement("div", {
-        style: S.listTitle
-      }, f.name, f.crop ? "(" + f.crop + ")" : ""), /*#__PURE__*/React.createElement("div", {
-        style: S.listSub,
-        className: "num"
-      }, fieldAreaText(f, p.areaUnitKey), (() => {
-        // 登録面積と囲んだ形が食い違っているときだけ、実測値も添える
-        const m = measuredAreaIfOff(f);
-        return m == null ? null : /*#__PURE__*/React.createElement("span", {
-          style: {
-            color: "#8a621f"
-          }
-        }, "（囲んだ形は " + dispArea(m, p.areaUnitKey) + " " + areaSuffix(p.areaUnitKey) + "）");
-      })())), /*#__PURE__*/React.createElement("button", {
-        onClick: () => p.setHidden(off ? hidden.filter(id => id !== f.id) : [...hidden, f.id]),
-        style: S.smallSecondary,
-        title: "地図での表示を切り替え"
-      }, off ? "🚫" : "👁"), /*#__PURE__*/React.createElement("button", {
-        onClick: () => p.onFocus(f),
-        style: S.smallSecondary
-      }, "地図で見る"), /*#__PURE__*/React.createElement("a", {
-        href: naviUrl(f.center || polygonCenter(f.polygon)),
-        target: "_blank",
-        rel: "noopener noreferrer",
-        style: S.naviBtn
-      }, "🚗 ナビ"));
-    }));
-  }));
-}
-
 function MapTabRouter(p) {
   if (p.mapEngine === "google") {
     if (!p.gmapKey) {
@@ -6450,7 +6563,6 @@ function GoogleMapTab(p) {
       timeout: 10000
     });
   };
-  const polyFields = p.fields.filter(f => f.polygon && f.polygon.length >= 3);
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: {
       ...S.card,
@@ -6480,7 +6592,7 @@ function GoogleMapTab(p) {
       ...S.mapSeg,
       ...(listOnly ? S.segOn : {})
     }
-  }, "📋 一覧")), /*#__PURE__*/React.createElement("div", {
+  }, "📋 圃場一覧")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -6706,13 +6818,15 @@ function GoogleMapTab(p) {
       marginTop: 10,
       opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
     }
-  }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
-    style: S.card,
-    className: "no-print"
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "地図に登録された圃場(", polyFields.length, "件)"), /*#__PURE__*/React.createElement(MapFieldList, {
-    fields: polyFields,
+  }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement(FieldMasterPanel, {
+    // 一覧は圃場マスタそのもの。囲んでいない圃場も含むので p.fields を渡す
+    fields: p.fields,
+    upsertField: p.upsertField,
+    deleteField: p.deleteField,
+    addFieldOnly: p.addFieldOnly,
+    areas: p.areas,
+    crops: p.crops,
+    addCrop: p.addCrop,
     areaUnitKey: p.areaUnitKey,
     hidden: hidden,
     setHidden: setHidden,
@@ -6726,7 +6840,7 @@ function GoogleMapTab(p) {
         mapRef.current.setZoom(17);
       }
     }
-  })));
+  }));
 }
 
 function LeafletMapTab(p) {
@@ -7242,7 +7356,6 @@ function LeafletMapTab(p) {
       timeout: 10000
     });
   };
-  const polyFields = p.fields.filter(f => f.polygon && f.polygon.length >= 3);
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: {
       ...S.card,
@@ -7272,7 +7385,7 @@ function LeafletMapTab(p) {
       ...S.mapSeg,
       ...(listOnly ? S.segOn : {})
     }
-  }, "📋 一覧")), /*#__PURE__*/React.createElement("div", {
+  }, "📋 圃場一覧")), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8
@@ -7479,13 +7592,15 @@ function LeafletMapTab(p) {
       marginTop: 10,
       opacity: drawPts.length >= 3 && newName.trim() && !drawCrossed ? 1 : 0.4
     }
-  }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement("section", {
-    style: S.card,
-    className: "no-print"
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "地図に登録された圃場(", polyFields.length, "件)"), /*#__PURE__*/React.createElement(MapFieldList, {
-    fields: polyFields,
+  }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement(FieldMasterPanel, {
+    // 一覧は圃場マスタそのもの。囲んでいない圃場も含むので p.fields を渡す
+    fields: p.fields,
+    upsertField: p.upsertField,
+    deleteField: p.deleteField,
+    addFieldOnly: p.addFieldOnly,
+    areas: p.areas,
+    crops: p.crops,
+    addCrop: p.addCrop,
     areaUnitKey: p.areaUnitKey,
     hidden: hidden,
     setHidden: setHidden,
@@ -7493,7 +7608,7 @@ function LeafletMapTab(p) {
       setListOnly(false);
       if (mapRef.current && f.center) mapRef.current.setView(f.center, 16);
     }
-  })));
+  }));
 }
 
 // 設定タブの各カードで使う、開閉できる見出し(タップで展開/折りたたみ)
@@ -7535,6 +7650,20 @@ function SettingsTab(p) {
     [key]: !s[key]
   }));
   const [openVer, setOpenVer] = useState({});
+  const [showLegacy, setShowLegacy] = useState(false); // 古い共有方式の開閉
+  // 送信・共有カードの中の段見出し。ボタンが6つ並んでいて
+  // どれを押せばいいのか分からなかったのを、番号付きの段に分ける。
+  const secHead = (t, first) => /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 14,
+      fontWeight: 800,
+      color: "#1C2B21",
+      marginTop: first ? 4 : 18,
+      marginBottom: 8,
+      paddingTop: first ? 0 : 14,
+      borderTop: first ? "none" : "1px solid #E3E8E0"
+    }
+  }, t);
   // 農薬データの取り込み状態。例:「6,275件・2026-08-23 取り込み」
   const chemDbStatus = p.chemDbInfo ? Number(p.chemDbInfo.count || 0).toLocaleString() + "件・" + String(p.chemDbInfo.savedAt || "").slice(0, 10) + " 取り込み" : "未取り込み";
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
@@ -7614,7 +7743,7 @@ function SettingsTab(p) {
     "aria-label": "削除"
   }, "✕")))))), /*#__PURE__*/React.createElement("section", {
     style: S.card
-  }, collapsibleHead("送信・共有設定", openSec.send, () => toggleSec("send")), openSec.send && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
+  }, collapsibleHead("送信・共有", openSec.send, () => toggleSec("send")), openSec.send && /*#__PURE__*/React.createElement(React.Fragment, null, secHead("１　つなぎ先", true), /*#__PURE__*/React.createElement("label", {
     style: S.areaField
   }, /*#__PURE__*/React.createElement("span", {
     style: S.smallLabel
@@ -7686,16 +7815,40 @@ function SettingsTab(p) {
     },
     title: showAuth ? "パスワードを隠す" : "パスワードを表示する",
     "aria-label": showAuth ? "パスワードを隠す" : "パスワードを表示する"
-  }, showAuth ? "🙈" : "👁")), /*#__PURE__*/React.createElement("p", {
-    style: S.note
-  }, "GAS側でスクリプトプロパティ SHARED_SECRET を設定していると、同じ文字列を入れた端末だけが記録を書き込めます。設定していない場合は空欄のままで動きます(その場合はURLを知っている人なら誰でも書き込めます)。"), /*#__PURE__*/React.createElement("button", {
+  }, showAuth ? "🙈" : "👁")), /*#__PURE__*/React.createElement("button", {
     onClick: p.testConnection,
     style: {
       ...S.secondaryBtn,
       width: "100%",
       marginTop: 12
     }
-  }, "接続テスト"), /*#__PURE__*/React.createElement("div", {
+  }, "接続テスト"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "チームコードは、一緒に作業する端末で同じ文字列にします。大文字と小文字は区別されます。共有パスワードはGAS側でスクリプトプロパティ SHARED_SECRET を設定しているときだけ使います。未設定なら空欄で動きますが、その場合はURLを知っている人なら誰でも書き込めます。"), secHead("２　データ共有(圃場・薬剤)"), /*#__PURE__*/React.createElement("button", {
+    onClick: p.syncShared,
+    disabled: p.syncing,
+    style: {
+      ...S.secondaryBtn,
+      width: "100%"
+    }
+  }, "🔁 今すぐ同期する"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "圃場と薬剤は、登録・編集・削除した時点で自動的に送られます。このボタンは、圏外だったときの送り直しと、他の端末が入れた分を今すぐ受け取るためのものです。変わったものだけをやりとりするので、他の端末が足した圃場や薬剤を消しません。"), secHead("３　作業データの送信"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.pushProgress(),
+    disabled: p.syncing,
+    style: {
+      ...S.secondaryBtn,
+      width: "100%"
+    }
+  }, "🚦 進捗を送り直す"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "実績を保存したときと、「散布済」のチェックを入れ外ししたときに自動で送られます。このボタンは圏外だったときの送り直し用です。作業タブの「📤 送信」はこれとは別で、スプレッドシートの「防除記録」に1行ずつ台帳として残します。"), secHead("４　古い方式(通常は使いません)"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowLegacy(v => !v),
+    style: {
+      ...S.smallSecondary,
+      width: "100%"
+    }
+  }, showLegacy ? "閉じる" : "開く"), showLegacy && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.btnRow,
       marginTop: 10
@@ -7714,30 +7867,14 @@ function SettingsTab(p) {
       ...S.smallSecondary,
       padding: "13px 0"
     }
-  }, "☁↓ 共有→端末へ読込")), /*#__PURE__*/React.createElement("div", {
+  }, "☁↓ 共有→端末へ読込")), /*#__PURE__*/React.createElement("p", {
     style: {
-      ...S.btnRow,
-      marginTop: 10
+      ...S.note,
+      color: "#A15E08"
     }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: p.syncFields,
-    disabled: p.syncing,
-    style: {
-      ...S.smallSecondary,
-      padding: "13px 0"
-    }
-  }, "🔁 圃場を同期"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => p.pushProgress(),
-    disabled: p.syncing,
-    style: {
-      ...S.smallSecondary,
-      padding: "13px 0"
-    }
-  }, "🚦 進捗を送信")), /*#__PURE__*/React.createElement("p", {
+  }, "この2つは、圃場・薬剤・作業リストを丸ごと入れ替える古い方式です。他の端末があとから足したものを消します。上の「🔁 今すぐ同期する」で済むので、普段は使わないでください。古い版の端末から移すときだけ使います。")), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "「🔁 圃場を同期」は、変わった圃場だけを送って受け取ります。上の「☁↑ 端末→共有へ保存」と違い、他の端末が足した圃場を消しません。圃場の数が増えて「大きすぎます」と出るようになったら、こちらを使ってください。「🚦 進捗を送信」は作業タブの進捗地図用の実績を送ります(実績を保存したとき・「散布済」にチェックを入れ外ししたときにも自動で送られるので、圏外だったときの送り直しに使います)。どちらもGASを最新のCode.gsに更新してから使ってください。"), /*#__PURE__*/React.createElement("p", {
-    style: S.note
-  }, "同じチームコードの端末どうしで、圃場・薬剤・作業リストを共有できます(後から保存した内容で上書き)。共有がうまくいかない場合は、GASを最新のCode.gsに更新して再デプロイしてください。共有・送信される内容は、圃場名・作物・面積・圃場の位置情報(地図で囲んだ緯度経度)・地区・薬剤・作業記録・記録者名と、この端末を区別するための端末ID(初回起動時に作られる意味のない文字列で、機種や電話番号とは無関係です)です。作業者の現在地は送信しません。送信先はあなたが設定したGoogleスプレッドシートだけで、このアプリの作者を含む第三者には送信されません。"))), /*#__PURE__*/React.createElement("section", {
+  }, "共有・送信される内容は、圃場名・作物・面積・圃場の位置情報(地図で囲んだ緯度経度)・地区・薬剤・作業記録・記録者名と、この端末を区別するための端末ID(初回起動時に作られる意味のない文字列で、機種や電話番号とは無関係です)です。作業者の現在地は送信しません。送信先はあなたが設定したGoogleスプレッドシートだけで、このアプリの作者を含む第三者には送信されません。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("農薬データ", openSec.chemdb, () => toggleSec("chemdb")), openSec.chemdb && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -7939,9 +8076,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.56",
+    ver: "v8.57",
     date: "2026-08",
     isNew: true,
+    notes: ["📋 データベースタブをなくし、タブを5つから4つにしました。圃場の登録・編集は地図タブの「📋 圃場一覧」へ、薬剤とプリセットは調合タブの「🧪 薬剤・プリセット」へ移しています。地図で見ている圃場を直すのに別のタブへ移る必要がありません", "🗺 地図タブの一覧に、地図で囲んでいない圃場も出るようになりました(「・位置未登録」と表示)。囲んだ圃場だけを一覧にしていた頃は、位置のない圃場を直す場所が地図側にありませんでした。行の 📍 で地図のその圃場へ、👁 で地図の表示を切り替えられます", "☁ 薬剤も圃場と同じやり方で共有されるようになりました。登録・編集・削除した時点で自動的に送られ、変わったものだけをやりとりします。これまでは「☁↑ 端末→共有へ保存」で丸ごと上書きするしかなく、他の端末が登録した薬剤が消えるおそれがありました。※スプレッドシート側の Code.gs を新しいものに差し替えて再デプロイしてください(「薬剤マスタ」シートが自動で作られます)", "⚙ 設定タブの「送信・共有」を4つの段に分けました。①つなぎ先 ②データ共有(圃場・薬剤) ③作業データの送信 ④古い方式。ボタンが6つ並んでどれを押せばよいか分からなかったのを改めています。丸ごと上書きする古いボタンは④の中に畳んであります", "⚙ 接続テストが古い版と判定する目安を pushChems に更新しました。進捗地図は動くのに薬剤だけ共有されない状態を見分けられます"]
+  }, {
+    ver: "v8.56",
+    date: "2026-08",
     notes: ["🚁 画面下に固定されていた「▶ 次の圃場／🚁 実績入力」の帯を外しました。同じことが上の「順送りナビ」と各行の「🚁 実績入力」でできるのに、常に画面の下を塞いで地図と一覧を狭めていました", "🚦 進捗地図の色を3つに絞りました。緑=実施済、赤=未実施、灰=その日の作業に入っていない圃場(対象外)。調合済(黄)と未送信(橙)は色をやめ、調合済は赤(未実施)に、未送信は緑(実施済)にまとめています。未送信の件数は地図の上に文字で出ます", "🐞 その日の作業に入れた圃場が対象外(灰)のままになることがある不具合を修正しました。圃場IDを数値と文字列のまま突き合わせていたため、過去の版で作られたデータが混ざると一致せず、作業に入っているのに灰色で描かれていました", "🐞 進捗地図が県全体まで引いて表示され、今日の圃場が点にしか見えないことがある問題を直しました。登録済みの全圃場が入るように寄せていたので、遠くに1枚でも圃場があると引いてしまっていました。今日の作業に入っている圃場だけが入るように寄せます。地図の高さが決まる前に寄せて倍率がでたらめになる状態も直しています", "🚦 「⊙ 今日の圃場へ」を追加しました。地図を動かして見失っても、その日の圃場が入る位置へ戻せます", "🚦 その日の作業に入っているのに地図で囲まれていない圃場があると「地図に出せない圃場 n件(位置未登録)」と出ます。地図に出ない理由が分からないままになるのを防ぐためです。地図タブで囲むと出るようになります", "🗺 進捗地図をGoogleマップでも出せるようにしました。設定タブの地図エンジンの選択が、地図タブだけでなく進捗地図にも効きます(※Googleマップは地図を作るたびに課金対象になり、進捗地図は地図タブとは別の地図なので、開くとそのぶん回数が増えます)", "🚦 作業タブの見た目を整理しました。同じ「実績 n/m」が3か所に出ていたのを進捗バー1か所にまとめ、進捗地図のときは一覧向けの部品(順送りナビ・本日の薬剤・投下量の警告)を出さないようにしました。集計も大きなタイル3枚から1行に畳みます。地図の操作は地図のすぐ上に1行、凡例と取得時刻は地図の下に移しました(地図の上端 実測 526px → 462px)"]
   }, {
     ver: "v8.55",
@@ -9910,30 +10051,6 @@ const S = {
     border: "1.5px dashed #1C6EA4",
     borderRadius: 10,
     cursor: "pointer"
-  },
-  subTabWrap: {
-    display: "flex",
-    gap: 6,
-    background: "#EDF1EA",
-    borderRadius: 11,
-    padding: 4,
-    marginBottom: 2
-  },
-  subTab: {
-    flex: 1,
-    padding: "12px 0",
-    fontSize: 15,
-    fontWeight: 800,
-    border: "none",
-    background: "transparent",
-    color: "#66756a",
-    borderRadius: 8,
-    cursor: "pointer"
-  },
-  subTabOn: {
-    background: "#fff",
-    color: "#1C2B21",
-    boxShadow: "0 1px 4px rgba(0,0,0,0.12)"
   },
   flightNum: {
     width: 30,
