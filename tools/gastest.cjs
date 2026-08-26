@@ -246,13 +246,47 @@ const F2 = {
   eq("取消 元の行が無ければ成功扱い", [r2.ok, r2.missing], [true, true]);
 }
 
-// ── 13. doGet ──
+// ── 13. 薬剤マスタ(レコード単位の共有) ──
+{
+  const ctx = makeContext({});
+  const C1 = { id: "パレード20フロアブル", name: "パレード20フロアブル",
+               use: "fungicide", form: "sc", maxUse: 3,
+               updatedAt: "2026-08-01T00:00:00.000Z", by: "藤本", deviceId: "dev-1" };
+  const r = post(ctx, { type: "pushChems", team: TEAM, items: [C1] });
+  eq("pushChems 追加件数", [r.ok, r.added, r.updated], [true, 1, 0]);
+
+  const sh = ctx.SHEET_STATE.getSheetByName("薬剤マスタ");
+  ok("薬剤マスタが作られる", !!sh);
+  eq("薬剤名の列", sh.getRange(2, 3).getValue(), "パレード20フロアブル");
+
+  const all = post(ctx, { type: "pull", team: TEAM, since: "" });
+  eq("pull に薬剤が乗る", [all.chems.length, all.chems[0].use, all.chems[0].form, all.chems[0].maxUse],
+     [1, "fungicide", "sc", 3]);
+
+  // 古い編集は踏み潰さない(圃場・作業と同じ規則)
+  const older = Object.assign({}, C1, { form: "wp", updatedAt: "2026-07-01T00:00:00.000Z" });
+  const r2 = post(ctx, { type: "pushChems", team: TEAM, items: [older] });
+  eq("古い編集は見送る", [r2.updated, r2.skipped], [0, 1]);
+
+  // 削除は行を消さず「削除」の印を立てて配る
+  const tomb = { id: C1.id, name: "", deleted: true,
+                 updatedAt: "2026-09-01T00:00:00.000Z", by: "藤本", deviceId: "dev-2" };
+  post(ctx, { type: "pushChems", team: TEAM, items: [tomb] });
+  const after = post(ctx, { type: "pull", team: TEAM, since: "" });
+  eq("削除が配られる", [after.chems.length, after.chems[0].deleted], [1, true]);
+
+  const other = post(ctx, { type: "pull", team: "team-b", since: "" });
+  eq("別チームには配らない", other.chems.length, 0);
+}
+
+// ── 14. doGet ──
 {
   const ctx = makeContext({ SHARED_SECRET: "x" });
   const g = JSON.parse(ctx.doGet().getContent());
   eq("doGet secured", [g.ok, g.secured], [true, true]);
   ok("features に progress が入る", g.features.indexOf("progress") >= 0);
   ok("features に pushFields が入る", g.features.indexOf("pushFields") >= 0);
+  ok("features に pushChems が入る", g.features.indexOf("pushChems") >= 0);
   ok("features に unreport が入る", g.features.indexOf("unreport") >= 0);
 }
 
