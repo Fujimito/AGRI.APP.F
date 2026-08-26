@@ -284,6 +284,19 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("同期 指紋は updatedAt を無視する",
      t.syncFingerprint({ id: 1, a: 1, updatedAt: "x" }),
      t.syncFingerprint({ id: 1, a: 1, updatedAt: "y" }));
+  // 古い配列を元に保存されたとき、時刻が過去へ戻らないこと。
+  // 戻ると pushedAt のほうが新しくなり、一度送った時点で「送信済み」と
+  // 判定されて、中身が違うままサーバーとの食い違いが固まる(実機で発生した)
+  {
+    const saved = [{ id: 1, name: "北の田",
+                     updatedAt: "2026-08-26T05:00:00.000Z",
+                     pushedAt: "2026-08-26T05:00:00.000Z" }];
+    const stale = [{ id: 1, name: "北の田",
+                     updatedAt: "2026-08-26T01:00:00.000Z" }];
+    const out = t.stampUpdated(stale, saved);
+    eq("同期 時刻は過去へ戻らない", out[0].updatedAt, "2026-08-26T05:00:00.000Z");
+    eq("同期 送信済みの時刻も保存側を引き継ぐ", out[0].pushedAt, "2026-08-26T05:00:00.000Z");
+  }
   eq("同期 指紋はキーの並び順に影響されない",
      t.syncFingerprint({ a: 1, b: 2 }), t.syncFingerprint({ b: 2, a: 1 }));
   eq("同期 中身が違えば指紋も違う",

@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.52";
+const APP_VERSION = "v8.53";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -526,7 +526,19 @@ const stampUpdated = (next, prev) => {
   const at = nowIso();
   return next.map(x => {
     const old = before.get(x.id);
-    if (old && syncFingerprint(old) === syncFingerprint(x)) return x;
+    if (old && syncFingerprint(old) === syncFingerprint(x)) {
+      // 中身が同じなら時刻は動かさない。ただし「動かさない」は
+      // 「渡された値をそのまま使う」ではない。古い配列を元に保存されると
+      // updatedAt が過去へ戻り、pushedAt のほうが新しいという状態ができる。
+      // そうなると一度送信した時点で updatedAt === pushedAt になってしまい、
+      // 中身が違うのに送信済みと判定されて、サーバーとの食い違いが永久に固まる。
+      // 保存されている側の時刻を正とする。
+      return {
+        ...x,
+        updatedAt: old.updatedAt || x.updatedAt || at,
+        pushedAt: old.pushedAt
+      };
+    }
     return {
       ...x,
       updatedAt: at
@@ -817,6 +829,14 @@ function App() {
   };
   const setFieldsSave = next => setFieldsRaw(stampUpdated(next, fields));
   const setWorksSave = next => setWorksRaw(stampUpdated(next, works));
+  // 描画時に閉じ込めた works は、再描画を待たずに続けて操作されると古くなる。
+  // 古い配列を元に保存すると直前の変更が巻き戻る。チェックを続けて2つ入れると
+  // 1つしか残らない、外したはずの実績が戻る、といった形で表に出る。
+  // 進捗のように連打されうる操作は、必ず保存済みの内容から読み直す。
+  const updateWorks = fn => {
+    const cur = load("tankmix:works", []);
+    setWorksRaw(stampUpdated(fn(cur), cur));
+  };
   const setChemMasterSave = next => {
     setChemMaster(next);
     save("tankmix:chemmaster", next);
@@ -1154,6 +1174,92 @@ function App() {
     }));
     flash(updated + "圃場の予定薬液量を計算しました" + (noArea > 0 ? "(面積未入力 " + noArea + "件は対象外)" : ""));
   };
+  // ── 散布済チェックの切り替え ──
+  // 進捗マップの色は work.reported を見ている。ここを入り口にすることで、
+  // 「散布量を入力する」と「終わったことにする」を分けられる。
+  // 散布中は片手でチェックだけ入れ、量は後から「投下量から実績を一括入力」で埋める。
+  //
+  // 外したときは実績の値も消す。reported だけ false に戻すと、散布量が残ったまま
+  // 未実施の圃場ができ、集計と地図が食い違う。
+  const toggleDone = id => {
+    const w = load("tankmix:works", []).find(x => x.id === id);
+    if (!w) return;
+    const f = resolveWork(w);
+    updateWorks(cur => cur.map(x => {
+      if (x.id !== id) return x;
+      if (x.reported) {
+        return {
+          ...x,
+          reported: false,
+          sprayedL: 0,
+          flights: [],
+          reportAreaA: "",
+          reportMemo: "",
+          reportDate: "",
+          reportSynced: false,
+          // 既にシートへ「散布済」で送ってあるなら、取り消しも送らないと
+          // アプリは未実施・シートは散布済という食い違いが黙って残る
+          unreportPending: x.reportSynced ? true : x.unreportPending
+        };
+      }
+      return {
+        ...x,
+        reported: true,
+        reportSynced: false,
+        unreportPending: false,
+        // 散布量はここでは入れない。0のままでも「終わった」ことは伝わる
+        sprayedL: parseFloat(x.sprayedL) || 0,
+        reportAreaA: parseFloat(f.areaA) || "",
+        reportDate: today()
+      };
+    }));
+    // 進捗マップの色をその場で他の端末へ届ける。圏外なら未送信のまま残る
+    pushProgress({
+      quiet: true
+    });
+  };
+
+  // ── 投下量から実績をまとめて入れる ──
+  // 対象は「散布済にしたが、まだ実散布量が入っていない圃場」だけ。
+  // 既に量を入れた圃場を上書きしない(手で入れた実測値を計算値で潰さないため)。
+  // チェックしていない圃場は対象にしない。撒いていない圃場に実績が入ってしまう。
+  const bulkReportFromRate = ratePer10a => {
+    const rate = parseFloat(ratePer10a);
+    if (!(rate > 0)) {
+      flash("10aあたりの量を入力してください");
+      return;
+    }
+    let updated = 0;
+    let noArea = 0;
+    const cur = load("tankmix:works", []);
+    const next = cur.map(w => {
+      if (w.workDate !== workDate || !w.reported) return w;
+      if (parseFloat(w.sprayedL) > 0) return w; // 入力済みは触らない
+      const area = parseFloat(resolveWork(w).areaA) || 0;
+      if (area <= 0) {
+        noArea++;
+        return w;
+      }
+      updated++;
+      return {
+        ...w,
+        sprayedL: plannedLFromArea(area, rate),
+        reportAreaA: area,
+        reportDate: w.reportDate || today(),
+        reportSynced: false
+      };
+    });
+    if (updated === 0) {
+      flash(noArea > 0 ? "面積が入っていないため計算できませんでした(" + noArea + "圃場)" : "対象がありません(散布済にした圃場のうち、実散布量が空のものが対象です)");
+      return;
+    }
+    setWorksRaw(stampUpdated(next, cur));
+    flash(updated + "圃場に実績を入れました" + (noArea > 0 ? "(面積未入力 " + noArea + "件は対象外)" : "") + "。送信は「☁ 全データを送信」から");
+    pushProgress({
+      quiet: true
+    });
+  };
+
   // ドラッグ&ドロップ:この日の可視リスト内で、fromの圃場をtoの位置へ移動
   const reorderWork = (fromId, toId) => {
     if (fromId === toId) return;
@@ -1410,7 +1516,7 @@ function App() {
     let current = load("tankmix:works", []);
     // 送信対象は「作業日で選んでいる日」の未送信ぶんだけ。
     // 以前は全期間の未送信をまとめて送っていたため、意図しない日の記録まで一斉に送られていた。
-    const pendingList = current.filter(w => w.workDate === workDate && (!w.synced || w.reported && !w.reportSynced));
+    const pendingList = current.filter(w => w.workDate === workDate && (!w.synced || w.reported && !w.reportSynced || w.unreportPending));
     // 開始圃場が指定されていれば、その位置から
     let startIdx = 0;
     if (startFromId) {
@@ -1453,7 +1559,28 @@ function App() {
         aborted = true;
         break;
       }
-      const cur = current.find(x => x.id === w.id);
+      let cur = current.find(x => x.id === w.id);
+      // 実績の取り消しを先に送る。報告より後に送ると、同じ回で
+      // 「取り消し → 再報告」が起きたとき順序が入れ替わって取り消しが勝つ
+      if (cur && cur.unreportPending && cur.synced) {
+        const j = await post({
+          type: "unreport",
+          recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
+          record: buildPayload(cur)
+        });
+        if (!j || !j.ok) {
+          failed = true;
+          break;
+        }
+        current = current.map(x => x.id === w.id ? {
+          ...x,
+          unreportPending: false
+        } : x);
+        setWorks(current);
+        save("tankmix:works", current);
+        cur = current.find(x => x.id === w.id);
+        sent++;
+      }
       if (cur && cur.reported && cur.synced && !cur.reportSynced) {
         const j = await post({
           type: "report",
@@ -2073,7 +2200,7 @@ function App() {
     });
     return warnings.sort((a, b) => b.count - a.count);
   }, [works, fields, chemMaster, seasonStart]);
-  const isPending = w => !w.synced || w.reported && !w.reportSynced;
+  const isPending = w => !w.synced || w.reported && !w.reportSynced || !!w.unreportPending;
   // 未送信の件数は「選んでいる作業日」ぶんだけを数える
   const pendingCount = works.filter(w => w.workDate === workDate && isPending(w)).length;
   // 他の日に残っている未送信の件数(日付を切り替えてもらうための案内に使う)
@@ -2187,6 +2314,8 @@ function App() {
     areas,
     addWorks,
     applyRatePerDay,
+    toggleDone,
+    bulkReportFromRate,
     submitReport,
     submitGroupReport,
     deleteWork,
@@ -2259,7 +2388,6 @@ function App() {
     fields,
     works,
     workDate,
-    seasonStart,
     recorder,
     areaUnitKey,
     fetchProgress,
@@ -2752,6 +2880,8 @@ function WorkTab(p) {
   const rateSkipNoArea = pendingDayList.length - rateTargets.length;
   const rateArea = rateTargets.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
   const rateTotal = rateTargets.reduce((s, w) => s + plannedLFromArea(p.resolveWork(w).areaA, rateNum), 0);
+  // 実績の一括入力の対象:散布済にしたが実散布量がまだ空で、面積が入っている圃場
+  const bulkTargets = dayList.filter(w => w.reported && !(parseFloat(w.sprayedL) > 0) && parseFloat(p.resolveWork(w).areaA) > 0);
   const openReport = w => {
     const f = p.resolveWork(w);
     setReportingId(w.id);
@@ -3036,7 +3166,23 @@ function WorkTab(p) {
       padding: "13px 16px",
       opacity: parseFloat(ratePerDay) > 0 ? 1 : 0.4
     }
-  }, "面積から一括計算")), parseFloat(ratePerDay) > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "面積から一括計算")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      p.bulkReportFromRate(ratePerDay);
+    },
+    disabled: !(parseFloat(ratePerDay) > 0) || bulkTargets.length === 0,
+    style: {
+      ...S.smallPrimary,
+      width: "100%",
+      padding: "13px 16px",
+      marginTop: 8,
+      background: "#B7791F",
+      borderColor: "#8A5108",
+      opacity: parseFloat(ratePerDay) > 0 && bulkTargets.length > 0 ? 1 : 0.4
+    }
+  }, "✓ 投下量から実績を一括入力(", bulkTargets.length, "圃場)"), /*#__PURE__*/React.createElement("div", {
+    style: S.rateHint
+  }, "実績は「散布済」にチェックを入れた圃場のうち、実散布量がまだ空のものだけに入ります(手で入れた値は上書きしません)。"), parseFloat(ratePerDay) > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.rateHint,
     className: "num"
   }, "対象 ", rateTargets.length, "圃場 ／ 合計 ", fmt(rateArea, 2), "a → ", fmt(rateTotal, 2), "L", rateSkipReported > 0 || rateSkipNoArea > 0 ? "(" + [rateSkipReported > 0 ? "実績入力済み " + rateSkipReported + "圃場は上書きしません" : "", rateSkipNoArea > 0 ? "面積未入力 " + rateSkipNoArea + "圃場は対象外です" : ""].filter(Boolean).join(" ／ ") + ")" : "")), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
@@ -3503,10 +3649,19 @@ function WorkTab(p) {
         ...S.checkBtn,
         ...(selected.includes(w.id) ? S.checkBtnOn : {})
       }
-    }, selected.includes(w.id) ? "✓" : "") : /*#__PURE__*/React.createElement("span", {
+    }, selected.includes(w.id) ? "✓" : "") : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("button", {
+      onClick: () => p.toggleDone(w.id),
+      style: {
+        ...S.doneBox,
+        ...(w.reported ? S.doneBoxOn : {})
+      },
+      title: w.reported ? "散布済を取り消す" : "散布済にする",
+      "aria-label": w.reported ? "散布済を取り消す" : "散布済にする",
+      "aria-pressed": w.reported ? "true" : "false"
+    }, w.reported ? "✓" : ""), /*#__PURE__*/React.createElement("span", {
       style: S.orderNum,
       className: "num"
-    }, idx + 1), /*#__PURE__*/React.createElement("div", {
+    }, idx + 1)), /*#__PURE__*/React.createElement("div", {
       style: {
         minWidth: 0,
         flex: 1
@@ -7652,9 +7807,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.52",
+    ver: "v8.53",
     date: "2026-08",
     isNew: true,
+    notes: ["🚁 作業タブの各圃場に「散布済」チェックを追加しました。チェックを入れると進捗マップの色が変わり、外すと元に戻ります。散布量を入れなくても「終わった」ことだけ先に記録できます", "🚁 チェックを外すと実績も取り消されます。スプレッドシートの「防除記録」も状態が『調合済』に戻り、実散布量と報告日が消えます(行は消しません。調合した事実は残ります)", "🚁 「今日の準備」に「✓ 投下量から実績を一括入力」を追加しました。散布済にした圃場のうち、実散布量がまだ空のものだけに『面積÷10×投下量』を入れます。手で入れた値は上書きしません", "🚦 進捗マップの期間切替(当日/7日間/シーズン)をやめ、作業タブで選んでいる日の作業だけを見る形にしました", "🐞 チェックを続けて操作したとき、片方しか反映されない・外したはずの実績がサーバー側に残り続ける不具合を修正しました。画面の再描画を待たずに操作すると古いデータを元に保存され、更新時刻が過去へ戻って『送信済みなのに中身が違う』状態で固まっていました"]
+  }, {
+    ver: "v8.52",
+    date: "2026-08",
     notes: ["🗺 線が交差したときに「🔀 並び順を直す」ボタンが出るようになりました。頂点の座標は1つも動かさず、外周をたどる順に並べ替えるだけです。押したあと「↩ 1つ戻す」で元に戻せます。※大きくへこんだ形の圃場では意図した形と変わることがあるので、結果を見てから登録してください", "🗺 全画面のまま圃場を囲めるようになりました。これまでは作図を始めると全画面が解除されていました。全画面のときは操作パネルが下から重なり、「この圃場を登録」は常に画面の下端に出ます", "🚦 進捗マップに「◉ 対象だけ／○ 全圃場」の切り替えを追加しました。その期間に作業がある圃場だけを出せます(既定は全圃場)", "🐞 作業をその日のリストから外したとき、他の端末の進捗マップでその圃場が実績済のまま残る不具合を修正しました。外した時点で送るようにしています"]
   }, {
     ver: "v8.51",
@@ -7992,7 +8151,6 @@ function ProgressMapTab(p) {
   const [ready, setReady] = React.useState(false);
   const [zoom, setZoom] = React.useState(15);
   const [fullMap, setFullMap] = React.useState(false);
-  const [range, setRange] = React.useState("day");
   // 既定は全部出す。周りの圃場が見えていないと、どこを見ているのか分からなくなるため。
   // 圃場が多くて対象が埋もれるときのために、絞り込めるようにしてある。
   const [onlyTarget, setOnlyTarget] = React.useState(false);
@@ -8009,8 +8167,10 @@ function ProgressMapTab(p) {
   }));
   const LABEL_MIN_ZOOM = 15;
 
+  // 期間は選ばせない。見たいのは「作業タブで選んでいる日の圃場が済んだかどうか」で、
+  // 日付を別に選べると作業タブと食い違って、どちらが本当か分からなくなる。
+  const from = p.workDate;
   const to = p.workDate;
-  const from = range === "day" ? p.workDate : range === "week" ? shiftDate(p.workDate, -6) : p.seasonStart || p.workDate;
 
   const refresh = async () => {
     if (loading) return;
@@ -8222,14 +8382,7 @@ function ProgressMapTab(p) {
       alignItems: "center",
       flexWrap: "wrap"
     }
-  }, [["day", "当日"], ["week", "7日間"], ["season", "シーズン"]].map(r => /*#__PURE__*/React.createElement("button", {
-    key: r[0],
-    onClick: () => setRange(r[0]),
-    style: {
-      ...S.mapSeg,
-      ...(range === r[0] ? S.segOn : {})
-    }
-  }, r[1])), /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setOnlyTarget(!onlyTarget),
     style: {
       ...S.mapSeg,
@@ -8249,7 +8402,7 @@ function ProgressMapTab(p) {
       marginTop: 8
     },
     className: "num"
-  }, from === to ? dateLabel(to) : from + " 〜 " + to, " ／ 最終取得 ", fetchedLabel), /*#__PURE__*/React.createElement("div", {
+  }, dateLabel(to), "の作業 ／ 最終取得 ", fetchedLabel), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 14,
@@ -8951,6 +9104,25 @@ const S = {
     borderRadius: 6,
     padding: "3px 8px",
     whiteSpace: "nowrap"
+  },
+  // 各圃場の「散布済」チェック。手袋でも押せる大きさにする
+  doneBox: {
+    width: 40,
+    height: 40,
+    flexShrink: 0,
+    fontSize: 20,
+    fontWeight: 800,
+    color: "#2E7D4F",
+    background: "#fff",
+    border: "2.5px solid #B9C3B4",
+    borderRadius: 9,
+    cursor: "pointer",
+    lineHeight: 1
+  },
+  doneBoxOn: {
+    color: "#fff",
+    background: "#2E7D4F",
+    borderColor: "#1B5E36"
   },
   orderNum: {
     width: 36,

@@ -212,13 +212,48 @@ const F2 = {
      post(ctx, { type: "cloudLoad", team: TEAM }).payload, '{"fields":[]}');
 }
 
-// ── 12. doGet ──
+// ── 12. 実績の取り消し ──
+{
+  const ctx = makeContext({});
+  const rec = {
+    id: 9001, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
+    chems: [{ name: "薬剤A", ratio: 1000, ml: 100 }],
+    totalL: 100, waterMl: 99900, memo: "",
+  };
+  post(ctx, { type: "record", recorder: "藤本", record: rec });
+  post(ctx, { type: "report", recorder: "藤本",
+              record: Object.assign({}, rec, { sprayedL: 95, reportDate: "2026-08-20" }) });
+  const sh = ctx.SHEET_STATE.getSheetByName("防除記録");
+  eq("取消前 状態", sh.getRange(2, 13).getValue(), "散布済");
+
+  const r = post(ctx, { type: "unreport", recorder: "藤本", record: rec });
+  eq("取消 更新件数", [r.ok, r.updated], [true, 1]);
+  eq("取消 状態が調合済に戻る", sh.getRange(2, 13).getValue(), "調合済");
+  eq("取消 実散布量が空になる", sh.getRange(2, 12).getValue(), "");
+  eq("取消 報告日が空になる", sh.getRange(2, 14).getValue(), "");
+  eq("取消 行は消さない(調合した事実は残す)", sh.getLastRow(), 2);
+  eq("取消 薬剤内容は残る", String(sh.getRange(2, 9).getValue()).indexOf("薬剤A") >= 0, true);
+
+  // 送り直せば散布済に戻る
+  post(ctx, { type: "report", recorder: "藤本",
+              record: Object.assign({}, rec, { sprayedL: 80, reportDate: "2026-08-21" }) });
+  eq("取消後に再報告できる",
+     [sh.getRange(2, 13).getValue(), sh.getRange(2, 12).getValue()], ["散布済", 80]);
+
+  // 元の行が無いときは、失敗ではなく「取り消すものが無い」で成功にする。
+  // 失敗にするとアプリが永久に再送し続ける
+  const r2 = post(ctx, { type: "unreport", recorder: "藤本", record: { id: 9999, chems: [] } });
+  eq("取消 元の行が無ければ成功扱い", [r2.ok, r2.missing], [true, true]);
+}
+
+// ── 13. doGet ──
 {
   const ctx = makeContext({ SHARED_SECRET: "x" });
   const g = JSON.parse(ctx.doGet().getContent());
   eq("doGet secured", [g.ok, g.secured], [true, true]);
   ok("features に progress が入る", g.features.indexOf("progress") >= 0);
   ok("features に pushFields が入る", g.features.indexOf("pushFields") >= 0);
+  ok("features に unreport が入る", g.features.indexOf("unreport") >= 0);
 }
 
 // ─────────── 結果 ───────────
