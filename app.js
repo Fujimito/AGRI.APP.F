@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.61";
+const APP_VERSION = "v8.62";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -306,6 +306,33 @@ const roundPts = pts => Array.isArray(pts) ? pts.map(p => [roundGeo(p[0]), round
 // 同じ圃場に2つの面積が見えることになる(データベースで面積を手直しすると必ずずれた)。
 // 単位設定(a/ha/反/町)も他の画面と揃える。以前は "a" 固定で、
 // 反や町に設定していても地図だけアール表示のままだった。
+// 名前の末尾にある数字を読む。「嘉島①」も「嘉兒52」も同じやり方で扱えるよう、
+// 先に NFKC を通す(丸数字①はNFKCで "1" になる)。数字がなければ null。
+const nameNumber = name => {
+  const m = String(name || "").normalize("NFKC").match(/(\d+)\D*$/);
+  return m ? parseInt(m[1], 10) : null;
+};
+// 地区の名前から、連番の接頭辞の初期値を探す。
+// 全件の共通部分を取ると、別の名前が1件混ざっているだけで空になる。
+// 末尾の数字を落とした形で数えて、一番多いものを使う。
+const commonNamePrefix = names => {
+  const count = new Map();
+  (names || []).forEach(n => {
+    const base = String(n || "").normalize("NFKC").replace(/[\d\s\-_.]+\D*$/, "").trim();
+    if (!base) return;
+    count.set(base, (count.get(base) || 0) + 1);
+  });
+  let best = "",
+    n = 0;
+  count.forEach((v, k) => {
+    if (v > n) {
+      n = v;
+      best = k;
+    }
+  });
+  return best;
+};
+
 const fieldAreaText = (f, unitKey) => {
   const a = f && f.areaA;
   if (a === "" || a == null || !(parseFloat(a) > 0)) return "面積未設定";
@@ -890,11 +917,17 @@ function App() {
   const autoPushFields = () => {
     if (!syncReady()) return;
     if (autoPushRef.current) clearTimeout(autoPushRef.current);
-    autoPushRef.current = setTimeout(() => {
+    autoPushRef.current = setTimeout(async () => {
       autoPushRef.current = null;
-      pushFieldsSync({
+      const ok = await pushFieldsSync({
         quiet: true
       });
+      // 送った直後に取り直す。登録した端末でも、他の端末が
+      // 入れた分がその場で揃う(次の拍子を待たない)。
+      if (ok) {
+        autoPullAtRef.current = 0;
+        autoPullShared();
+      }
     }, 1500);
   };
   // ── 受け取り側の自動取得 ──
@@ -946,8 +979,19 @@ function App() {
   useEffect(() => {
     if (!pullSec) return;
     if (tab !== "work" && tab !== "map") return;
+    // 入力の途中に割り込まない。投下量や薬剤を入れている間に
+    // 受信が走ると、一覧の並びや中身が目の前で入れ替わる。
+    // 見送っても次の拍子で取りに行くので、取りこぼしにはならない。
+    const busy = () => {
+      const el = document.activeElement;
+      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return true;
+      // ポップアップ(実績入力・圃場の編集など)を開いている間も待つ
+      return !!document.querySelector("[data-modal]");
+    };
     const tick = () => {
-      if (document.visibilityState === "visible") autoPullShared({
+      if (document.visibilityState !== "visible") return;
+      if (busy()) return;
+      autoPullShared({
         tick: true
       });
     };
@@ -1074,6 +1118,42 @@ function App() {
     setFieldsSave(fields.filter(f => f.id !== id));
     flash("圃場をマスタから削除しました(過去の記録は残ります)");
     autoPushFields();
+  };
+  // 地区ごとの連番振り直し。1件ずつ upsertField を呼ぶと、古い fields を元に
+  // 上書きし合って最後の1件しか残らないので、必ずまとめて処理する。
+  const renameFields = pairs => {
+    const list = (pairs || []).filter(x => x && x.id != null && x.name);
+    if (!list.length) return 0;
+    const byId = new Map(list.map(x => [x.id, x.name]));
+    // 名前を振り直したら、一覧の並びもその番号順にする。
+    // 名前だけ変えて並びを放置すると、番号が飛び飛びに並んで見づらい。
+    // 対象外の圃場は位置を動かさない(対象のあった位置に、新しい順で入れ直す)。
+    const slots = [];
+    fields.forEach((f, i) => {
+      if (byId.has(f.id)) slots.push(i);
+    });
+    const seq = list.map(x => fields.find(f => f.id === x.id)).filter(Boolean);
+    const next = fields.slice();
+    slots.forEach((slot, k) => {
+      const f = seq[k];
+      if (f) next[slot] = {
+        ...f,
+        name: byId.get(f.id)
+      };
+    });
+    setFieldsSave(next);
+    // 作業側の控え(snapshot)も追従させる。ここを放置すると、
+    // 過去の作業だけ古い名前のままになる。
+    setWorksSave(works.map(w => byId.has(w.fieldId) ? {
+      ...w,
+      snapshot: {
+        ...w.snapshot,
+        name: byId.get(w.fieldId)
+      }
+    } : w));
+    flash(list.length + "圃場の名前を付け直しました");
+    autoPushFields();
+    return list.length;
   };
   // 地図で囲んだ圃場(ポリゴン・中心座標つき)を登録
   const addFieldWithPolygon = data => {
@@ -2786,8 +2866,9 @@ function App() {
     fields,
     addFieldWithPolygon,
     upsertField,
-    // 「📋 一覧」を圃場マスタにしたため、登録と削除もここで行う
+    // 「📋 一覧」を圃場マスタにしたため、削除と連番振り直しもここで行う
     deleteField,
+    renameFields,
     areaUnitKey,
     areas,
     crops,
@@ -4671,6 +4752,7 @@ function ChemPickModal(p) {
     onClick: p.onCancel
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -4720,6 +4802,7 @@ function ReportModal(p) {
     onClick: p.onCancel
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -5383,6 +5466,7 @@ function FieldEditModal(p) {
     onClick: p.onCancel
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -5517,6 +5601,8 @@ function FieldMasterPanel(p) {
     areaA: ""
   });
   const [closed, setClosed] = useState([]); // 閉じている地区名
+  // 連番で付け直すときの入力(null なら閉じている)
+  const [renumber, setRenumber] = useState(null);
   const hidden = p.hidden || [];
   const hasPoly = f => !!(f.polygon && f.polygon.length) || !!f.center;
   const isHidden = id => hidden.indexOf(id) >= 0;
@@ -5555,6 +5641,55 @@ function FieldMasterPanel(p) {
     });
   };
   const closeEdit = () => setEditId(null);
+  // 地区の中を連番で付け直す。並べ直してから振るので、
+  // 丸数字と普通の数字が混ざっていても順番は崩れない。
+  const openRenumber = g => setRenumber({
+    zone: g.name,
+    items: g.items,
+    prefix: commonNamePrefix(g.items.map(f => f.name)),
+    start: "1",
+    byNumber: true
+  });
+  const renumberList = () => {
+    if (!renumber) return [];
+    const items = [...renumber.items];
+    if (renumber.byNumber) {
+      // 数字のない名前は末尾へ回す(並び順を決められないため)。
+      // 同じ数字が2件あったときは一覧の順を保つ。
+      const idx = new Map(items.map((f, i) => [f.id, i]));
+      items.sort((a, b) => {
+        const na = nameNumber(a.name),
+          nb = nameNumber(b.name);
+        if (na === null && nb === null) return idx.get(a.id) - idx.get(b.id);
+        if (na === null) return 1;
+        if (nb === null) return -1;
+        if (na !== nb) return na - nb;
+        return idx.get(a.id) - idx.get(b.id);
+      });
+    }
+    const start = parseInt(renumber.start, 10);
+    const from = isFinite(start) ? start : 1;
+    return items.map((f, i) => ({
+      id: f.id,
+      before: f.name,
+      name: (renumber.prefix || "") + (from + i)
+    }));
+  };
+  const runRenumber = () => {
+    const pairs = renumberList();
+    if (!pairs.length) return;
+    const changed = pairs.filter(x => x.before !== x.name);
+    if (changed.length === 0) {
+      setRenumber(null);
+      return;
+    }
+    if (!confirm("「" + renumber.zone + "」の" + pairs.length + "圃場の名前を付け直します。\n" + changed.length + "件が変わります(例: " + changed[0].before + " → " + changed[0].name + ")。\nこの操作は戻せません。よろしいですか？")) return;
+    p.renameFields(pairs.map(x => ({
+      id: x.id,
+      name: x.name
+    })));
+    setRenumber(null);
+  };
   // 保存すると圃場マスタが更新され、作業タブに入っている同じ圃場の
   // 名前・面積の表示も同時に切り替わる(resolveWorkがマスタを参照しているため)
   const saveEdit = () => {
@@ -5569,7 +5704,95 @@ function FieldMasterPanel(p) {
     }, editId);
     setEditId(null);
   };
-  return /*#__PURE__*/React.createElement(React.Fragment, null, editField && /*#__PURE__*/React.createElement(FieldEditModal, {
+  const preview = renumberList();
+  return /*#__PURE__*/React.createElement(React.Fragment, null, renumber && /*#__PURE__*/React.createElement("div", {
+    style: S.modalOverlay,
+    onClick: () => setRenumber(null)
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.modalBox,
+    "data-modal": "",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.listTitle
+  }, "連番で名前を付け直す"), /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel,
+    className: "num"
+  }, "地区「", renumber.zone, "」の ", renumber.items.length, "圃場"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.areaGrid,
+      marginTop: 10
+    }
+  }, /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "名前の頭"), /*#__PURE__*/React.createElement("input", {
+    value: renumber.prefix,
+    onChange: e => setRenumber({
+      ...renumber,
+      prefix: e.target.value
+    }),
+    placeholder: "例:嘉島",
+    style: S.fieldInput
+  })), /*#__PURE__*/React.createElement("label", {
+    style: S.areaField
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "開始番号"), /*#__PURE__*/React.createElement("input", {
+    value: renumber.start,
+    onChange: e => setRenumber({
+      ...renumber,
+      start: e.target.value
+    }),
+    inputMode: "numeric",
+    style: S.fieldInput
+  }))), /*#__PURE__*/React.createElement("label", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 8,
+      marginTop: 12,
+      fontSize: 14,
+      fontWeight: 700
+    }
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: renumber.byNumber,
+    onChange: e => setRenumber({
+      ...renumber,
+      byNumber: e.target.checked
+    })
+  }), "今の名前に入っている番号の順に並べてから振る"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "丸数字(①)も普通の数字として読みます。番号が入っていない名前は末尾に回ります。付け直すのは名前だけで、囲んだ形・面積・作物・作業の記録はそのままです。"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.settingsBox,
+      marginTop: 4,
+      maxHeight: 180,
+      overflowY: "auto"
+    },
+    className: "num"
+  }, preview.slice(0, 60).map(x => /*#__PURE__*/React.createElement("div", {
+    key: x.id,
+    style: {
+      fontSize: 13,
+      lineHeight: 1.7,
+      color: x.before === x.name ? "#8a978e" : "#1C2B21"
+    }
+  }, x.before, " → ", /*#__PURE__*/React.createElement("strong", null, x.name))), preview.length > 60 && /*#__PURE__*/React.createElement("div", {
+    style: S.smallLabel
+  }, "他 ", preview.length - 60, "件")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.btnRow,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setRenumber(null),
+    style: S.smallSecondary
+  }, "やめる"), /*#__PURE__*/React.createElement("button", {
+    onClick: runRenumber,
+    style: S.smallPrimary
+  }, "この内容で付け直す")))), editField && /*#__PURE__*/React.createElement(FieldEditModal, {
     mf: mf,
     setMf: setMf,
     crops: p.crops,
@@ -5601,14 +5824,24 @@ function FieldMasterPanel(p) {
   }, isOpen(g.name) ? "▾ " : "▸ ", g.name, /*#__PURE__*/React.createElement("span", {
     style: S.zoneCount,
     className: "num"
-  }, g.items.length, "圃場"), p.setHidden && /*#__PURE__*/React.createElement("button", {
+  }, g.items.length, "圃場"), p.renameFields && /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      openRenumber(g);
+    },
+    style: {
+      ...S.smallSecondary,
+      marginLeft: "auto",
+      padding: "4px 8px"
+    },
+    title: "この地区の圃場名を連番で付け直す"
+  }, "🔢 連番"), p.setHidden && /*#__PURE__*/React.createElement("button", {
     onClick: e => {
       e.stopPropagation();
       setZoneVisible(g.items, g.items.every(f => isHidden(f.id)));
     },
     style: {
       ...S.smallSecondary,
-      marginLeft: "auto",
       padding: "4px 8px"
     },
     title: "この地区を地図に出す／隠す"
@@ -6291,6 +6524,11 @@ function GoogleMapTab(p) {
         streetViewControl: false,
         fullscreenControl: false,
         zoomControl: true,
+        // 既定だとスマホで指 1 本で動かそうとしたときに
+        // 「地図を移動させるには指 2 本で操作します」と出て地図が動かない。
+        // このアプリは地図が主役で、背後のページをスクロールさせたい場面がないので、
+        // 1 本指でそのまま動かせる greedy にする。
+        gestureHandling: "greedy",
         maxZoom: 21
       });
       mapRef.current = map;
@@ -7009,6 +7247,7 @@ function GoogleMapTab(p) {
     fields: p.fields,
     upsertField: p.upsertField,
     deleteField: p.deleteField,
+    renameFields: p.renameFields,
     areas: p.areas,
     crops: p.crops,
     addCrop: p.addCrop,
@@ -7814,6 +8053,7 @@ function LeafletMapTab(p) {
     fields: p.fields,
     upsertField: p.upsertField,
     deleteField: p.deleteField,
+    renameFields: p.renameFields,
     areas: p.areas,
     crops: p.crops,
     addCrop: p.addCrop,
@@ -8308,9 +8548,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.61",
+    ver: "v8.62",
     date: "2026-08",
     isNew: true,
+    notes: ["🔢 圃場一覧の地区の見出しに「🔢 連番」を追加しました。その地区の圃場名を「嘉島1」「嘉島2」…のように連番で付け直せます。丸数字(①)も普通の数字として読むので、①と 52 が混ざっていても番号順に並べ直してから振ります。名前の頭と開始番号を変えられ、実行前に「前 → 後」の一覧が出ます。付け直すのは名前だけで、囲んだ形・面積・作物・作業の記録はそのままです(戻せないので確認画面を出しています)", "📋 連番を振ったあとは、一覧の並びもその番号順になります", "🚦 進捗地図の「対象外」を黄色にしました。灰色だと衛星写真の上で地面と見分けにくいためです(実施済=緑 / 未実施=赤 / 対象外=黄)", "🗺 Googleマップで「地図を移動させるには指 2 本で操作します」が出ないようにしました。指 1 本でそのまま地図を動かせます(全画面でも同じ)", "🚦 進捗地図が、地図タブを一度開くまで白いままになることがある件に手を入れました。地図を作ったあとで入れ物の幅が決まると、0px のまま描かれません。大きさが変わるたびに測り直すようにしました(未再現のため、これで直るかは未確認)", "☁ 入力している間は自動取得を待たせるようにしました。投下量や薬剤を入れている途中に受信が割り込むと、一覧の並びや中身が目の前で入れ替わるためです。入力欄にカーソルがある間と、ポップアップを開いている間は見送り、次の拍子で取りに行きます", "☁ 圃場を登録・編集して送った直後に、その場で取り直すようにしました。次の拍子を待たずに揃います"]
+  }, {
+    ver: "v8.61",
+    date: "2026-08",
     notes: ["🗺 圃場の手入力登録をやめました。登録は地図で囲む1本になります。手入力だと位置のない圃場が増え、進捗地図にもナビにも使えないためです。登録済みの圃場の編集(名前・作物・面積・地区)と削除は、これまでどおり「📋 圃場一覧」の各行からできます"]
   }, {
     ver: "v8.60",
@@ -8692,6 +8936,7 @@ function DrawBarFull(p) {
     onClick: () => setNameOpen(false)
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.listTitle
@@ -8782,8 +9027,10 @@ const PROGRESS_STATES = {
     label: "未実施"
   },
   none: {
-    fill: "#9AA69E",
-    stroke: "#68746C",
+    // 灰色だと衛星写真の上で地面と見分けにくい。
+    // 黄色なら緑(実施済)・赤(未実施)のどちらとも見違えない。
+    fill: "#E3B505",
+    stroke: "#8A6D00",
     mark: "",
     label: "対象外"
   }
@@ -8893,7 +9140,7 @@ function ProgressLeafletCanvas(p) {
         color: c.stroke,
         weight: key === "none" ? 1.5 : 3,
         fillColor: c.fill,
-        fillOpacity: key === "none" ? 0.15 : 0.55
+        fillOpacity: key === "none" ? 0.3 : 0.55
       }).addTo(grp);
       if (key !== "none") targetBounds.push(f.polygon);
       if (showLabel) {
@@ -8921,6 +9168,33 @@ function ProgressLeafletCanvas(p) {
       fit();
     }
   }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget, p.areaUnitKey]);
+  // 地図を作ったあとで入れ物の幅が決まることがある。
+  // そのとき地図は 0px のままで、タイルも形も出ない。
+  // 他のタブを往復すると直るのは、その拍子に大きさが測り直されるから。
+  // 大きさが変わるたびに自分で測り直す。
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let lastW = 0,
+      lastH = 0;
+    const ro = new ResizeObserver(() => {
+      const w = el.clientWidth,
+        h = el.clientHeight;
+      if (!mapRef.current || (w === lastW && h === lastH)) return;
+      lastW = w;
+      lastH = h;
+      if (w < 20 || h < 20) return;
+      mapRef.current.invalidateSize();
+      // 幅が0の間は寄せられないので、大きさが決まった時点でもう一度寄せる
+      if (!fittedRef.current) {
+        fit();
+        fittedRef.current = (fitRef.current || []).length > 0;
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ready]);
+
 
   return /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
@@ -8979,6 +9253,11 @@ function ProgressGoogleCanvas(p) {
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: false,
+        // 既定だとスマホで指 1 本で動かそうとしたときに
+        // 「地図を移動させるには指 2 本で操作します」と出て地図が動かない。
+        // このアプリは地図が主役で、背後のページをスクロールさせたい場面がないので、
+        // 1 本指でそのまま動かせる greedy にする。
+        gestureHandling: "greedy",
         // 進捗を見るだけの地図なので、作図で要る細かい操作は載せない
         clickableIcons: false
       });
@@ -9029,7 +9308,7 @@ function ProgressGoogleCanvas(p) {
         strokeColor: c.stroke,
         strokeWeight: key === "none" ? 1.5 : 3,
         fillColor: c.fill,
-        fillOpacity: key === "none" ? 0.15 : 0.55,
+        fillOpacity: key === "none" ? 0.3 : 0.55,
         map: mapRef.current,
         clickable: true
       });
@@ -9091,6 +9370,33 @@ function ProgressGoogleCanvas(p) {
       fit();
     }
   }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget, p.areaUnitKey]);
+  // 地図を作ったあとで入れ物の幅が決まることがある。
+  // そのとき地図は 0px のままで、タイルも形も出ない。
+  // 他のタブを往復すると直るのは、その拍子に大きさが測り直されるから。
+  // 大きさが変わるたびに自分で測り直す。
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let lastW = 0,
+      lastH = 0;
+    const ro = new ResizeObserver(() => {
+      const w = el.clientWidth,
+        h = el.clientHeight;
+      if (!mapRef.current || (w === lastW && h === lastH)) return;
+      lastW = w;
+      lastH = h;
+      if (w < 20 || h < 20) return;
+      window.google.maps.event.trigger(mapRef.current, "resize");
+      // 幅が0の間は寄せられないので、大きさが決まった時点でもう一度寄せる
+      if (!fittedRef.current) {
+        fit();
+        fittedRef.current = (fitRef.current || []).length > 0;
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ready]);
+
 
   if (loadErr) {
     return /*#__PURE__*/React.createElement("div", {
@@ -9382,6 +9688,7 @@ function ProgressMapTab(p) {
     onClick: () => setSel(null)
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.listTitle
