@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.64";
+const APP_VERSION = "v8.65";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -6201,6 +6201,76 @@ const FIELD_COLOR = {
 // これをやらないと画面をスクロールしないと地図の下半分が見えない。
 // Google版・Leaflet版で手順が同じなので共通化してある。違うのは
 // 「大きさが変わった」と地図に伝える呼び出しだけなので resize で受け取る。
+// 端末の向き(方位)を読む。
+// iOS は webkitCompassHeading(真北基準、時計回り)を持つ。
+// Android は deviceorientationabsolute の alpha(反時計回り)を使う。
+// どちらも取れない端末があるので、取れないときは北が上のままにする。
+function useHeadingUp(flash) {
+  const [headUp, setHeadUp] = React.useState(false);
+  const [heading, setHeading] = React.useState(0);
+  const gotRef = React.useRef(false);
+  React.useEffect(() => {
+    if (!headUp) return;
+    gotRef.current = false;
+    const onDO = e => {
+      let h = null;
+      if (typeof e.webkitCompassHeading === "number") h = e.webkitCompassHeading;else if (e.absolute && typeof e.alpha === "number") h = 360 - e.alpha;
+      if (h === null || isNaN(h)) return;
+      gotRef.current = true;
+      // 1度未満の揺れで描き直さない。地図がぶるぶる震えるのを防ぐ
+      setHeading(prev => Math.abs(((h - prev + 540) % 360) - 180) < 2 ? prev : h);
+    };
+    window.addEventListener("deviceorientationabsolute", onDO, true);
+    window.addEventListener("deviceorientation", onDO, true);
+    const t = setTimeout(() => {
+      if (!gotRef.current && flash) flash("この端末では方位を取れませんでした。北が上のままになります");
+    }, 3000);
+    return () => {
+      clearTimeout(t);
+      window.removeEventListener("deviceorientationabsolute", onDO, true);
+      window.removeEventListener("deviceorientation", onDO, true);
+    };
+  }, [headUp]);
+  // iOS はタップの中で許可を求めないと方位をくれない
+  const toggleHeadUp = async () => {
+    if (headUp) {
+      setHeadUp(false);
+      setHeading(0);
+      return;
+    }
+    try {
+      const DOE = window.DeviceOrientationEvent;
+      if (DOE && typeof DOE.requestPermission === "function") {
+        const r = await DOE.requestPermission();
+        if (r !== "granted") {
+          flash && flash("方位の利用が許可されませんでした");
+          return;
+        }
+      }
+    } catch (e) {
+      // 許可を求められない環境。そのまま試す
+    }
+    setHeadUp(true);
+  };
+  // 地図の入れ物に当てる形。回した分だけ四隅が見えるので、
+  // 入れ物を対角線分(約142%)まで広げてから回す。
+  const rotStyle = headUp ? {
+    position: "absolute",
+    left: "50%",
+    top: "50%",
+    width: "142%",
+    height: "142%",
+    transform: "translate(-50%, -50%) rotate(" + -heading + "deg)",
+    "--maprot": heading + "deg"
+  } : null;
+  return {
+    headUp,
+    heading,
+    toggleHeadUp,
+    rotStyle
+  };
+}
+
 function useMapHeightFit(mapWrapRef, hidden, drawing, ready, fullMap, resize) {
   // resize は描画のたびに作り直される関数なので、依存配列には入れずrefで最新を見る
   const resizeRef = React.useRef(resize);
@@ -6412,6 +6482,12 @@ function GoogleMapTab(p) {
   };
   const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
+  // 進行方向が上の表示(地図をCSSで回す)
+  const {
+    headUp,
+    toggleHeadUp,
+    rotStyle
+  } = useHeadingUp(p.flash);
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
   const mapWrapRef = React.useRef(null); // 地図+凡例の枠。高さを実測して決める
   // 全画面のまま作図できる。作図パネルは全画面のとき、地図の上に
@@ -6966,6 +7042,15 @@ function GoogleMapTab(p) {
   };
   // 一覧表示中と、他のタブを見ている間はどちらも display:none で隠れている
   const mapHidden = listOnly || p.active === false;
+  // 回転のON/OFFで入れ物の大きさが変わるので、地図に測り直させる
+  React.useEffect(() => {
+    const t = setTimeout(() => {
+      const m = mapRef.current;
+      if (!m) return;
+      if (m.invalidateSize) m.invalidateSize();else if (window.google && window.google.maps) window.google.maps.event.trigger(m, "resize");
+    }, 60);
+    return () => clearTimeout(t);
+  }, [headUp]);
   useMapHeightFit(mapWrapRef, mapHidden, drawing, ready, fullMap, () => {
     if (mapRef.current && window.google) window.google.maps.event.trigger(mapRef.current, "resize");
   });
@@ -7085,7 +7170,18 @@ function GoogleMapTab(p) {
         color: "#8a621f"
       } : {})
     }
-  }, mapType === "hybrid" ? "🗺 地図表示" : "📷 衛星写真"), !drawing ? /*#__PURE__*/React.createElement("button", {
+  }, mapType === "hybrid" ? "🗺 地図表示" : "📷 衛星写真"), /*#__PURE__*/React.createElement("button", {
+    onClick: toggleHeadUp,
+    style: {
+      ...S.smallSecondary,
+      ...(headUp ? {
+        background: "#EAF3FA",
+        borderColor: "#3B7EA1",
+        color: "#2b5a7a"
+      } : {})
+    },
+    title: headUp ? "向いている方向が上。押すと北が上に戻ります" : "北が上。押すと向いている方向が上になります"
+  }, headUp ? "🧭 進行方向" : "🧭 北が上"), !drawing ? /*#__PURE__*/React.createElement("button", {
     onClick: startDraw,
     style: S.smallPrimary
   }, "✏ 圃場を囲む") : /*#__PURE__*/React.createElement("button", {
@@ -7126,11 +7222,14 @@ function GoogleMapTab(p) {
     } : fullMap ? S.mapWrapFull : S.mapWrap
   }, /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
-    style: fullMap ? {
-      ...S.mapBox,
-      borderRadius: 0,
-      border: "none"
-    } : S.mapBox,
+    style: {
+      ...(fullMap ? {
+        ...S.mapBox,
+        borderRadius: 0,
+        border: "none"
+      } : S.mapBox),
+      ...(rotStyle || {})
+    },
     "data-map-box": ""
   }), fullMap && drawing && /*#__PURE__*/React.createElement("button", {
     // 作図中は下の帯を作図パネルが使うので、抜けるボタンは右上に出す。
@@ -7353,6 +7452,12 @@ function LeafletMapTab(p) {
   };
   const [hidden, setHidden] = React.useState([]); // 地図に出さない圃場ID(この画面を開いている間だけ)
   const [listOnly, setListOnly] = React.useState(false); // 一覧だけを全画面で見るモード
+  // 進行方向が上の表示(地図をCSSで回す)
+  const {
+    headUp,
+    toggleHeadUp,
+    rotStyle
+  } = useHeadingUp(p.flash);
   const [fullMap, setFullMap] = React.useState(false); // 地図だけを画面いっぱいに出す
   const mapWrapRef = React.useRef(null); // 地図+凡例の枠。高さを実測して決める
   // 全画面のまま作図できる。作図パネルは全画面のとき、地図の上に
@@ -7582,7 +7687,9 @@ function LeafletMapTab(p) {
         // 圃場名と面積を別の行にする。同じ行に並べると、
         // 名前に数字が入る圃場(「嘉島60」など)で面積と続きの数字に見える。
         // 名前は受け取った文字列でもあるので、必ずエスケープしてからHTMLに入れる。
-        const labelText = '<span class="fl-name">' + escapeHtml(f.name) + (f.crop ? '<span class="fl-crop"> / ' + escapeHtml(f.crop) + '</span>' : "") + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>';
+        // fl-box で包むのは、「進行方向が上」で地図ごと回したときに
+        // この中身だけ逆に回して文字を立てるため(CSS の --maprot)。
+        const labelText = '<span class="fl-box"><span class="fl-name">' + escapeHtml(f.name) + (f.crop ? '<span class="fl-crop"> / ' + escapeHtml(f.crop) + '</span>' : "") + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span></span>';
         poly.bindTooltip(labelText, {
           permanent: true,
           direction: "center",
@@ -7809,6 +7916,15 @@ function LeafletMapTab(p) {
 
   // 一覧表示中と、他のタブを見ている間はどちらも display:none で隠れている
   const mapHidden = listOnly || p.active === false;
+  // 回転のON/OFFで入れ物の大きさが変わるので、地図に測り直させる
+  React.useEffect(() => {
+    const t = setTimeout(() => {
+      const m = mapRef.current;
+      if (!m) return;
+      if (m.invalidateSize) m.invalidateSize();else if (window.google && window.google.maps) window.google.maps.event.trigger(m, "resize");
+    }, 60);
+    return () => clearTimeout(t);
+  }, [headUp]);
   useMapHeightFit(mapWrapRef, mapHidden, drawing, ready, fullMap, () => {
     if (mapRef.current) mapRef.current.invalidateSize();
   });
@@ -7918,7 +8034,18 @@ function LeafletMapTab(p) {
         color: "#8a621f"
       } : {})
     }
-  }, tileMode === "photo" ? "🗺 地図表示" : "📷 衛星写真"), !drawing ? /*#__PURE__*/React.createElement("button", {
+  }, tileMode === "photo" ? "🗺 地図表示" : "📷 衛星写真"), /*#__PURE__*/React.createElement("button", {
+    onClick: toggleHeadUp,
+    style: {
+      ...S.smallSecondary,
+      ...(headUp ? {
+        background: "#EAF3FA",
+        borderColor: "#3B7EA1",
+        color: "#2b5a7a"
+      } : {})
+    },
+    title: headUp ? "向いている方向が上。押すと北が上に戻ります" : "北が上。押すと向いている方向が上になります"
+  }, headUp ? "🧭 進行方向" : "🧭 北が上"), !drawing ? /*#__PURE__*/React.createElement("button", {
     onClick: startDraw,
     style: S.smallPrimary
   }, "✏ 圃場を囲む") : /*#__PURE__*/React.createElement("button", {
@@ -7940,11 +8067,14 @@ function LeafletMapTab(p) {
     } : fullMap ? S.mapWrapFull : S.mapWrap
   }, /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
-    style: fullMap ? {
-      ...S.mapBox,
-      borderRadius: 0,
-      border: "none"
-    } : S.mapBox,
+    style: {
+      ...(fullMap ? {
+        ...S.mapBox,
+        borderRadius: 0,
+        border: "none"
+      } : S.mapBox),
+      ...(rotStyle || {})
+    },
     "data-map-box": ""
   }), fullMap && drawing && /*#__PURE__*/React.createElement("button", {
     // 作図中は下の帯を作図パネルが使うので、抜けるボタンは右上に出す。
@@ -8615,9 +8745,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.64",
+    ver: "v8.65",
     date: "2026-08",
     isNew: true,
+    notes: ["🧭 地図タブに「🧭 北が上 ／ 🧭 進行方向」の切替を付けました。進行方向にすると、向いている向きが上になるよう地図ごと回ります(圃場名の札は文字が立ったままです)。iPhoneは初回に方位の利用許可を聞きます。方位を取れない端末では北が上のままになります", "🧭 進捗地図は北が上のままです(地図タブだけの機能です)"]
+  }, {
+    ver: "v8.64",
+    date: "2026-08",
     notes: ["📱 タブバーが画面に固定されず動く件を直しました。画面の高さぴったりの器を作り、中身だけをスクロールさせる形にしています。アドレスバーの出入りやキーボードでタブバーが上下に動かなくなります(特にタブレット)", "📱 地図タブの操作ボタンが幅の狭い端末で画面の右外へ出ていたのを、折り返すようにしました(375pxで「✏ 圃場を囲む」が 433px の位置にあったのを実測して修正)", "🗺 地図の拡大縮小が重い件に手を入れました。これまでは拡大縮小のたびに全部の圃場を描き直していました。札を出す・出さないの境目をまたいだときだけ描き直します(圃場が多いタブレットで効きます)", "🧪 調合電卓の薬剤の追加を「＋ 薬剤を追加」1つにまとめました。押すと登録済みの一覧が出て、その中に「✎ 手入力で追加」もあります"]
   }, {
     ver: "v8.63",
@@ -9223,7 +9357,7 @@ function ProgressLeafletCanvas(p) {
         // 札のHTMLに入れる(そのまま入れるとXSSになる)
         // 地図タブと同じ形。名前と面積を行で分ける。
         // 名前に数字が入る圃場だと、同じ行に並べた面積と続きの数字に見える。
-        poly.bindTooltip('<span class="fl-name">' + escapeHtml((c.mark ? c.mark + " " : "") + f.name) + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>', {
+        poly.bindTooltip('<span class="fl-box"><span class="fl-name">' + escapeHtml((c.mark ? c.mark + " " : "") + f.name) + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span></span>', {
           permanent: true,
           direction: "center",
           className: "field-label"
@@ -11000,6 +11134,9 @@ const S = {
     display: "flex",
     flexDirection: "column",
     width: "100%",
+    // 「進行方向が上」では中の地図を回す。回した分はここで切る
+    position: "relative",
+    overflow: "hidden",
     minHeight: 280 // 高さは実測して JS が入れる。ここは測る前の初期値
   },
   // 全画面。タブバー(850)より上に出し、地図だけを見せる
