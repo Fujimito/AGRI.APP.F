@@ -917,11 +917,17 @@ function App() {
   const autoPushFields = () => {
     if (!syncReady()) return;
     if (autoPushRef.current) clearTimeout(autoPushRef.current);
-    autoPushRef.current = setTimeout(() => {
+    autoPushRef.current = setTimeout(async () => {
       autoPushRef.current = null;
-      pushFieldsSync({
+      const ok = await pushFieldsSync({
         quiet: true
       });
+      // 送った直後に取り直す。登録した端末でも、他の端末が
+      // 入れた分がその場で揃う(次の拍子を待たない)。
+      if (ok) {
+        autoPullAtRef.current = 0;
+        autoPullShared();
+      }
     }, 1500);
   };
   // ── 受け取り側の自動取得 ──
@@ -973,8 +979,19 @@ function App() {
   useEffect(() => {
     if (!pullSec) return;
     if (tab !== "work" && tab !== "map") return;
+    // 入力の途中に割り込まない。投下量や薬剤を入れている間に
+    // 受信が走ると、一覧の並びや中身が目の前で入れ替わる。
+    // 見送っても次の拍子で取りに行くので、取りこぼしにはならない。
+    const busy = () => {
+      const el = document.activeElement;
+      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return true;
+      // ポップアップ(実績入力・圃場の編集など)を開いている間も待つ
+      return !!document.querySelector("[data-modal]");
+    };
     const tick = () => {
-      if (document.visibilityState === "visible") autoPullShared({
+      if (document.visibilityState !== "visible") return;
+      if (busy()) return;
+      autoPullShared({
         tick: true
       });
     };
@@ -4735,6 +4752,7 @@ function ChemPickModal(p) {
     onClick: p.onCancel
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -4784,6 +4802,7 @@ function ReportModal(p) {
     onClick: p.onCancel
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -5447,6 +5466,7 @@ function FieldEditModal(p) {
     onClick: p.onCancel
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -5690,6 +5710,7 @@ function FieldMasterPanel(p) {
     onClick: () => setRenumber(null)
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.listTitle
@@ -6503,6 +6524,11 @@ function GoogleMapTab(p) {
         streetViewControl: false,
         fullscreenControl: false,
         zoomControl: true,
+        // 既定だとスマホで指 1 本で動かそうとしたときに
+        // 「地図を移動させるには指 2 本で操作します」と出て地図が動かない。
+        // このアプリは地図が主役で、背後のページをスクロールさせたい場面がないので、
+        // 1 本指でそのまま動かせる greedy にする。
+        gestureHandling: "greedy",
         maxZoom: 21
       });
       mapRef.current = map;
@@ -8525,7 +8551,7 @@ function SettingsTab(p) {
     ver: "v8.62",
     date: "2026-08",
     isNew: true,
-    notes: ["🔢 圃場一覧の地区の見出しに「🔢 連番」を追加しました。その地区の圃場名を「嘉島1」「嘉島2」…のように連番で付け直せます。丸数字(①)も普通の数字として読むので、①と 52 が混ざっていても番号順に並べ直してから振ります。名前の頭と開始番号を変えられ、実行前に「前 → 後」の一覧が出ます。付け直すのは名前だけで、囲んだ形・面積・作物・作業の記録はそのままです(戻せないので確認画面を出しています)", "📋 連番を振ったあとは、一覧の並びもその番号順になります"]
+    notes: ["🔢 圃場一覧の地区の見出しに「🔢 連番」を追加しました。その地区の圃場名を「嘉島1」「嘉島2」…のように連番で付け直せます。丸数字(①)も普通の数字として読むので、①と 52 が混ざっていても番号順に並べ直してから振ります。名前の頭と開始番号を変えられ、実行前に「前 → 後」の一覧が出ます。付け直すのは名前だけで、囲んだ形・面積・作物・作業の記録はそのままです(戻せないので確認画面を出しています)", "📋 連番を振ったあとは、一覧の並びもその番号順になります", "🚦 進捗地図の「対象外」を黄色にしました。灰色だと衛星写真の上で地面と見分けにくいためです(実施済=緑 / 未実施=赤 / 対象外=黄)", "🗺 Googleマップで「地図を移動させるには指 2 本で操作します」が出ないようにしました。指 1 本でそのまま地図を動かせます(全画面でも同じ)", "🚦 進捗地図が、地図タブを一度開くまで白いままになることがある件に手を入れました。地図を作ったあとで入れ物の幅が決まると、0px のまま描かれません。大きさが変わるたびに測り直すようにしました(未再現のため、これで直るかは未確認)", "☁ 入力している間は自動取得を待たせるようにしました。投下量や薬剤を入れている途中に受信が割り込むと、一覧の並びや中身が目の前で入れ替わるためです。入力欄にカーソルがある間と、ポップアップを開いている間は見送り、次の拍子で取りに行きます", "☁ 圃場を登録・編集して送った直後に、その場で取り直すようにしました。次の拍子を待たずに揃います"]
   }, {
     ver: "v8.61",
     date: "2026-08",
@@ -8910,6 +8936,7 @@ function DrawBarFull(p) {
     onClick: () => setNameOpen(false)
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.listTitle
@@ -9000,8 +9027,10 @@ const PROGRESS_STATES = {
     label: "未実施"
   },
   none: {
-    fill: "#9AA69E",
-    stroke: "#68746C",
+    // 灰色だと衛星写真の上で地面と見分けにくい。
+    // 黄色なら緑(実施済)・赤(未実施)のどちらとも見違えない。
+    fill: "#E3B505",
+    stroke: "#8A6D00",
     mark: "",
     label: "対象外"
   }
@@ -9111,7 +9140,7 @@ function ProgressLeafletCanvas(p) {
         color: c.stroke,
         weight: key === "none" ? 1.5 : 3,
         fillColor: c.fill,
-        fillOpacity: key === "none" ? 0.15 : 0.55
+        fillOpacity: key === "none" ? 0.3 : 0.55
       }).addTo(grp);
       if (key !== "none") targetBounds.push(f.polygon);
       if (showLabel) {
@@ -9139,6 +9168,33 @@ function ProgressLeafletCanvas(p) {
       fit();
     }
   }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget, p.areaUnitKey]);
+  // 地図を作ったあとで入れ物の幅が決まることがある。
+  // そのとき地図は 0px のままで、タイルも形も出ない。
+  // 他のタブを往復すると直るのは、その拍子に大きさが測り直されるから。
+  // 大きさが変わるたびに自分で測り直す。
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let lastW = 0,
+      lastH = 0;
+    const ro = new ResizeObserver(() => {
+      const w = el.clientWidth,
+        h = el.clientHeight;
+      if (!mapRef.current || (w === lastW && h === lastH)) return;
+      lastW = w;
+      lastH = h;
+      if (w < 20 || h < 20) return;
+      mapRef.current.invalidateSize();
+      // 幅が0の間は寄せられないので、大きさが決まった時点でもう一度寄せる
+      if (!fittedRef.current) {
+        fit();
+        fittedRef.current = (fitRef.current || []).length > 0;
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ready]);
+
 
   return /*#__PURE__*/React.createElement("div", {
     ref: containerRef,
@@ -9197,6 +9253,11 @@ function ProgressGoogleCanvas(p) {
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: false,
+        // 既定だとスマホで指 1 本で動かそうとしたときに
+        // 「地図を移動させるには指 2 本で操作します」と出て地図が動かない。
+        // このアプリは地図が主役で、背後のページをスクロールさせたい場面がないので、
+        // 1 本指でそのまま動かせる greedy にする。
+        gestureHandling: "greedy",
         // 進捗を見るだけの地図なので、作図で要る細かい操作は載せない
         clickableIcons: false
       });
@@ -9247,7 +9308,7 @@ function ProgressGoogleCanvas(p) {
         strokeColor: c.stroke,
         strokeWeight: key === "none" ? 1.5 : 3,
         fillColor: c.fill,
-        fillOpacity: key === "none" ? 0.15 : 0.55,
+        fillOpacity: key === "none" ? 0.3 : 0.55,
         map: mapRef.current,
         clickable: true
       });
@@ -9309,6 +9370,33 @@ function ProgressGoogleCanvas(p) {
       fit();
     }
   }, [ready, p.fields, p.statusByField, zoom, p.onlyTarget, p.areaUnitKey]);
+  // 地図を作ったあとで入れ物の幅が決まることがある。
+  // そのとき地図は 0px のままで、タイルも形も出ない。
+  // 他のタブを往復すると直るのは、その拍子に大きさが測り直されるから。
+  // 大きさが変わるたびに自分で測り直す。
+  React.useEffect(() => {
+    const el = containerRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let lastW = 0,
+      lastH = 0;
+    const ro = new ResizeObserver(() => {
+      const w = el.clientWidth,
+        h = el.clientHeight;
+      if (!mapRef.current || (w === lastW && h === lastH)) return;
+      lastW = w;
+      lastH = h;
+      if (w < 20 || h < 20) return;
+      window.google.maps.event.trigger(mapRef.current, "resize");
+      // 幅が0の間は寄せられないので、大きさが決まった時点でもう一度寄せる
+      if (!fittedRef.current) {
+        fit();
+        fittedRef.current = (fitRef.current || []).length > 0;
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [ready]);
+
 
   if (loadErr) {
     return /*#__PURE__*/React.createElement("div", {
@@ -9600,6 +9688,7 @@ function ProgressMapTab(p) {
     onClick: () => setSel(null)
   }, /*#__PURE__*/React.createElement("div", {
     style: S.modalBox,
+    "data-modal": "",
     onClick: e => e.stopPropagation()
   }, /*#__PURE__*/React.createElement("div", {
     style: S.listTitle
