@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.57";
+const APP_VERSION = "v8.58";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -890,7 +890,7 @@ function App() {
     }, 1500);
   };
   const autoPullAtRef = useRef(0);
-  const autoPullFields = () => {
+  const autoPullShared = () => {
     if (!syncReady()) return;
     const now = Date.now();
     if (now - autoPullAtRef.current < 60000) return;
@@ -900,11 +900,38 @@ function App() {
     });
   };
   useEffect(() => {
-    autoPullFields();
+    autoPullShared();
   }, []);
   useEffect(() => {
-    if (tab === "map") autoPullFields();
+    // 作業タブでも取りに行く。他の端末が組んだその日の予定は、
+    // 開いたときに入っていないと意味がない
+    if (tab === "map" || tab === "work") autoPullShared();
   }, [tab]);
+  // 作業日を切り替えたときも取り直す(明日の予定を見に行く場合)
+  useEffect(() => {
+    autoPullShared();
+  }, [workDate]);
+  // 作業が変わったら自動で送る。v8.57までは「散布済」の入れ外しと
+  // 実績の保存のときだけ送っていたため、作業リストへ圃場を入れても
+  // 他の端末には何も出なかった。入れても・薬剤を当てても・外しても送る。
+  const autoPushWorkRef = useRef(null);
+  const autoPushWorks = () => {
+    if (!syncReady()) return;
+    if (autoPushWorkRef.current) clearTimeout(autoPushWorkRef.current);
+    autoPushWorkRef.current = setTimeout(() => {
+      autoPushWorkRef.current = null;
+      pushProgress({
+        quiet: true
+      });
+    }, 1500);
+  };
+  // 作業を触った経路は多い(追加・削除・並べ替え・薬剤の適用・実績)。
+  // 呼び出しを全部に入れて回ると必ず入れ忘れるので、保存された
+  // 結果を見て一ヶ所で送る。送るものが無ければ pushProgress は
+  // 通信せずに戻るので、この形でもGASの実行回数は増えない。
+  useEffect(() => {
+    autoPushWorks();
+  }, [works]);
   const setWorksSave = next => setWorksRaw(stampUpdated(next, works));
   // 描画時に閉じ込めた works は、再描画を待たずに続けて操作されると古くなる。
   // 古い配列を元に保存すると直前の変更が巻き戻る。チェックを続けて2つ入れると
@@ -1860,7 +1887,21 @@ function App() {
     pushedAt: it.updatedAt || ""
   });
   const workStatus = w => w.reported ? "done" : (w.chems || []).length > 0 ? "mixed" : "planned";
-  const workToItem = w => {
+  // その日の中で何番目か。受け取った側はこれで並べ直す。
+  // 並び順だけを変えたときは中身が変わらないため送信対象にならず、
+  // 相手の並びは前回送った時点のままになる(未解決。中身を直せば揃う)。
+  const seqMap = list => {
+    const m = new Map();
+    const n = {};
+    list.forEach(w => {
+      const d = w.workDate || "";
+      n[d] = (n[d] || 0);
+      m.set(w.id, n[d]);
+      n[d]++;
+    });
+    return m;
+  };
+  const workToItem = (w, seq) => {
     const f = resolveWork(w);
     return {
       id: w.id,
@@ -1876,9 +1917,54 @@ function App() {
       by: recorder,
       deviceId,
       reportedAt: w.reported ? w.reportDate || "" : "",
-      updatedAt: w.updatedAt || ""
+      updatedAt: w.updatedAt || "",
+      // ここからは v8.58。受け取った端末が予定を組み直せるだけの中身。
+      // 要約(薬剤数・薬剤内容の文字列)だけだと、希釈倍率も量も戻せない。
+      crop: f.crop || "",
+      areaA: f.areaA === "" || f.areaA === undefined ? "" : Number(f.areaA) || "",
+      chems: w.chems || [],
+      totalL: parseFloat(w.totalL) || 0,
+      waterMl: parseFloat(w.waterMl) || 0,
+      memo: w.memo || "",
+      seq: seq === undefined ? "" : seq
     };
   };
+  // 受け取った1件 → この端末の作業
+  const itemToWork = it => ({
+    id: it.id,
+    workDate: it.workDate || "",
+    fieldId: it.fieldId,
+    snapshot: {
+      name: it.fieldName || "",
+      crop: it.crop || "",
+      areaA: it.areaA === "" || it.areaA === undefined ? "" : it.areaA
+    },
+    plannedL: it.plannedL || 0,
+    chems: Array.isArray(it.chems) ? it.chems : [],
+    totalL: it.totalL || 0,
+    waterMl: it.waterMl || 0,
+    memo: it.memo || "",
+    reported: it.status === "done",
+    sprayedL: it.sprayedL || 0,
+    reportAreaA: it.reportAreaA || "",
+    reportMemo: "",
+    reportDate: it.reportedAt || "",
+    seq: it.seq === "" || it.seq === undefined ? "" : Number(it.seq),
+    // 台帳(「防除記録」シート)へ送るのは、その作業をした端末の役目とする。
+    // 受け取っただけの端末でも未送信扱いにすると、全員の画面に
+    // 「未送信 38件」が出て、誰が送るべきか分からなくなる。
+    // この端末で「散布済」を押し直せば reportSynced は false に戻り、
+    // その時点でこの端末からも台帳へ送られる。
+    synced: true,
+    reportSynced: true,
+    // 他の端末から受け取った印と、その記録者名。
+    // これがないと、自分で送ったものと見分けがつかず
+    // 「✓送信済」と出て、送った覚えのない行に見える。
+    fromTeam: true,
+    by: it.by || "",
+    updatedAt: it.updatedAt || "",
+    pushedAt: it.updatedAt || ""
+  });
 
   // 件数で分割して送る。1回で送りきれる件数はGAS側の上限で決まる
   const pushItems = async (type, items) => {
@@ -1919,7 +2005,8 @@ function App() {
       if (!quiet) flash("送っていない進捗はありません");
       return true;
     }
-    const items = pend.map(workToItem).concat(tombs.map(t => ({
+    const seqs = seqMap(cur);
+    const items = pend.map(w => workToItem(w, seqs.get(w.id))).concat(tombs.map(t => ({
       id: t.id,
       fieldId: 0,
       workDate: "",
@@ -2095,6 +2182,55 @@ function App() {
       updated++;
     });
     if (added || updated || removed) setFieldsRaw(Array.from(byId.values()));
+    // 作業(その日の予定)。v8.57までは送るだけで、受け取っていなかった。
+    // サーバーに進捗マップ用の要約しか置いていなかったためで、
+    // v8.58 で薬剤の中身・作物・面積・並び順を足して配れるようにした。
+    // 古いGASはこれらの列を持たないので、空の予定が入ってくる。
+    // workPlan の印がないGASからは取り込まない。
+    if (j.plan === true && Array.isArray(j.works) && j.works.length) {
+      const curW = load("tankmix:works", []);
+      const byW = new Map(curW.map(w => [String(w.id), w]));
+      let wChanged = 0;
+      j.works.forEach(inc => {
+        const key = String(inc.id);
+        const old = byW.get(key);
+        if (inc.deleted) {
+          if (old) {
+            byW.delete(key);
+            wChanged++;
+          }
+          return;
+        }
+        if (!inc.workDate) return; // 壊れた行は入れない
+        if (old && String(old.updatedAt || "") > String(inc.updatedAt || "")) return;
+        byW.set(key, old ? {
+          ...old,
+          ...itemToWork(inc),
+          // 台帳への送信状態はこの端末の事情。受信で上書きしない
+          synced: old.synced,
+          reportSynced: old.reportSynced,
+          unreportPending: old.unreportPending
+        } : itemToWork(inc));
+        wChanged++;
+      });
+      if (wChanged) {
+        // 新しく入った作業が末尾に積まれると順番がめちゃくちゃになる。
+        // 日ごとにまとめ、送ってきた並び順で並べ直す。
+        const nextW = Array.from(byW.values());
+        const order = new Map();
+        nextW.forEach((w, i) => order.set(w.id, i));
+        nextW.sort((a, b) => {
+          const da = String(a.workDate || ""),
+            db = String(b.workDate || "");
+          if (da !== db) return da < db ? -1 : 1;
+          const sa = a.seq === "" || a.seq === undefined ? order.get(a.id) : a.seq;
+          const sb = b.seq === "" || b.seq === undefined ? order.get(b.id) : b.seq;
+          if (sa !== sb) return sa - sb;
+          return order.get(a.id) - order.get(b.id);
+        });
+        setWorksRaw(nextW);
+      }
+    }
     // 薬剤も同じ応答で配られる。古いGASは chems を返さないので、
     // 無いときは何もしない(ここで空配列として扱うと全件消えることになる)
     if (Array.isArray(j.chems) && j.chems.length) {
@@ -4032,7 +4168,14 @@ function WorkTab(p) {
       }
     }, /*#__PURE__*/React.createElement("span", {
       style: w.reported ? w.synced && w.reportSynced ? S.badgeOk : S.badgePending : w.chems.length > 0 ? S.badgeOk : S.badgePlan
-    }, w.reported ? w.synced && w.reportSynced ? "✓送信済" : "実績入力済(未送信)" : w.chems.length > 0 ? "調合済" : "計画"), /*#__PURE__*/React.createElement("div", {
+    }, w.reported ? w.synced && w.reportSynced ? w.fromTeam ? "✓実施済(他端末)" : "✓送信済" : "実績入力済(未送信)" : w.chems.length > 0 ? "調合済" : "計画"), w.fromTeam && w.by && /*#__PURE__*/React.createElement("span", {
+      style: {
+        ...S.smallLabel,
+        fontSize: 11,
+        color: "#2A5F80"
+      },
+      title: "この作業は他の端末から受け取りました"
+    }, "👥 ", w.by), /*#__PURE__*/React.createElement("div", {
       style: {
         display: "flex",
         gap: 6,
@@ -6286,7 +6429,7 @@ function GoogleMapTab(p) {
           },
           // 透明アイコン(ラベルだけ表示)
           label: {
-            text: f.name + (f.crop ? "/" + f.crop : "") + " " + fieldAreaText(f, p.areaUnitKey),
+            text: f.name + (f.crop ? " / " + f.crop : ""),
             color: "#fff",
             fontSize: "12px",
             fontWeight: "700",
@@ -6294,6 +6437,27 @@ function GoogleMapTab(p) {
           }
         });
         fieldOverlaysRef.current.push(label);
+        // 面積は別の札にして名前の下へ。Googleの札はHTMLを入れられず、
+        // 改行も効かないので、CSS(gm-field-area)で下へずらして二行に見せる。
+        const areaLabel = new g.Marker({
+          position: {
+            lat: c[0],
+            lng: c[1]
+          },
+          map: mapRef.current,
+          icon: {
+            path: 0,
+            scale: 0
+          },
+          label: {
+            text: fieldAreaText(f, p.areaUnitKey),
+            color: "#BFE3CD",
+            fontSize: "11px",
+            fontWeight: "600",
+            className: "gm-field-area"
+          }
+        });
+        fieldOverlaysRef.current.push(areaLabel);
       }
     });
   }, [ready, p.fields, zoom, hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
@@ -7143,7 +7307,10 @@ function LeafletMapTab(p) {
         fillOpacity: st.opacity
       }).addTo(grp);
       if (showLabel) {
-        const labelText = escapeHtml(f.name) + (f.crop ? " / " + escapeHtml(f.crop) : "") + " / " + escapeHtml(fieldAreaText(f, p.areaUnitKey));
+        // 圃場名と面積を別の行にする。同じ行に並べると、
+        // 名前に数字が入る圃場(「嘉島60」など)で面積と続きの数字に見える。
+        // 名前は受け取った文字列でもあるので、必ずエスケープしてからHTMLに入れる。
+        const labelText = '<span class="fl-name">' + escapeHtml(f.name) + (f.crop ? '<span class="fl-crop"> / ' + escapeHtml(f.crop) + '</span>' : "") + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>';
         poly.bindTooltip(labelText, {
           permanent: true,
           direction: "center",
@@ -8135,9 +8302,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.57",
+    ver: "v8.58",
     date: "2026-08",
     isNew: true,
+    notes: ["🚁 その日の作業予定が他の端末でも見られるようになりました。作業リストに圃場を入れた・薬剤を当てた・外した時点で自動的に送られ、受け取る側は作業タブを開いたとき・作業日を切り替えたときに取りに行きます(60秒に1回まで)。v8.57までは送るだけで、サーバーにも進捗地図用の要約しか置いていなかったため、受け取っても予定を組み直せませんでした。※スプレッドシート側の Code.gs を差し替えて再デプロイしてください(「作業」シートに列が7つ増えます)", "👥 他の端末から受け取った作業には記録者名が付き、実施済のものは「✓実施済(他端末)」と出ます。「防除記録」への台帳の送信は、その作業をした端末の役目にしてあります(受け取っただけの端末でも未送信扱いにすると、全員の画面に同じ件数が出て誰が送るべきか分からなくなるため)。こちらで「散布済」を押し直せば、この端末からも台帳に残ります", "🧮 タブの名前を中身が分かる名前にしました。🧮薬剤登録/希釈計算、🚁作業予定/進捗確認、🗺圃場登録/圃場一覧、⚙設定", "📶 見出しの下に「● オンライン / ○ オフライン」と「👥 チーム名」を出しました。チームの表示を押すと設定タブへ飛びます。未設定なら「👥 チーム未設定」と出ます(オンラインの表示は「網に繋がっているか」であって、送信先に届くかまでは分かりません。そちらは設定タブの接続テストで確かめてください)", "⚠ 並び順だけを入れ替えたときは、中身が変わらないため送信の対象になりません。相手側の並びは前回送った時点のままになります(未解決)"]
+  }, {
+    ver: "v8.57",
+    date: "2026-08",
     notes: ["📋 データベースタブをなくし、タブを5つから4つにしました。圃場の登録・編集は地図タブの「📋 圃場一覧」へ、薬剤とプリセットは調合タブの「🧪 薬剤・プリセット」へ移しています。地図で見ている圃場を直すのに別のタブへ移る必要がありません", "🗺 地図タブの一覧に、地図で囲んでいない圃場も出るようになりました(「・位置未登録」と表示)。囲んだ圃場だけを一覧にしていた頃は、位置のない圃場を直す場所が地図側にありませんでした。行の 📍 で地図のその圃場へ、👁 で地図の表示を切り替えられます", "☁ 薬剤も圃場と同じやり方で共有されるようになりました。登録・編集・削除した時点で自動的に送られ、変わったものだけをやりとりします。これまでは「☁↑ 端末→共有へ保存」で丸ごと上書きするしかなく、他の端末が登録した薬剤が消えるおそれがありました。※スプレッドシート側の Code.gs を新しいものに差し替えて再デプロイしてください(「薬剤マスタ」シートが自動で作られます)", "⚙ 設定タブの「送信・共有」を4つの段に分けました。①つなぎ先 ②データ共有(圃場・薬剤) ③作業データの送信 ④古い方式。ボタンが6つ並んでどれを押せばよいか分からなかったのを改めています。丸ごと上書きする古いボタンは④の中に畳んであります", "⚙ 接続テストが古い版と判定する目安を pushChems に更新しました。進捗地図は動くのに薬剤だけ共有されない状態を見分けられます"]
   }, {
     ver: "v8.56",

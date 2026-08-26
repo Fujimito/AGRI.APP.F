@@ -283,6 +283,16 @@ const WORK_HEADERS = [
   "編集日時",   // 14
   "更新日時",   // 15
   "削除",       // 16
+  // ここからは v8.58 で追加。作業を「その日の予定」として
+  // 他の端末へ配るには、進捗マップ用の要約だけでは足りない。
+  // 列は末尾に足す。途中に入れると、既存の行の値が列ごとずれる。
+  "作物",     // 17
+  "面積a",    // 18
+  "薬剤JSON", // 19 希釈倍率まで含む中身(表示用は「薬剤内容」列)
+  "総量L",    // 20
+  "水量mL",   // 21
+  "備考",     // 22
+  "並び順", // 23 その日の中での位置
 ];
 const WORK_ID_COL = 0, WORK_EDIT_COL = 14, WORK_AT_COL = 15;
 
@@ -414,6 +424,15 @@ function workRow_(w, team, at) {
     safeCell_(String(w.updatedAt || "")),
     at,
     w.deleted ? 1 : "",
+    safeCell_(w.crop || ""),
+    Number(w.areaA) || "",
+    // ポリゴンと同じやり方でJSONのまま置く。列に分けると
+    // 薬剤の数だけ列が必要になり、上限が決められない。
+    safeCell_(JSON.stringify(Array.isArray(w.chems) ? w.chems : [])),
+    Number(w.totalL) || "",
+    Number(w.waterMl) || "",
+    safeCell_(w.memo || ""),
+    (w.seq === 0 || Number(w.seq)) ? Number(w.seq) : "",
   ];
 }
 
@@ -434,7 +453,26 @@ function workObj_(r) {
     updatedAt: String(r[WORK_EDIT_COL] || ""),
     serverAt: String(r[WORK_AT_COL] || ""),
     deleted: !!r[16],
+    crop: String(r[17] || ""),
+    areaA: r[18] === "" ? "" : Number(r[18]),
+    // 壊れていたら空の配列にする。ここで例外を投げると
+    // 1行のせいで pull 全体が落ち、他の行も配られなくなる。
+    chems: parseJsonArray_(r[19]),
+    totalL: r[20] === "" ? 0 : Number(r[20]),
+    waterMl: r[21] === "" ? 0 : Number(r[21]),
+    memo: String(r[22] || ""),
+    seq: r[23] === "" ? "" : Number(r[23]),
   };
+}
+
+function parseJsonArray_(v) {
+  if (!v) return [];
+  try {
+    const a = JSON.parse(String(v));
+    return Array.isArray(a) ? a : [];
+  } catch (e) {
+    return [];
+  }
 }
 
 // ── 薬剤1件 → 行 ──
@@ -738,6 +776,10 @@ function doRead_(type, data) {
       fields: pullRows_(getFieldSheet_(), FIELD_HEADERS, FIELD_AT_COL, data.team, since, fieldObj_),
       works:  pullRows_(getWorkSheet_(),  WORK_HEADERS,  WORK_AT_COL,  data.team, since, workObj_),
       chems:  pullRows_(getChemSheet_(),  CHEM_HEADERS,  CHEM_AT_COL,  data.team, since, chemObj_),
+      // 作業に「その日の予定」を組み直せる中身(薬剤JSON・作物・面積・並び順)が
+      // 入っている印。古いGASはこれを返さないので、アプリは作業を取り込まない。
+      // 無いまま取り込むと、手元の薬剤の中身が空で上書きされる。
+      plan: true,
       serverTime: serverTime,
     });
   }
@@ -937,7 +979,7 @@ function doGet() {
     // アプリ側が「このGASは進捗マップに対応しているか」を判定するための印。
     // 古いGASのまま進捗マップを開くと unknown type が返るだけで理由が分からない。
     features: ["record", "report", "unreport", "chemdbLoad", "cloudSave", "cloudLoad",
-               "pushFields", "pushWorks", "pushChems", "pull", "progress"],
+               "pushFields", "pushWorks", "pushChems", "pull", "progress", "workPlan"],
   });
 }
 

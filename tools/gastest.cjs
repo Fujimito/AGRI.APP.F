@@ -279,7 +279,37 @@ const F2 = {
   eq("別チームには配らない", other.chems.length, 0);
 }
 
-// ── 14. doGet ──
+// ── 14. 作業の中身(その日の予定)を配れるか ──
+{
+  const ctx = makeContext({});
+  const W = {
+    id: 5001, workDate: "2026-08-26", fieldId: 1001, fieldName: "北の田",
+    status: "mixed", plannedL: 12, sprayedL: 0, reportAreaA: "",
+    chemCount: 2, chemText: "A(20倍) / B(1000倍)",
+    crop: "キャベツ", areaA: 12.5,
+    chems: [{ id: "c1", name: "A", ratio: 20, form: "sc" }, { id: "c2", name: "B", ratio: 1000, form: "wp" }],
+    totalL: 12, waterMl: 11400, memo: "風に注意", seq: 2,
+    by: "藤本", deviceId: "dev-1", updatedAt: "2026-08-26T01:00:00.000Z",
+  };
+  const r = post(ctx, { type: "pushWorks", team: TEAM, items: [W] });
+  eq("pushWorks 追加件数", [r.ok, r.added], [true, 1]);
+
+  const all = post(ctx, { type: "pull", team: TEAM, since: "" });
+  ok("pull に plan の印が付く", all.plan === true);
+  const w = all.works[0];
+  eq("薬剤の中身が戻る", w.chems, W.chems);
+  eq("作物・面積・並び順", [w.crop, w.areaA, w.seq], ["キャベツ", 12.5, 2]);
+  eq("総量・水量・備考", [w.totalL, w.waterMl, w.memo], [12, 11400, "風に注意"]);
+  eq("要約列はこれまでどおり", [w.status, w.plannedL, w.chemCount], ["mixed", 12, 2]);
+
+  // 薬剤JSONが壊れていても、その行だけ空になって pull 全体は通る
+  const sh = ctx.SHEET_STATE.getSheetByName("作業");
+  sh.getRange(2, 20).setValue("{壊れ");
+  const again = post(ctx, { type: "pull", team: TEAM, since: "" });
+  eq("壊れた薬剤JSONは空配列にする", [again.ok, again.works[0].chems], [true, []]);
+}
+
+// ── 15. doGet ──
 {
   const ctx = makeContext({ SHARED_SECRET: "x" });
   const g = JSON.parse(ctx.doGet().getContent());
@@ -287,6 +317,7 @@ const F2 = {
   ok("features に progress が入る", g.features.indexOf("progress") >= 0);
   ok("features に pushFields が入る", g.features.indexOf("pushFields") >= 0);
   ok("features に pushChems が入る", g.features.indexOf("pushChems") >= 0);
+  ok("features に workPlan が入る", g.features.indexOf("workPlan") >= 0);
   ok("features に unreport が入る", g.features.indexOf("unreport") >= 0);
 }
 
