@@ -246,13 +246,78 @@ const F2 = {
   eq("取消 元の行が無ければ成功扱い", [r2.ok, r2.missing], [true, true]);
 }
 
-// ── 13. doGet ──
+// ── 13. 薬剤マスタ(レコード単位の共有) ──
+{
+  const ctx = makeContext({});
+  const C1 = { id: "パレード20フロアブル", name: "パレード20フロアブル",
+               use: "fungicide", form: "sc", maxUse: 3,
+               updatedAt: "2026-08-01T00:00:00.000Z", by: "藤本", deviceId: "dev-1" };
+  const r = post(ctx, { type: "pushChems", team: TEAM, items: [C1] });
+  eq("pushChems 追加件数", [r.ok, r.added, r.updated], [true, 1, 0]);
+
+  const sh = ctx.SHEET_STATE.getSheetByName("薬剤マスタ");
+  ok("薬剤マスタが作られる", !!sh);
+  eq("薬剤名の列", sh.getRange(2, 3).getValue(), "パレード20フロアブル");
+
+  const all = post(ctx, { type: "pull", team: TEAM, since: "" });
+  eq("pull に薬剤が乗る", [all.chems.length, all.chems[0].use, all.chems[0].form, all.chems[0].maxUse],
+     [1, "fungicide", "sc", 3]);
+
+  // 古い編集は踏み潰さない(圃場・作業と同じ規則)
+  const older = Object.assign({}, C1, { form: "wp", updatedAt: "2026-07-01T00:00:00.000Z" });
+  const r2 = post(ctx, { type: "pushChems", team: TEAM, items: [older] });
+  eq("古い編集は見送る", [r2.updated, r2.skipped], [0, 1]);
+
+  // 削除は行を消さず「削除」の印を立てて配る
+  const tomb = { id: C1.id, name: "", deleted: true,
+                 updatedAt: "2026-09-01T00:00:00.000Z", by: "藤本", deviceId: "dev-2" };
+  post(ctx, { type: "pushChems", team: TEAM, items: [tomb] });
+  const after = post(ctx, { type: "pull", team: TEAM, since: "" });
+  eq("削除が配られる", [after.chems.length, after.chems[0].deleted], [1, true]);
+
+  const other = post(ctx, { type: "pull", team: "team-b", since: "" });
+  eq("別チームには配らない", other.chems.length, 0);
+}
+
+// ── 14. 作業の中身(その日の予定)を配れるか ──
+{
+  const ctx = makeContext({});
+  const W = {
+    id: 5001, workDate: "2026-08-26", fieldId: 1001, fieldName: "北の田",
+    status: "mixed", plannedL: 12, sprayedL: 0, reportAreaA: "",
+    chemCount: 2, chemText: "A(20倍) / B(1000倍)",
+    crop: "キャベツ", areaA: 12.5,
+    chems: [{ id: "c1", name: "A", ratio: 20, form: "sc" }, { id: "c2", name: "B", ratio: 1000, form: "wp" }],
+    totalL: 12, waterMl: 11400, memo: "風に注意", seq: 2,
+    by: "藤本", deviceId: "dev-1", updatedAt: "2026-08-26T01:00:00.000Z",
+  };
+  const r = post(ctx, { type: "pushWorks", team: TEAM, items: [W] });
+  eq("pushWorks 追加件数", [r.ok, r.added], [true, 1]);
+
+  const all = post(ctx, { type: "pull", team: TEAM, since: "" });
+  ok("pull に plan の印が付く", all.plan === true);
+  const w = all.works[0];
+  eq("薬剤の中身が戻る", w.chems, W.chems);
+  eq("作物・面積・並び順", [w.crop, w.areaA, w.seq], ["キャベツ", 12.5, 2]);
+  eq("総量・水量・備考", [w.totalL, w.waterMl, w.memo], [12, 11400, "風に注意"]);
+  eq("要約列はこれまでどおり", [w.status, w.plannedL, w.chemCount], ["mixed", 12, 2]);
+
+  // 薬剤JSONが壊れていても、その行だけ空になって pull 全体は通る
+  const sh = ctx.SHEET_STATE.getSheetByName("作業");
+  sh.getRange(2, 20).setValue("{壊れ");
+  const again = post(ctx, { type: "pull", team: TEAM, since: "" });
+  eq("壊れた薬剤JSONは空配列にする", [again.ok, again.works[0].chems], [true, []]);
+}
+
+// ── 15. doGet ──
 {
   const ctx = makeContext({ SHARED_SECRET: "x" });
   const g = JSON.parse(ctx.doGet().getContent());
   eq("doGet secured", [g.ok, g.secured], [true, true]);
   ok("features に progress が入る", g.features.indexOf("progress") >= 0);
   ok("features に pushFields が入る", g.features.indexOf("pushFields") >= 0);
+  ok("features に pushChems が入る", g.features.indexOf("pushChems") >= 0);
+  ok("features に workPlan が入る", g.features.indexOf("workPlan") >= 0);
   ok("features に unreport が入る", g.features.indexOf("unreport") >= 0);
 }
 
