@@ -3111,7 +3111,7 @@ function WorkTab(p) {
       ...S.seg,
       ...(workView === v[0] ? S.segOn : {})
     }
-  }, v[1]))), /*#__PURE__*/React.createElement("div", {
+  }, v[1]))), workView === "list" ? /*#__PURE__*/React.createElement("div", {
     style: S.totalsBar,
     className: "num"
   },/*#__PURE__*/React.createElement("div", {
@@ -3138,10 +3138,35 @@ function WorkTab(p) {
     style: S.totalsLabel
   }, "合計薬液量", reportedCount > 0 && /*#__PURE__*/React.createElement("span", {
     style: S.totalsNote
-  }, "実績 ", reportedCount, "/", dayList.length, "圃場")))), needsRateWarning &&/*#__PURE__*/React.createElement("div", {
+  }, "実績 ", reportedCount, "件ぶんを含む")))) : /*#__PURE__*/React.createElement("div", {
+    // 進捗地図のときは集計を大きなタイル3枚ではなじ1行に畳む。
+    // タイルのままだとこのカードだけで340pxを使い、地図が画面の
+    // 下半分からしか始まらない。数字の中身は一覧のときと同じ。
+    style: {
+      display: "flex",
+      gap: 12,
+      flexWrap: "wrap",
+      alignItems: "baseline",
+      marginTop: 10,
+      fontSize: 15,
+      fontWeight: 800,
+      color: "#1C2B21"
+    },
+    className: "num"
+  }, /*#__PURE__*/React.createElement("span", null, dayList.length, /*#__PURE__*/React.createElement("small", {
+    style: S.totalsUnit
+  }, " 圃場")), /*#__PURE__*/React.createElement("span", null, dispArea(sumArea, p.areaUnitKey), /*#__PURE__*/React.createElement("small", {
+    style: S.totalsUnit
+  }, " ", areaSuffix(p.areaUnitKey))), /*#__PURE__*/React.createElement("span", null, dispVol(sumLiters, p.volUnitKey), /*#__PURE__*/React.createElement("small", {
+    style: S.totalsUnit
+  }, " ", volSuffix(p.volUnitKey)))),
+  // 作業一覧向けの部品は、進捗地図のときは出さない。地図を見たいときに
+  // 地図が画面の下半分へ押し出されていた。投下量の警告も、直す先の
+  // 「今日の準備」が一覧側にしかないので揃える。
+  workView === "list" && needsRateWarning &&/*#__PURE__*/React.createElement("div", {
     style: S.rateWarnBand,
     className: "no-print"
-  }, /*#__PURE__*/React.createElement("span", null, "⚠"), /*#__PURE__*/React.createElement("span", null, "本日の投下量(L/10a)が未入力の圃場があります。下の欄に入力して「面積から一括計算」を押してください。")), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "⚠"), /*#__PURE__*/React.createElement("span", null, "本日の投下量(L/10a)が未入力の圃場があります。下の欄に入力して「面積から一括計算」を押してください。")), workView === "list" && dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.naviPanel,
     className: "no-print"
   }, naviNext ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
@@ -3177,7 +3202,7 @@ function WorkTab(p) {
   }, "↩ 飛ばした圃場を戻す"))), /*#__PURE__*/React.createElement(WorkProgress, {
     total: dayList.length,
     done: dayList.length - pendingDayList.length
-  }), p.dayChems.length > 0 && /*#__PURE__*/React.createElement("button", {
+  }), workView === "list" && p.dayChems.length > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => setPrepOpen(true),
     style: S.dayChemStrip,
     className: "no-print"
@@ -7917,7 +7942,7 @@ function SettingsTab(p) {
     ver: "v8.56",
     date: "2026-08",
     isNew: true,
-    notes: ["🚁 画面下に固定されていた「▶ 次の圃場／🚁 実績入力」の帯を外しました。同じことが上の「順送りナビ」と各行の「🚁 実績入力」でできるのに、常に画面の下を塞いで地図と一覧を狭めていました", "🚦 進捗地図の色を3つに絞りました。緑=実施済、赤=未実施、灰=その日の作業に入っていない圃場(対象外)。調合済(黄)と未送信(橙)は色をやめ、調合済は赤(未実施)に、未送信は緑(実施済)にまとめています。未送信の件数は地図の上に文字で出ます", "🐞 その日の作業に入れた圃場が対象外(灰)のままになることがある不具合を修正しました。圃場IDを数値と文字列のまま突き合わせていたため、過去の版で作られたデータが混ざると一致せず、作業に入っているのに灰色で描かれていました", "🐞 進捗地図が県全体まで引いて表示され、今日の圃場が点にしか見えないことがある問題を直しました。登録済みの全圃場が入るように寄せていたので、遠くに1枚でも圃場があると引いてしまっていました。今日の作業に入っている圃場だけが入るように寄せます。地図の高さが決まる前に寄せて倍率がでたらめになる状態も直しています", "🚦 「⊙ 今日の圃場へ」を追加しました。地図を動かして見失っても、その日の圃場が入る位置へ戻せます", "🚦 その日の作業に入っているのに地図で囲まれていない圃場があると「地図に出せない圃場 n件(位置未登録)」と出ます。地図に出ない理由が分からないままになるのを防ぐためです。地図タブで囲むと出るようになります"]
+    notes: ["🚁 画面下に固定されていた「▶ 次の圃場／🚁 実績入力」の帯を外しました。同じことが上の「順送りナビ」と各行の「🚁 実績入力」でできるのに、常に画面の下を塞いで地図と一覧を狭めていました", "🚦 進捗地図の色を3つに絞りました。緑=実施済、赤=未実施、灰=その日の作業に入っていない圃場(対象外)。調合済(黄)と未送信(橙)は色をやめ、調合済は赤(未実施)に、未送信は緑(実施済)にまとめています。未送信の件数は地図の上に文字で出ます", "🐞 その日の作業に入れた圃場が対象外(灰)のままになることがある不具合を修正しました。圃場IDを数値と文字列のまま突き合わせていたため、過去の版で作られたデータが混ざると一致せず、作業に入っているのに灰色で描かれていました", "🐞 進捗地図が県全体まで引いて表示され、今日の圃場が点にしか見えないことがある問題を直しました。登録済みの全圃場が入るように寄せていたので、遠くに1枚でも圃場があると引いてしまっていました。今日の作業に入っている圃場だけが入るように寄せます。地図の高さが決まる前に寄せて倍率がでたらめになる状態も直しています", "🚦 「⊙ 今日の圃場へ」を追加しました。地図を動かして見失っても、その日の圃場が入る位置へ戻せます", "🚦 その日の作業に入っているのに地図で囲まれていない圃場があると「地図に出せない圃場 n件(位置未登録)」と出ます。地図に出ない理由が分からないままになるのを防ぐためです。地図タブで囲むと出るようになります", "🗺 進捗地図をGoogleマップでも出せるようにしました。設定タブの地図エンジンの選択が、地図タブだけでなく進捗地図にも効きます(※Googleマップは地図を作るたびに課金対象になり、進捗地図は地図タブとは別の地図なので、開くとそのぶん回数が増えます)", "🚦 作業タブの見た目を整理しました。同じ「実績 n/m」が3か所に出ていたのを進捗バー1か所にまとめ、進捗地図のときは一覧向けの部品(順送りナビ・本日の薬剤・投下量の警告)を出さないようにしました。集計も大きなタイル3枚から1行に畳みます。地図の操作は地図のすぐ上に1行、凡例と取得時刻は地図の下に移しました(地図の上端 実測 526px → 462px)"]
   }, {
     ver: "v8.55",
     date: "2026-08",
@@ -8791,12 +8816,11 @@ function ProgressMapTab(p) {
   // 地図の初期化・塗り分け・寄せはすべて子(ProgressLeafletCanvas /
   // ProgressGoogleCanvas)が持つ。ここは取得した状態と見出しだけを扱う。
 
-  const legend = /*#__PURE__*/React.createElement("div", {
+  const legend = /*#__PURE__*/React.createElement("span", {
     style: {
-      display: "flex",
+      display: "inline-flex",
       flexWrap: "wrap",
-      gap: 8,
-      marginTop: 10
+      gap: 8
     }
   }, PROGRESS_ORDER.map(k => /*#__PURE__*/React.createElement("span", {
     key: k,
@@ -8826,25 +8850,25 @@ function ProgressMapTab(p) {
     minute: "2-digit"
   }) : "未取得";
 
-  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.card,
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement("div", {
+  return /*#__PURE__*/React.createElement(React.Fragment, null,
+  // 地図の操作は地図のすぐ上に1行だけ。以前は件数や凡例も含めた
+  // カードを地図の上に置いていたため、地図が画面の下半分から始まっていた。
+  /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8,
       alignItems: "center",
-      flexWrap: "wrap"
-    }
+      flexWrap: "wrap",
+      marginBottom: 8
+    },
+    className: "no-print"
   }, /*#__PURE__*/React.createElement("button", {
     onClick: () => setOnlyTarget(!onlyTarget),
     style: {
       ...S.mapSeg,
       ...(onlyTarget ? S.segOn : {})
     },
-    title: "この期間に作業がある圃場だけを地図に出す"
+    title: "その日の作業に入っている圃場だけを地図に出す"
   }, onlyTarget ? "◉ 対象だけ" : "○ 全圃場"), /*#__PURE__*/React.createElement("button", {
     onClick: fitToTargets,
     style: S.mapSeg,
@@ -8856,40 +8880,14 @@ function ProgressMapTab(p) {
       ...S.smallSecondary,
       marginLeft: "auto"
     }
-  }, loading ? "取得中…" : "🔄 最新を取得")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.smallLabel,
-      marginTop: 8
-    },
-    className: "num"
-  }, "最終取得 ", fetchedLabel, " ／ ", Math.round(AUTO_REFRESH_MS / 1000), "秒ごとに自動更新"),/*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 14,
-      marginTop: 8,
-      fontSize: 15,
-      fontWeight: 800,
-      color: "#1C2B21",
-      flexWrap: "wrap"
-    },
-    className: "num"
-  }, /*#__PURE__*/React.createElement("span", null, "実績 ", counts.done, " / ", counts.total, " 圃場"), /*#__PURE__*/React.createElement("span", null, "実績面積 ", dispArea(counts.areaA, p.areaUnitKey), areaSuffix(p.areaUnitKey)), counts.pending > 0 && /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: "#A15E08"
-    }
-  }, "未送信 ", counts.pending), counts.noPolygon > 0 && /*#__PURE__*/React.createElement("span", {
-    style: {
-      color: "#7A0B0B"
-    },
-    title: "地図タブで囲むと、この地図にも出るようになります"
-  }, "地図に出せない圃場 ", counts.noPolygon, "件(位置未登録)")), err && /*#__PURE__*/React.createElement("div", {
+  }, loading ? "取得中…" : "🔄 最新を取得")), err && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.smallLabel,
       color: "#C74E36",
-      marginTop: 8,
+      marginBottom: 8,
       fontWeight: 700
     }
-  }, err), legend), useGoogle && !p.gmapKey && /*#__PURE__*/React.createElement("p", {
+  }, err), useGoogle && !p.gmapKey && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "Googleマップを使うにはAPIキーの設定が必要です。設定タブで入力してください。"), !useGoogle && !window.L && /*#__PURE__*/React.createElement("p", {
     style: S.empty
@@ -8912,7 +8910,7 @@ function ProgressMapTab(p) {
       borderRadius: 0,
       border: "none"
     } : S.mapBox
-  }), fullMap ? /*#__PURE__*/React.createElement("button", {
+    }), fullMap ? /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(false),
     style: S.mapFullExit
   }, "✕ 全画面をやめる") : null), !fullMap && /*#__PURE__*/React.createElement("button", {
@@ -8921,7 +8919,28 @@ function ProgressMapTab(p) {
       ...S.smallSecondary,
       marginTop: 8
     }
-  }, "⛶ 地図を全画面で見る"), sel && /*#__PURE__*/React.createElement("div", {
+  }, "⛶ 地図を全画面で見る"), !fullMap && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.smallLabel,
+      marginTop: 8,
+      display: "flex",
+      gap: 12,
+      flexWrap: "wrap",
+      alignItems: "center"
+    },
+    className: "num"
+  }, legend, /*#__PURE__*/React.createElement("span", null, "最終取得 ", fetchedLabel, " ／ ", Math.round(AUTO_REFRESH_MS / 1000), "秒ごとに自動更新"), counts.pending > 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#A15E08",
+      fontWeight: 700
+    }
+  }, "未送信 ", counts.pending), counts.noPolygon > 0 && /*#__PURE__*/React.createElement("span", {
+    style: {
+      color: "#7A0B0B",
+      fontWeight: 700
+    },
+    title: "地図タブで囲むと、この地図にも出るようになります"
+  }, "地図に出せない圃場 ", counts.noPolygon, "件(位置未登録)")), sel && /*#__PURE__*/React.createElement("div", {
     style: S.modalOverlay,
     onClick: () => setSel(null)
   }, /*#__PURE__*/React.createElement("div", {
