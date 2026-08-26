@@ -562,6 +562,17 @@ const migrateChems = list => (Array.isArray(list) ? list : []).map(c => c.id && 
   updatedAt: c.updatedAt || nowIso()
 });
 
+// 自動取得の間隔として選べる値(秒)。0は「自動で取らない」。
+const PULL_SEC_CHOICES = [0, 10, 15, 30, 60, 180];
+const PULL_SEC_LABELS = {
+  0: "自動で取らない(手動だけ)",
+  10: "10秒ごと",
+  15: "15秒ごと",
+  30: "30秒ごと",
+  60: "1分ごと",
+  180: "3分ごと"
+};
+
 const TOMB_KEY = "tankmix:tombs";
 const TOMB_MAX = 500; // 古い墓標から捨てる。復活は「同期していない端末が残っていた」時だけ起きる
 const loadTombs = () => {
@@ -677,6 +688,19 @@ function App() {
   // navigator.onLine が無い環境(古いWebView)ではオンライン扱いにする。
   // 分からないときに「オフライン」と出すと、実際には送れているのに
   // 送れていないと思わせることになる。
+  // 自動取得の間隔(秒)。短いほど手元に早く出るが、そのぶん
+  // GASの実行回数と実行時間を使う。Apps Script には1日あたりの
+  // 実行時間の上限がある(アカウントの種類で違う。実測していない)ので、
+  // 既定は30秒とし、短い値を選べるようにしてある。
+  const [pullSec, setPullSecState] = useState(() => {
+    const v = parseInt(localStorage.getItem("tankmix:pullsec") || "", 10);
+    return PULL_SEC_CHOICES.indexOf(v) >= 0 ? v : 30;
+  });
+  const setPullSec = v => {
+    const n = PULL_SEC_CHOICES.indexOf(Number(v)) >= 0 ? Number(v) : 30;
+    setPullSecState(n);
+    localStorage.setItem("tankmix:pullsec", String(n));
+  };
   const [online, setOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine !== false);
   // 地図タブは一度開いたら、他のタブへ移っても display:none で残しておく。
   // Googleマップは地図を作り直すたびに課金対象(Map load)になるため、タブを
@@ -890,10 +914,13 @@ function App() {
     }, 1500);
   };
   const autoPullAtRef = useRef(0);
-  const autoPullShared = () => {
+  const autoPullShared = opt => {
     if (!syncReady()) return;
+    // 間隔を0にしても、タブを開いたときの1回は取りに行く。
+    // 開いても古いままだと、手動で押す場所を探すことになる。
+    const wait = (opt && opt.tick ? pullSec : Math.min(pullSec || 30, 30)) * 1000;
     const now = Date.now();
-    if (now - autoPullAtRef.current < 60000) return;
+    if (now - autoPullAtRef.current < wait) return;
     autoPullAtRef.current = now;
     pullSharedSync({
       quiet: true
@@ -911,6 +938,25 @@ function App() {
   useEffect(() => {
     autoPullShared();
   }, [workDate]);
+  // 開いている間は繰り返し取りに行く。v8.58までは「タブを開いた瞬間に1回」
+  // だけだったので、作業タブを開きっぱなしにしていると、他の端末が
+  // 入れた予定はタブを往復するまで出なかった。
+  // 裏に回っている間は取りに行かない(ポケットの中で回し続けないため)。
+  useEffect(() => {
+    if (!pullSec) return;
+    if (tab !== "work" && tab !== "map") return;
+    const tick = () => {
+      if (document.visibilityState === "visible") autoPullShared({
+        tick: true
+      });
+    };
+    const id = setInterval(tick, pullSec * 1000);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [tab, pullSec, workDate]);
   // 作業が変わったら自動で送る。v8.57までは「散布済」の入れ外しと
   // 実績の保存のときだけ送っていたため、作業リストへ圃場を入れても
   // 他の端末には何も出なかった。入れても・薬剤を当てても・外しても送る。
@@ -932,14 +978,31 @@ function App() {
   useEffect(() => {
     autoPushWorks();
   }, [works]);
-  const setWorksSave = next => setWorksRaw(stampUpdated(next, works));
+  // その日の中で何番目かを作業自体に持たせる。
+  // 送信のときに並びを数えるだけだと、入れ替えても作業の中身は
+  // 変わらないので stampUpdated が時刻を進めず、未送信として拾われない。
+  // stampUpdated より先に呼ぶこと。あとから書き込むと、時刻が進まないまま
+  // 並びだけが変わって、この端末にしか反映されない。
+  const withSeq = list => {
+    const n = {};
+    return list.map(w => {
+      const d = w.workDate || "";
+      const i = n[d] || 0;
+      n[d] = i + 1;
+      return w.seq === i ? w : {
+        ...w,
+        seq: i
+      };
+    });
+  };
+  const setWorksSave = next => setWorksRaw(stampUpdated(withSeq(next), works));
   // 描画時に閉じ込めた works は、再描画を待たずに続けて操作されると古くなる。
   // 古い配列を元に保存すると直前の変更が巻き戻る。チェックを続けて2つ入れると
   // 1つしか残らない、外したはずの実績が戻る、といった形で表に出る。
   // 進捗のように連打されうる操作は、必ず保存済みの内容から読み直す。
   const updateWorks = fn => {
     const cur = load("tankmix:works", []);
-    setWorksRaw(stampUpdated(fn(cur), cur));
+    setWorksRaw(stampUpdated(withSeq(fn(cur)), cur));
   };
   const setChemMasterSave = next => {
     // 圃場・作業と同じ仕組みに乗せる。変わったものだけ送るために
@@ -1368,7 +1431,7 @@ function App() {
       flash(noArea > 0 ? "面積が入っていないため計算できませんでした(" + noArea + "圃場)" : "対象がありません(散布済にした圃場のうち、実散布量が空のものが対象です)");
       return;
     }
-    setWorksRaw(stampUpdated(next, cur));
+    setWorksRaw(stampUpdated(withSeq(next), cur));
     flash(updated + "圃場に実績を入れました" + (noArea > 0 ? "(面積未入力 " + noArea + "件は対象外)" : "") + "。送信は「☁ 全データを送信」から");
     pushProgress({
       quiet: true
@@ -1887,20 +1950,6 @@ function App() {
     pushedAt: it.updatedAt || ""
   });
   const workStatus = w => w.reported ? "done" : (w.chems || []).length > 0 ? "mixed" : "planned";
-  // その日の中で何番目か。受け取った側はこれで並べ直す。
-  // 並び順だけを変えたときは中身が変わらないため送信対象にならず、
-  // 相手の並びは前回送った時点のままになる(未解決。中身を直せば揃う)。
-  const seqMap = list => {
-    const m = new Map();
-    const n = {};
-    list.forEach(w => {
-      const d = w.workDate || "";
-      n[d] = (n[d] || 0);
-      m.set(w.id, n[d]);
-      n[d]++;
-    });
-    return m;
-  };
   const workToItem = (w, seq) => {
     const f = resolveWork(w);
     return {
@@ -1926,7 +1975,7 @@ function App() {
       totalL: parseFloat(w.totalL) || 0,
       waterMl: parseFloat(w.waterMl) || 0,
       memo: w.memo || "",
-      seq: seq === undefined ? "" : seq
+      seq: seq === undefined || seq === null ? "" : seq
     };
   };
   // 受け取った1件 → この端末の作業
@@ -2005,8 +2054,7 @@ function App() {
       if (!quiet) flash("送っていない進捗はありません");
       return true;
     }
-    const seqs = seqMap(cur);
-    const items = pend.map(w => workToItem(w, seqs.get(w.id))).concat(tombs.map(t => ({
+    const items = pend.map(w => workToItem(w, w.seq)).concat(tombs.map(t => ({
       id: t.id,
       fieldId: 0,
       workDate: "",
@@ -2742,7 +2790,8 @@ function App() {
     recorder,
     fetchProgress,
     mapEngine,
-    gmapKey
+    gmapKey,
+    pullSec
   }), mapMounted && /*#__PURE__*/React.createElement("div", {
     style: tab === "map" ? undefined : {
       display: "none"
@@ -2778,6 +2827,8 @@ function App() {
     setRecorder,
     teamCode,
     setTeamCode,
+    pullSec,
+    setPullSec,
     authKey,
     setAuthKey,
     testConnection,
@@ -3576,6 +3627,7 @@ function WorkTab(p) {
     // 地図タブと同じエンジン設定を使う(無料地図 / Googleマップ)
     mapEngine: p.mapEngine,
     gmapKey: p.gmapKey,
+    pullSec: p.pullSec,
     active: true
   }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card,
@@ -8083,7 +8135,23 @@ function SettingsTab(p) {
       ...S.secondaryBtn,
       width: "100%"
     }
-  }, "🔁 今すぐ同期する"), /*#__PURE__*/React.createElement("p", {
+  }, "🔁 今すぐ同期する"), /*#__PURE__*/React.createElement("label", {
+    style: {
+      ...S.areaField,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.smallLabel
+  }, "自動取得の間隔(作業タブ・地図タブを開いている間)"), /*#__PURE__*/React.createElement("select", {
+    value: p.pullSec,
+    onChange: e => p.setPullSec(e.target.value),
+    style: S.unitSelect
+  }, PULL_SEC_CHOICES.map(v => /*#__PURE__*/React.createElement("option", {
+    key: v,
+    value: v
+  }, PULL_SEC_LABELS[v])))), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "短くするほど、他の端末の予定や進捗が早く手元に出ます。ただしそのぶん、スプレッドシート側のスクリプトが回る回数も増えます。Apps Script には1日あたりの実行時間の上限があり、上限に当たるとその日は送受信が止まります(上限の値はアカウントの種類で違います。このアプリでは実測していません)。端末の台数だけ回数は倍になります。まずは30秒で使ってみて、遅ければ短くしてください。画面を裏に回している間と、調合・設定タブを開いている間は取りに行きません。"), /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "圃場と薬剤は、登録・編集・削除した時点で自動的に送られます。このボタンは、圏外だったときの送り直しと、他の端末が入れた分を今すぐ受け取るためのものです。変わったものだけをやりとりするので、他の端末が足した圃場や薬剤を消しません。"), secHead("３　作業データの送信"), /*#__PURE__*/React.createElement("button", {
     onClick: () => p.pushProgress(),
@@ -8787,7 +8855,6 @@ const PROGRESS_ORDER = ["done", "planned", "none"];
 const toMapStatus = st => st === "done" || st === "local" ? "done" : "planned";
 // 進捗地図を開いている間の自動取得の間隔。短くするほど他の端末の実績が早く
 // 映るが、そのぶんGASの実行回数と通信量が増える。45秒は未計測の暫定値。
-const AUTO_REFRESH_MS = 45000;
 // 圃場名の札を出しはじめる倍率。Leaflet版とGoogle版で揃える
 const PROGRESS_LABEL_MIN_ZOOM = 15;
 
@@ -9136,6 +9203,9 @@ function ProgressMapTab(p) {
   // 変わらないので、進捗地図を出している間だけ一定間隔で取り直す。
   // 閉じている間・画面が裏に回っている間は取りに行かない(通信量とGASの
   // 実行回数を増やさないため)。表に戻ってきたときは即座に1回取り直す。
+  // 進捗地図の取り直しも設定の間隔に合わせる。
+  // ここだけ別の間隔だと、設定を短くしても地図の色だけ遅れる。
+  const refreshMs = (p.pullSec || 45) * 1000;
   const refreshRef = React.useRef(refresh);
   refreshRef.current = refresh;
   React.useEffect(() => {
@@ -9144,13 +9214,13 @@ function ProgressMapTab(p) {
     const tick = () => {
       if (document.visibilityState === "visible") refreshRef.current();
     };
-    const id = setInterval(tick, AUTO_REFRESH_MS);
+    const id = setInterval(tick, refreshMs);
     document.addEventListener("visibilitychange", tick);
     return () => {
       clearInterval(id);
       document.removeEventListener("visibilitychange", tick);
     };
-  }, [p.active, from, to]);
+  }, [p.active, from, to, refreshMs]);
 
   // ── 圃場ごとの状態を決める ──
   // サーバーから来た内容を土台にし、この端末にしかない未送信の実績を上へ重ねる。
@@ -9326,7 +9396,7 @@ function ProgressMapTab(p) {
       alignItems: "center"
     },
     className: "num"
-  }, legend, /*#__PURE__*/React.createElement("span", null, "最終取得 ", fetchedLabel, " ／ ", Math.round(AUTO_REFRESH_MS / 1000), "秒ごとに自動更新"), counts.pending > 0 && /*#__PURE__*/React.createElement("span", {
+  }, legend, /*#__PURE__*/React.createElement("span", null, "最終取得 ", fetchedLabel, " ／ ", Math.round(refreshMs / 1000), "秒ごとに自動更新"), counts.pending > 0 && /*#__PURE__*/React.createElement("span", {
     style: {
       color: "#A15E08",
       fontWeight: 700
