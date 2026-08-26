@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.62";
+const APP_VERSION = "v8.63";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -476,6 +476,19 @@ const today = () => {
   const d = new Date();
   return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
 };
+// 受け取った日付を "yyyy-MM-dd" に揃える。
+// スプレッドシートは "2026-08-26" をセルに入れた時点で日付として解釈するため、
+// 版によっては "Wed Aug 26 2026 ..." や ISO 文字列で返ってくることがある。
+// そのまま作業に入れると「その日の作業(workDate === 選んでいる日)」に
+// 一致せず、本日の圃場が一覧から消える。ここで必ず通す。
+const ymd = v => {
+  const t = String(v == null ? "" : v).trim();
+  if (!t) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return t;
+  const d = new Date(t);
+  if (isNaN(d.getTime())) return "";
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+};
 const shiftDate = (dateStr, days) => {
   const parts = dateStr.split("-").map(Number);
   const dt = new Date(parts[0], parts[1] - 1, parts[2] + days);
@@ -755,7 +768,25 @@ function App() {
     ratio: ""
   }]);
   const [fields, setFields] = useState(() => load("tankmix:fields", []));
-  const [works, setWorks] = useState(() => load("tankmix:works", []));
+  const [works, setWorks] = useState(() => {
+    // 既に日付が化けた状態で保存されている端末を直す。
+    // ここを通さないと、直した版を入れても「本日の作業が消えたまま」になる。
+    const cur = load("tankmix:works", []);
+    let fixed = 0;
+    const next = (Array.isArray(cur) ? cur : []).map(w => {
+      const d = ymd(w.workDate);
+      const r = ymd(w.reportDate);
+      if (d === (w.workDate || "") && r === (w.reportDate || "")) return w;
+      fixed++;
+      return {
+        ...w,
+        workDate: d,
+        reportDate: r
+      };
+    });
+    if (fixed) save("tankmix:works", next);
+    return next;
+  });
   const [chemMaster, setChemMaster] = useState(() => {
     const cur = load("tankmix:chemmaster", []);
     const next = migrateChems(cur);
@@ -2047,7 +2078,7 @@ function App() {
   // 受け取った1件 → この端末の作業
   const itemToWork = it => ({
     id: it.id,
-    workDate: it.workDate || "",
+    workDate: ymd(it.workDate),
     fieldId: it.fieldId,
     snapshot: {
       name: it.fieldName || "",
@@ -2063,7 +2094,7 @@ function App() {
     sprayedL: it.sprayedL || 0,
     reportAreaA: it.reportAreaA || "",
     reportMemo: "",
-    reportDate: it.reportedAt || "",
+    reportDate: ymd(it.reportedAt),
     seq: it.seq === "" || it.seq === undefined ? "" : Number(it.seq),
     // 台帳(「防除記録」シート)へ送るのは、その作業をした端末の役目とする。
     // 受け取っただけの端末でも未送信扱いにすると、全員の画面に
@@ -8548,9 +8579,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.62",
+    ver: "v8.63",
     date: "2026-08",
     isNew: true,
+    notes: ["🐞 更新のたびに本日の作業圃場が一覧から消える不具合を修正しました。スプレッドシートは「2026-08-26」のような文字列をセルに入れた時点で日付として解釈するため、受け取ると「Wed Aug 26 2026…」の形になり、「その日の作業」と一致しなくなっていました(v8.58で作業を受け取るようにしたときから)。進捗地図の日付の絞り込みも同じ理由で外れていました。※スプレッドシート側の Code.gs を差し替えて再デプロイしてください", "🔧 既に日付が化けた状態で端末に残っている作業も、起動時に1度だけ直します"]
+  }, {
+    ver: "v8.62",
+    date: "2026-08",
     notes: ["🔢 圃場一覧の地区の見出しに「🔢 連番」を追加しました。その地区の圃場名を「嘉島1」「嘉島2」…のように連番で付け直せます。丸数字(①)も普通の数字として読むので、①と 52 が混ざっていても番号順に並べ直してから振ります。名前の頭と開始番号を変えられ、実行前に「前 → 後」の一覧が出ます。付け直すのは名前だけで、囲んだ形・面積・作物・作業の記録はそのままです(戻せないので確認画面を出しています)", "📋 連番を振ったあとは、一覧の並びもその番号順になります", "🚦 進捗地図の「対象外」を黄色にしました。灰色だと衛星写真の上で地面と見分けにくいためです(実施済=緑 / 未実施=赤 / 対象外=黄)", "🗺 Googleマップで「地図を移動させるには指 2 本で操作します」が出ないようにしました。指 1 本でそのまま地図を動かせます(全画面でも同じ)", "🚦 進捗地図が、地図タブを一度開くまで白いままになることがある件に手を入れました。地図を作ったあとで入れ物の幅が決まると、0px のまま描かれません。大きさが変わるたびに測り直すようにしました(未再現のため、これで直るかは未確認)", "☁ 入力している間は自動取得を待たせるようにしました。投下量や薬剤を入れている途中に受信が割り込むと、一覧の並びや中身が目の前で入れ替わるためです。入力欄にカーソルがある間と、ポップアップを開いている間は見送り、次の拍子で取りに行きます", "☁ 圃場を登録・編集して送った直後に、その場で取り直すようにしました。次の拍子を待たずに揃います"]
   }, {
     ver: "v8.61",
