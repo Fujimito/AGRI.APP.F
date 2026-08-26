@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.54";
+const APP_VERSION = "v8.55";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -668,12 +668,10 @@ function App() {
   useEffect(() => {
     if (tab === "map") setMapMounted(true);
   }, [tab]);
-  // 進捗マップも同じ扱い。地図を作り直すとタイルを取り直すことになるので、
-  // 一度開いたら残しておく
-  const [progMounted, setProgMounted] = useState(false);
-  useEffect(() => {
-    if (tab === "progress") setProgMounted(true);
-  }, [tab]);
+  // 進捗マップは作業タブの中(一覧/地図の切替)に入れた。タブを分けていたときは
+  // 「今日の作業」を見るのに2つのタブを行き来することになり、現場で見づらかった。
+  // 作業タブから離れると地図は作り直されるが、タイルはブラウザのキャッシュから
+  // 出るのと、取得内容は localStorage に残しているので、取り直しは起きない。
   const [toast, setToast] = useState("");
   const [mode, setMode] = useState("direct");
   const [totalL, setTotalL] = useState("10");
@@ -1632,7 +1630,12 @@ function App() {
       const j = await res.json();
       // GASのdoGetが返す secured で、共有パスワードが設定済みかどうかが分かる。
       // 未設定だとURLを知っている人は誰でも書き込めてしまうので、そこまで伝える
-      if (j && j.ok && j.secured === false) flash("✅ 接続OK(ただし共有パスワード未設定：URLを知る人は誰でも記録を書き込めます)" + urlWarn);else flash((j && j.ok ? "✅ 接続OK！" : "応答が不正です。URLを確認してください") + urlWarn);
+      // doGet の features に、そのGASが対応している種類が入っている。
+      // Code.gs を貼り替えただけでデプロイし直していないと、ウェブアプリは
+      // 古い版を返し続ける(貼った内容は反映されない)。ここで見分けられるようにする。
+      const feats = j && Array.isArray(j.features) ? j.features : [];
+      const oldGas = j && j.ok && feats.indexOf("progress") < 0;
+      if (oldGas) flash("⚠ つながりましたが、動いているのは古い版のスクリプトです。Apps Scriptで「デプロイ」→「デプロイを管理」→ 鉛筆 → バージョン「新バージョン」で更新してください" + urlWarn);else if (j && j.ok && j.secured === false) flash("✅ 接続OK(ただし共有パスワード未設定：URLを知る人は誰でも記録を書き込めます)" + urlWarn);else flash((j && j.ok ? "✅ 接続OK！" : "応答が不正です。URLを確認してください") + urlWarn);
     } catch {
       flash("❌ 接続できません。URLとデプロイ設定を確認してください");
     }
@@ -2272,7 +2275,7 @@ function App() {
   }, "他", chemWarnings.length - 2, "件"))), toast && /*#__PURE__*/React.createElement("div", {
     style: S.toast
   }, toast), /*#__PURE__*/React.createElement("main", {
-    style: tab === "map" || tab === "progress" ? S.mainFull : S.main
+    style: tab === "map" ? S.mainFull : S.main
   }, tab === "calc" && /*#__PURE__*/React.createElement(CalcTab, {
     mode,
     setMode,
@@ -2343,8 +2346,11 @@ function App() {
     areaUnitKey,
     volUnitKey,
     tankCapacityL,
-    flash
-  }), tab === "preset" && /*#__PURE__*/React.createElement(PresetTab, {
+    flash,
+    // 進捗地図(作業タブの「🚦 進捗地図」表示)に渡す
+    recorder,
+    fetchProgress
+  }), tab === "preset" &&/*#__PURE__*/React.createElement(PresetTab, {
     fields,
     upsertField,
     deleteField,
@@ -2380,19 +2386,7 @@ function App() {
     // 表示中かどうか。隠れている間は大きさを測れないので採寸を止め、
     // 戻ってきたときに測り直させる
     active: tab === "map"
-  })), progMounted && /*#__PURE__*/React.createElement("div", {
-    style: tab === "progress" ? undefined : {
-      display: "none"
-    }
-  }, /*#__PURE__*/React.createElement(ProgressMapTab, {
-    fields,
-    works,
-    workDate,
-    recorder,
-    areaUnitKey,
-    fetchProgress,
-    active: tab === "progress"
-  })), tab === "settings" && /*#__PURE__*/React.createElement(SettingsTab, {
+  })), tab === "settings" &&/*#__PURE__*/React.createElement(SettingsTab, {
     areaUnitKey,
     setAreaUnitKey,
     volUnitKey,
@@ -2434,7 +2428,7 @@ function App() {
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
     className: "no-print"
-  }, [["calc", "🧮", "調合"], ["work", "🚁", "作業"], ["map", "🗺", "地図"], ["progress", "🚦", "進捗"], ["preset", "📋", "データベース"], ["settings", "⚙", "設定"]].map(t => /*#__PURE__*/React.createElement("button", {
+  }, [["calc", "🧮", "調合"], ["work", "🚁", "作業"], ["map", "🗺", "地図"], ["preset", "📋", "データベース"], ["settings", "⚙", "設定"]].map(t =>/*#__PURE__*/React.createElement("button", {
     key: t[0],
     onClick: () => setTab(t[0]),
     style: {
@@ -2818,6 +2812,14 @@ function WorkTab(p) {
   const [openRowId, setOpenRowId] = useState(null);
   // 「未実施のみ表示」フィルタ
   const [onlyPending, setOnlyPending] = useState(false);
+  // 作業タブの表示切替。"list"=作業一覧 / "map"=進捗地図。
+  // 作業日と集計は両方で共通に出し、その下だけを差し替える。
+  // 選んだ表示は端末に残す(見たい側が人によって違うため)
+  const [workView, setWorkView] = useState(() => load("tankmix:workview", "list") === "map" ? "map" : "list");
+  const chooseView = v => {
+    setWorkView(v);
+    save("tankmix:workview", v);
+  };
   // 「今日の準備」は既定で畳む。まだ圃場が入っていない日は開いた状態で始める
   const [prepOpen, setPrepOpen] = useState(() => p.works.filter(w => w.workDate === p.workDate).length === 0);
   const [pickForDay, setPickForDay] = useState(false);
@@ -3057,9 +3059,22 @@ function WorkTab(p) {
       whiteSpace: "nowrap"
     }
   }, "今日")), /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.segWrap,
+      marginTop: 12
+    },
+    className: "no-print"
+  }, [["list", "📋 作業一覧"], ["map", "🚦 進捗地図"]].map(v => /*#__PURE__*/React.createElement("button", {
+    key: v[0],
+    onClick: () => chooseView(v[0]),
+    style: {
+      ...S.seg,
+      ...(workView === v[0] ? S.segOn : {})
+    }
+  }, v[1]))), /*#__PURE__*/React.createElement("div", {
     style: S.totalsBar,
     className: "num"
-  }, /*#__PURE__*/React.createElement("div", {
+  },/*#__PURE__*/React.createElement("div", {
     style: S.totalsItem
   }, /*#__PURE__*/React.createElement("div", {
     style: S.totalsNum
@@ -3083,7 +3098,7 @@ function WorkTab(p) {
     style: S.totalsLabel
   }, "合計薬液量", reportedCount > 0 && /*#__PURE__*/React.createElement("span", {
     style: S.totalsNote
-  }, "実績 ", reportedCount, "/", dayList.length, "圃場")))), needsRateWarning && /*#__PURE__*/React.createElement("div", {
+  }, "実績 ", reportedCount, "/", dayList.length, "圃場")))), needsRateWarning &&/*#__PURE__*/React.createElement("div", {
     style: S.rateWarnBand,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("span", null, "⚠"), /*#__PURE__*/React.createElement("span", null, "本日の投下量(L/10a)が未入力の圃場があります。下の欄に入力して「面積から一括計算」を押してください。")), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
@@ -3126,7 +3141,15 @@ function WorkTab(p) {
     onClick: () => setPrepOpen(true),
     style: S.dayChemStrip,
     className: "no-print"
-  }, "🧪 ", p.dayChems.map(c => (c.name || "(無名)") + (c.ratio ? " " + c.ratio + "倍" : "")).join(" ／ "))), /*#__PURE__*/React.createElement("section", {
+  }, "🧪 ", p.dayChems.map(c => (c.name || "(無名)") + (c.ratio ? " " + c.ratio + "倍" : "")).join(" ／ "))), workView === "map" ? /*#__PURE__*/React.createElement(ProgressMapTab, {
+    fields: p.fields,
+    works: p.works,
+    workDate: p.workDate,
+    recorder: p.recorder,
+    areaUnitKey: p.areaUnitKey,
+    fetchProgress: p.fetchProgress,
+    active: true
+  }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, collapsibleHead("⚙ 今日の準備", prepOpen, () => setPrepOpen(!prepOpen)), prepOpen && /*#__PURE__*/React.createElement(React.Fragment, null, dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
@@ -4045,7 +4068,7 @@ function WorkTab(p) {
       height: 76
     },
     className: "no-print"
-  }));
+  })));
 }
 
 // ═══════════════════ 作業の進捗バー ═══════════════════
@@ -6295,7 +6318,16 @@ function GoogleMapTab(p) {
       p.addFieldWithPolygon(data);
     }
     if (newCrop.trim()) p.addCrop(newCrop.trim());
+    // 全画面で新しい圃場を囲んだときは、そのまま次の圃場を囲める状態に戻す。
+    // 全画面を抜けずに何枚も続けて登録する使い方(現地で一気に囲む)を想定している。
+    // 既存の圃場を編集していたときは続けない(編集は1枚ずつ終わる作業のため)。
+    const drawAgain = editingFieldId == null && fullMap;
     cancelDraw();
+    // ここで flash は出さない。登録できたことは addFieldWithPolygon 側が
+    // 面積つきで知らせており(「登録しました(◯◯a)」)、上書きすると
+    // その面積の確認が消える。続けて囲めることは、1行バーが「0点」で
+    // 残っていることで分かる
+    if (drawAgain) startDraw();
   };
   // 一覧表示中と、他のタブを見ている間はどちらも display:none で隠れている
   const mapHidden = listOnly || p.active === false;
@@ -7087,7 +7119,16 @@ function LeafletMapTab(p) {
       p.addFieldWithPolygon(data);
     }
     if (newCrop.trim()) p.addCrop(newCrop.trim());
+    // 全画面で新しい圃場を囲んだときは、そのまま次の圃場を囲める状態に戻す。
+    // 全画面を抜けずに何枚も続けて登録する使い方(現地で一気に囲む)を想定している。
+    // 既存の圃場を編集していたときは続けない(編集は1枚ずつ終わる作業のため)。
+    const drawAgain = editingFieldId == null && fullMap;
     cancelDraw();
+    // ここで flash は出さない。登録できたことは addFieldWithPolygon 側が
+    // 面積つきで知らせており(「登録しました(◯◯a)」)、上書きすると
+    // その面積の確認が消える。続けて囲めることは、1行バーが「0点」で
+    // 残っていることで分かる
+    if (drawAgain) startDraw();
   };
 
   // 一覧表示中と、他のタブを見ている間はどちらも display:none で隠れている
@@ -7631,7 +7672,7 @@ function SettingsTab(p) {
     }
   }, "🚦 進捗を送信")), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "「🔁 圃場を同期」は、変わった圃場だけを送って受け取ります。上の「☁↑ 端末→共有へ保存」と違い、他の端末が足した圃場を消しません。圃場の数が増えて「大きすぎます」と出るようになったら、こちらを使ってください。「🚦 進捗を送信」は進捗タブ用の実績を送ります(実績を保存したときにも自動で送られるので、圏外だったときの送り直しに使います)。どちらもGASを最新のCode.gsに更新してから使ってください。"), /*#__PURE__*/React.createElement("p", {
+  }, "「🔁 圃場を同期」は、変わった圃場だけを送って受け取ります。上の「☁↑ 端末→共有へ保存」と違い、他の端末が足した圃場を消しません。圃場の数が増えて「大きすぎます」と出るようになったら、こちらを使ってください。「🚦 進捗を送信」は作業タブの進捗地図用の実績を送ります(実績を保存したとき・「散布済」にチェックを入れ外ししたときにも自動で送られるので、圏外だったときの送り直しに使います)。どちらもGASを最新のCode.gsに更新してから使ってください。"), /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "同じチームコードの端末どうしで、圃場・薬剤・作業リストを共有できます(後から保存した内容で上書き)。共有がうまくいかない場合は、GASを最新のCode.gsに更新して再デプロイしてください。共有・送信される内容は、圃場名・作物・面積・圃場の位置情報(地図で囲んだ緯度経度)・地区・薬剤・作業記録・記録者名と、この端末を区別するための端末ID(初回起動時に作られる意味のない文字列で、機種や電話番号とは無関係です)です。作業者の現在地は送信しません。送信先はあなたが設定したGoogleスプレッドシートだけで、このアプリの作者を含む第三者には送信されません。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
@@ -7835,9 +7876,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.54",
+    ver: "v8.55",
     date: "2026-08",
     isNew: true,
+    notes: ["🚦 進捗タブをなくし、作業タブに入れました。作業日の下の「📋 作業一覧／🚦 進捗地図」で切り替えます。作業日・圃場数・合計面積・合計薬液量はどちらでも共通で出ます。選んだ表示は端末に残ります", "🚦 地図の色を2色に整理しました。赤=未実施、緑=実施済、灰=その日の作業に入っていない圃場(対象外)です。これまでの黄(調合済)・橙(未送信)は、遠目に赤とも緑とも読めなかったため色をやめ、記号(・=調合済、△=未送信)だけで示すようにしています", "🚦 進捗地図を開いている間は45秒ごとに自動で取り直します。他の端末で「散布済」にチェックが入ると、押した端末からはその場で送られるので、こちらは待っていれば色が変わります。閉じている間・画面が裏に回っている間は取りに行きません", "⚙ 進捗が取れないときのエラーで「invalid payload」と出ていた場合に、スプレッドシート側のCode.gsが古いことが分かる案内を出すようにしました", "⚙ 設定タブの「接続テスト」で、動いているスクリプトが古い版かどうかを見分けるようにしました。Code.gsを貼り替えただけではウェブアプリは古い版を返し続けるため、「つながっているのに進捗が取れない」の原因がこれで分かります", "🗺 全画面で圃場を登録したあと、そのまま次の圃場を囲める状態に戻るようにしました。全画面を抜けて「✏ 圃場を囲む」を押し直す必要はありません。1行バーが「0点」に戻ったら次を囲めます。やめるときは「✕」を押してください(登録済みの圃場を編集していたときは、これまでどおり1枚で終わります)"]
+  }, {
+    ver: "v8.54",
+    date: "2026-08",
     notes: ["🗺 全画面で圃場を囲むときの操作欄を、画面下の1行に畳みました。これまでは説明文・入力欄・登録ボタンで画面の半分近くを占めて地図が見えませんでした(実測 555px → 61px)", "🗺 圃場名・作物名・地区の入力は「✓ 登録」を押したときにポップアップで出るようになりました。地図を見ている間は出ません", "🗺 全画面の1行バーからも「🔀 並び順」(線の交差を直す)・「↩」(1つ戻す)・「🗑」(全消し)・「✕」(作図をやめる)が使えます"]
   }, {
     ver: "v8.53",
@@ -8234,14 +8279,16 @@ function DrawBarFull(p) {
   }, "地図に戻る"))));
 }
 
-// ═══════════════════ 進捗マップタブ ═══════════════════
-// 圃場の位置を作図・編集する地図タブとは別に、その日の進み具合だけを見る地図。
-// 編集の操作は一切置いていない。散布の最中に地図を触って、囲んだ形を壊す事故を
-// 避けるため(作図・編集は地図タブでしかできない)。
+// ═══════════════════ 進捗マップ(作業タブの「🚦 進捗地図」) ═══════════════════
+// 作業タブの中で、作業一覧と切り替えて出す。圃場の位置を作図・編集する地図タブとは
+// 別物で、その日の進み具合だけを見る。編集の操作は一切置いていない。散布の最中に
+// 地図を触って、囲んだ形を壊す事故を避けるため(作図・編集は地図タブでしかできない)。
 //
-// 色は「実績が入ったかどうか」を最短で読めることだけを狙う。屋外の直射日光下では
-// 微妙な色差は判別できないので明度が大きく違う4色に絞り、色だけに頼らないよう
-// 記号も併記する(色覚特性への配慮も兼ねる)。
+// 色は「終わったか、まだか」の2色だけにする。赤=未実施、緑=実施済。
+// 屋外の直射日光下では微妙な色差は判別できないため、中間の色(調合済の黄・
+// 未送信の橙)を別色にすると、遠目にはどちらとも読めない。
+// 中間の情報は色ではなく記号(・=調合済、△=未送信)で残す。
+// この日の作業に入っていない圃場は灰色のまま(対象外)。
 const PROGRESS_STATES = {
   done: {
     fill: "#2E7D4F",
@@ -8250,22 +8297,24 @@ const PROGRESS_STATES = {
     label: "実績済"
   },
   local: {
-    fill: "#E08A1E",
-    stroke: "#8A5108",
+    // 塗りは実施済と同じ緑。輪郭だけ橙にして「まだ送れていない」ことを示す
+    fill: "#2E7D4F",
+    stroke: "#E08A1E",
     mark: "△",
     label: "実績済(未送信)"
   },
   mixed: {
-    fill: "#F2D64B",
-    stroke: "#8A7212",
+    // 調合しただけで散布はまだ。未実施と同じ赤で、記号だけ分ける
+    fill: "#D81111",
+    stroke: "#7A0B0B",
     mark: "・",
-    label: "調合済"
+    label: "調合済(未実施)"
   },
   planned: {
-    fill: "#FFFFFF",
-    stroke: "#D81111",
+    fill: "#D81111",
+    stroke: "#7A0B0B",
     mark: "",
-    label: "未実績"
+    label: "未実施"
   },
   none: {
     fill: "#9AA69E",
@@ -8284,6 +8333,9 @@ const PROGRESS_RANK = {
   done: 4
 };
 const PROGRESS_ORDER = ["done", "local", "mixed", "planned", "none"];
+// 進捗地図を開いている間の自動取得の間隔。短くするほど他の端末の実績が早く
+// 映るが、そのぶんGASの実行回数と通信量が増える。45秒は未計測の暫定値。
+const AUTO_REFRESH_MS = 45000;
 
 function ProgressMapTab(p) {
   const mapRef = React.useRef(null);
@@ -8323,7 +8375,7 @@ function ProgressMapTab(p) {
     setLoading(false);
     if (!r || r.error) {
       const e = r && r.error;
-      setErr(e === "設定" ? "設定タブで「送信先URL」と「チームコード」を入れてください" : e === "通信" ? "取得できません。電波の届く場所でもう一度お試しください" : e === "GAS" ? "スプレッドシート側のスクリプトが古い版です。Code.gs を貼り直して「新バージョン」でデプロイしてください" : e === "auth" ? "共有パスワードが違います。設定タブで確認してください" : "取得できません(" + (e || "不明") + ")");
+      setErr(e === "設定" ? "設定タブで「送信先URL」と「チームコード」を入れてください" : e === "通信" ? "取得できません。電波の届く場所でもう一度お試しください" : e === "GAS" || e === "invalid payload" ? "スプレッドシート側のスクリプトが古い版です。Code.gs を貼り直して「新バージョン」でデプロイしてください" :e === "auth" ? "共有パスワードが違います。設定タブで確認してください" : "取得できません(" + (e || "不明") + ")");
       return;
     }
     const next = {
@@ -8336,14 +8388,27 @@ function ProgressMapTab(p) {
     save("tankmix:progresssnap", next);
   };
 
-  // タブを開いたとき、まだ一度も取っていなければ自動で1回だけ取りに行く。
-  // 以後は手動のボタンだけ(自動で回し続けると通信量とGASの実行回数が増える)
-  const autoRef = React.useRef(false);
+  // ── 開いている間は自動で取り直す ──
+  // 他の端末で「散布済」にチェックが入ると、その端末からは即座に送られる
+  // (toggleDone が pushProgress まで行う)。こちらが取りに行かないと色が
+  // 変わらないので、進捗地図を出している間だけ一定間隔で取り直す。
+  // 閉じている間・画面が裏に回っている間は取りに行かない(通信量とGASの
+  // 実行回数を増やさないため)。表に戻ってきたときは即座に1回取り直す。
+  const refreshRef = React.useRef(refresh);
+  refreshRef.current = refresh;
   React.useEffect(() => {
-    if (!p.active || autoRef.current) return;
-    autoRef.current = true;
-    refresh();
-  }, [p.active]);
+    if (!p.active) return;
+    refreshRef.current();
+    const tick = () => {
+      if (document.visibilityState === "visible") refreshRef.current();
+    };
+    const id = setInterval(tick, AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", tick);
+    };
+  }, [p.active, from, to]);
 
   // ── 圃場ごとの状態を決める ──
   // サーバーから来た内容を土台にし、この端末にしかない未送信の実績を上へ重ねる。
@@ -8446,7 +8511,7 @@ function ProgressMapTab(p) {
         color: c.stroke,
         weight: key === "none" ? 1.5 : 3,
         fillColor: c.fill,
-        fillOpacity: key === "none" ? 0.15 : key === "planned" ? 0.35 : 0.6
+        fillOpacity: key === "none" ? 0.15 : 0.55
       }).addTo(grp);
       bounds.push(f.polygon);
       if (showLabel) {
@@ -8545,7 +8610,7 @@ function ProgressMapTab(p) {
       marginTop: 8
     },
     className: "num"
-  }, dateLabel(to), "の作業 ／ 最終取得 ", fetchedLabel), /*#__PURE__*/React.createElement("div", {
+  }, "最終取得 ", fetchedLabel, " ／ ", Math.round(AUTO_REFRESH_MS / 1000), "秒ごとに自動更新"),/*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 14,
