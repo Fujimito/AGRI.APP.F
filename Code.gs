@@ -828,6 +828,24 @@ function doPost(e) {
       return json_({ ok: true, added: 1 });
     }
 
+    // ── 実績の取り消し ──
+    // 作業タブのチェックを外したとき。行は消さない(調合した事実は残るため)。
+    // 状態を「調合済」に戻し、実散布量と報告日だけを消す。
+    // ここを送らずに済ませると、アプリは未実施・シートは散布済という食い違いが
+    // 黙って残り、アグリノートへの転記までそのまま流れる。
+    if (type === "unreport") {
+      if (!rec || !rec.id) return json_({ ok: false, error: "invalid payload" });
+      if (row <= 0) {
+        // 元の行が無い(まだ一度も送っていない)。取り消すものが無いので成功扱い。
+        // ここで失敗を返すと、アプリ側が永久に再送を続ける
+        return json_({ ok: true, updated: 0, missing: true });
+      }
+      sh.getRange(row, COL.SPRAYED).setValue("");
+      sh.getRange(row, COL.STATUS).setValue("調合済");
+      sh.getRange(row, COL.REPORT_DATE).setValue("");
+      return json_({ ok: true, updated: 1 });
+    }
+
     if (type === "report") {
       // 散布完了報告:既存の行を更新
       if (row > 0) {
@@ -858,12 +876,12 @@ function doGet() {
   // 「合言葉が未設定です」と出せるようにするための情報で、合言葉そのものは返さない。
   return json_({
     ok: true,
-    app: "薬液調合ノート 受信口 v9(1散布=1行・進捗共有対応)",
+    app: "薬液調合ノート 受信口 v10(1散布=1行・進捗共有・実績取消対応)",
     sheet: SHEET_NAME,
     secured: !!sharedSecret_(),
     // アプリ側が「このGASは進捗マップに対応しているか」を判定するための印。
     // 古いGASのまま進捗マップを開くと unknown type が返るだけで理由が分からない。
-    features: ["record", "report", "chemdbLoad", "cloudSave", "cloudLoad",
+    features: ["record", "report", "unreport", "chemdbLoad", "cloudSave", "cloudLoad",
                "pushFields", "pushWorks", "pull", "progress"],
   });
 }
