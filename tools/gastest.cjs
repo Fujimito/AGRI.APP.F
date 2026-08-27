@@ -337,6 +337,44 @@ const F2 = {
   eq("進捗もチームごとに1件ずつ", [prJ.items.length, prS.items.length], [1, 1]);
 }
 
+// ── 14c. シートの行数上限(既定1000行)に当たっても送信できる ──
+// 実データが 999行/1000行 まで埋まっていた。この状態では
+// getRange が範囲外になり、送信が丸ごと例外で落ちる。
+// 進捗の送信は「新しい作業＋削除の墓標」を一緒に送るので、
+// 削除まで道連れで失敗し、進捗地図が赤いまま戻らなくなっていた。
+{
+  const ctx = makeContext({});
+  const mk = (id, date, fid) => ({
+    id, workDate: date, fieldId: fid, fieldName: "圃場" + fid,
+    status: "planned", plannedL: 0, sprayedL: 0, reportAreaA: "",
+    chemCount: 0, chemText: "", crop: "", areaA: 10, chems: [],
+    totalL: 0, waterMl: 0, memo: "", seq: 0, by: "x", deviceId: "d",
+    reportedAt: "", updatedAt: "2026-08-27T01:00:00.000Z",
+  });
+  const tomb = id => ({ id, deleted: true, updatedAt: "2026-08-28T00:00:00.000Z",
+    fieldId: 0, workDate: "", status: "planned", by: "x", deviceId: "d" });
+
+  for (let b = 0; b < 999; b += 300) {
+    const items = [];
+    for (let k = b; k < Math.min(b + 300, 999); k++) items.push(mk(100000 + k, "2026-08-27", 5000 + k));
+    post(ctx, { type: "pushWorks", team: "Jupiter", items });
+  }
+  const sh = ctx.getWorkSheet_();
+  eq("埋めた行数は999", sh.getLastRow() - 1, 999);
+
+  const r1 = post(ctx, { type: "pushWorks", team: "Jupiter", items: [mk(999999, "2026-08-28", 7777)] });
+  eq("満杯でも新規を受け付ける", r1.ok, true);
+  eq("シートが伸びている", sh.getMaxRows() > 1000, true);
+
+  // 「新規＋墓標」をまとめて送る形(pushProgress と同じ)
+  const r2 = post(ctx, { type: "pushWorks", team: "Jupiter",
+    items: [mk(888888, "2026-08-28", 8888), tomb(100001)] });
+  eq("新規＋墓標をまとめて送れる", r2.ok, true);
+  const pr = post(ctx, { type: "progress", team: "Jupiter", from: "2026-08-27", to: "2026-08-27" });
+  eq("墓標が効いている", pr.items.some(x => String(x.id) === "100001"), false);
+  eq("進捗は作業IDを返す", pr.items.length > 0 && pr.items[0].id !== undefined, true);
+}
+
 // ── 15. 作業日がシート側で日付に化けても、文字列で返す ──
 // スプレッドシートは "2026-08-26" を Date として解釈する。そのまま String() すると
 // "Wed Aug 26 2026 ..." になり、アプリの「その日の作業」に一致しなくなって

@@ -25,9 +25,17 @@ class FakeSheet {
     this.name = name;
     this.rows = [];      // rows[r][c] (0始まり)
     this.frozen = 0;
+    // 実物のシートは既定1000行で、その外を getRange で掴むと例外になる。
+    // 張りぼてが黙って伸びていたので、行数上限に当たる不具合を
+    // テストで捕まえられなかった(実データは999行で上限に張り付いていた)。
+    this.maxRows = 1000;
   }
   getName() { return this.name; }
-  getMaxRows() { return Math.max(this.rows.length, 1000); }
+  getMaxRows() { return this.maxRows; }
+  insertRowsAfter(after, count) {
+    this.maxRows += count;
+    return this;
+  }
   getLastRow() {
     for (let r = this.rows.length - 1; r >= 0; r--) {
       const row = this.rows[r] || [];
@@ -50,6 +58,11 @@ class FakeSheet {
     const r0 = row - 1, c0 = col - 1;
     const nr = numRows === undefined ? 1 : numRows;
     const nc = numCols === undefined ? 1 : numCols;
+    // 実物と同じく、シートの外は掴めない
+    if (row + nr - 1 > this.maxRows) {
+      throw new Error("Those rows are out of bounds. (行 " + (row + nr - 1) +
+        " / シートは " + this.maxRows + " 行)");
+    }
     const range = {
       getValues() {
         const out = [];
@@ -89,7 +102,9 @@ class FakeSheet {
     return range;
   }
   appendRow(values) {
-    this.rows[this.getLastRow()] = values.map(coerce);
+    const at = this.getLastRow();
+    if (at + 1 > this.maxRows) this.insertRowsAfter(this.maxRows, 1);
+    this.rows[at] = values.map(coerce);
   }
   setFrozenRows(n) { this.frozen = n; }
   deleteRows(start, count) { this.rows.splice(start - 1, count); }

@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.79";
+const APP_VERSION = "v8.80";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -1378,6 +1378,20 @@ function App() {
   };
   // 複数の作業をまとめて外す(選択削除・一括削除用)。
   // 1件ずつremoveWorkを呼ぶと古いworksを元に上書きし合って1件しか消えないため、必ずまとめて処理する。
+  // この端末には無いのにシートに残っている行を消す。
+  // 削除がサーバーに届かなかったとき(v8.78で修正した墓標の全消し)、
+  // 端末からは作業が消えているので removeWorks が使えず、
+  // 進捗地図に赤いまま残り続ける行ができていた。
+  // 既存の残骸を片付ける道がどこにもなかったので足す(v8.80)。
+  const removeServerWorks = ids => {
+    const list = (Array.isArray(ids) ? ids : [ids]).filter(x => x !== null && x !== undefined && x !== "");
+    if (list.length === 0) return;
+    addTomb("works", list);
+    flash(list.length + "件をサーバーから外しています…");
+    pushProgress({
+      quiet: true
+    });
+  };
   const removeWorks = ids => {
     const set = new Set(ids);
     if (set.size === 0) return;
@@ -3002,6 +3016,7 @@ function App() {
     addWorks,
     applyRatePerDay,
     toggleDone,
+    removeServerWorks,
     bulkReportFromRate,
     submitReport,
     submitGroupReport,
@@ -4308,6 +4323,8 @@ function WorkTab(p) {
     // v8.73: 圃場の出し入れも地図からできるようにした
     addWork: p.addWork,
     removeWork: p.removeWork,
+    // v8.80: シートにだけ残っている行を片付ける
+    removeServerWorks: p.removeServerWorks,
     // v8.74: 実績入力も地図から開く。ポップアップ自体は
     // この上(WorkTab)で出すので、ここでは「開け」と頒むだけ。
     onReport: w => openReport(w),
@@ -8932,6 +8949,18 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
+    ver: "v8.80",
+    date: "2026-08",
+    isNew: true,
+    notes: [
+      "🐞 進捗地図が赤いまま戻らない原因を見つけました。シートの行数が上限(既定1000行)に達しており、送信が丸ごと例外で落ちていました",
+      "⚠ 進捗の送信は「新しい作業＋削除の墓標」を1回で送るため、満杯になると削除まで一緒に失敗します。これが「何度直しても未実施が消えない」の正体でした",
+      "🔧 送信の前にシートの行を伸ばすようにしました(Code.gs)",
+      "🧹 この端末に無いのにサーバーに残っている作業を、進捗地図から外せるようにしました。これまでは端末から作業が消えた時点で、アプリから二度と触れませんでした",
+      "※ スプレッドシートの Code.gs を差し替えて再デプロイしてください。アプリ側だけ更新しても直りません",
+      "🧪 GASの検査を 88件 → 94件 に増やしました(行数上限を再現する形を追加)"
+    ]
+  }, {
     ver: "v8.79",
     date: "2026-08",
     isNew: true,
@@ -10199,6 +10228,23 @@ function ProgressMapTab(p) {
     return c;
   }, [statusByField, p.fields]);
 
+  // この端末には無いのに、サーバーの進捗に載っている作業。
+  // 削除がサーバーへ届かなかった残骸で、地図が赤いまま戻らない。
+  // 端末から作業が消えているので removeWork では触れない。
+  // ※ 作業IDは Code.gs を v8.80 以降にしないと進捗に入ってこない。
+  //   古いままなら id が undefined なので0件になり、何も出ない。
+  const orphans = React.useMemo(() => {
+    const localIds = new Set();
+    (p.works || []).forEach(w => {
+      if (!w.workDate || w.workDate < from || w.workDate > to) return;
+      localIds.add(String(w.id));
+    });
+    return (snap.items || []).filter(it => {
+      if (it.id === undefined || it.id === null || it.id === "") return false;
+      return !localIds.has(String(it.id));
+    });
+  }, [snap, p.works, from, to]);
+
   // 地図の初期化・塗り分け・寄せはすべて子(ProgressLeafletCanvas /
   // ProgressGoogleCanvas)が持つ。ここは取得した状態と見出しだけを扱う。
 
@@ -10338,7 +10384,37 @@ function ProgressMapTab(p) {
       fontWeight: 700
     },
     title: "地図タブで囲むと、この地図にも出るようになります"
-  }, "地図に出せない圃場 ", counts.noPolygon, "件(位置未登録)")), sel && /*#__PURE__*/React.createElement("div", {
+  }, "地図に出せない圃場 ", counts.noPolygon, "件(位置未登録)"), orphans.length > 0 && p.removeServerWorks && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8,
+      padding: "10px 12px",
+      borderRadius: 8,
+      background: "#FFF4D6",
+      border: "1px solid #E3B505",
+      fontSize: 12,
+      lineHeight: 1.6,
+      color: "#6B4E00"
+    }
+  }, "⚠ この端末にない作業が ", orphans.length, "件、サーバーに残っています。地図が赤いまま戻らない原因です。", /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      const names = [];
+      orphans.forEach(o => {
+        const n = o.by || "(不明)";
+        if (names.indexOf(n) < 0) names.push(n);
+      });
+      // 別の端末が登録した予定だった場合、そちらからも消える。
+      // 記録者を見せてから確かめる。
+      if (!confirm(dateLabel(from) + "の作業 " + orphans.length + "件をサーバーから外します。\n記録者: " + names.join("、") + "\n\n別の端末が登録した予定だった場合、その端末からも消えます。\n(圃場マスタには残ります)\nこの操作は取り消せません。よろしいですか？")) return;
+      p.removeServerWorks(orphans.map(o => o.id));
+      setTimeout(() => refreshRef.current(), 2500);
+    },
+    style: {
+      ...S.smallDanger,
+      width: "100%",
+      marginTop: 8,
+      padding: "10px 0"
+    }
+  }, "🧹 サーバーから外す(" + orphans.length + "件)"))), sel && /*#__PURE__*/React.createElement("div", {
     style: S.modalOverlay,
     onClick: () => setSel(null)
   }, /*#__PURE__*/React.createElement("div", {

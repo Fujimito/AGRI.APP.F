@@ -339,6 +339,20 @@ function ymd_(v) {
   return Utilities.formatDate(d, "Asia/Tokyo", "yyyy-MM-dd");
 }
 
+// シートの行数を確保する。
+//
+// シートの行数は新規作成時に1000行。その外を getRange で掴むと
+// "Those rows are out of bounds" で例外になり、その送信が丸ごと落ちる。
+// 進捗の送信は「新しい作業＋削除の墓標」を1回で送るので、満杯になると
+// 削除まで一緒に失敗し、進捗地図が赤いまま戻らなくなる。
+// 実データが 999行/1000行 まで埋まってこの状態になっていた。
+// 伸ばすときは余裕を持たせる。毎回1行ずつ増やすと遅い。
+function ensureRows_(sh, need) {
+  const have = sh.getMaxRows();
+  if (need <= have) return;
+  sh.insertRowsAfter(have, (need - have) + 500);
+}
+
 function isoNow_() {
   return new Date().toISOString();
 }
@@ -543,7 +557,9 @@ function chemObj_(r) {
 function pushRecLogs_(logs) {
   if (!logs.length) return;
   const sh = getShareLogSheet_();
-  sh.getRange(sh.getLastRow() + 1, 1, logs.length, 4).setValues(logs);
+  const start = sh.getLastRow() + 1;
+  ensureRows_(sh, start + logs.length - 1);
+  sh.getRange(start, 1, logs.length, 4).setValues(logs);
   const over = (sh.getLastRow() - 1) - SHARE_LOG_MAX;
   if (over > 0) sh.deleteRows(2, over);
 }
@@ -607,6 +623,7 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
   }
 
   if (updated > 0 || added > 0) {
+    ensureRows_(sh, rows.length + 1);   // +1 は見出し行
     sh.getRange(2, 1, rows.length, width).setValues(rows);
   }
   pushRecLogs_(logs);
@@ -648,6 +665,10 @@ function progressItems_(team, from, to) {
     if (from && d < from) continue;
     if (to && d > to) continue;
     out.push({
+      // 作業ID。これが無いと、端末側に残っていない行を
+      // アプリから消せない(墓標を立てる先が分からない)。
+      // 進捗だけ見ていたので長らく抜けていた(v8.80)
+      id: r[0],
       fieldId: Number(r[3]),
       workDate: d,
       status: String(r[5] || "planned"),
