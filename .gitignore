@@ -4,3 +4,11 @@
 # Apps Script経由で取り込む運用にしている(README「農薬データの取り込み」参照)。
 # うっかり `git add .` で再びコミットされるのを防ぐためここに書いている。
 chemdb.json
+
+# マニュアルPDFを作るときに、Windows同梱の可変フォント(NotoSansJP-VF.ttf)を
+# 太さ固定に書き出した中間ファイル。フォントファイル自体は再配布しない方針。
+# tools/make_manual_pdf.py が無ければ自動で作り直す。
+tools/_fontcache/
+
+# Python の中間ファイル
+tools/__pycache__/

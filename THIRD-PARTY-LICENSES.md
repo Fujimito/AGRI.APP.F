@@ -179,3 +179,29 @@ GPL-3.0 にする選択は取らない)。方針を変える場合は、ライ�
 `chemdb.json` は農林水産消費安全技術センター(FAMIC)が公開する農薬登録情報を
 加工して作成したものです。出典表記と再配布条件は、FAMIC の公開ページの記載に
 従ってください(本ファイルはソフトウェアライセンスのみを扱います)。
+
+## Noto Sans JP(マニュアルPDFに埋め込んでいるフォント)
+
+対象: `docs/マニュアル_使い方と初期設定.pdf` に埋め込まれているフォント。
+アプリ本体(app.js / index.html)では使っていません。
+
+| 項目 | 内容 |
+|---|---|
+| 権利者 | Google / Adobe(名称 "Source" は Adobe の商標) |
+| 出所 | Windows 11 同梱の `C:\Windows\Fonts\NotoSansJP-VF.ttf`(Version 2.04) |
+| ライセンス | SIL Open Font License 1.1(フォントの name テーブル ID 13/14 で確認。ID 14 = `http://scripts.sil.org/OFL`) |
+| 判定 | **可**(PDFへの埋め込みと、そのPDFの配布) |
+
+根拠: OFL 1.1 の前文に
+"The requirement for fonts to remain under this license does not apply to any
+document created using the Font Software." とあり、フォントで作成した文書
+(このPDF)には OFL の条件が及びません。埋め込みを禁じる条項もありません。
+
+**フォントファイル自体はリポジトリに置いていません。** `tools/make_manual_pdf.py`
+が実行時に Windows 同梱のフォントから太さ固定版を書き出して使い、その中間
+ファイルは `.gitignore` で除外しています(フォントそのものの再配布は行わない
+方針のため)。
+
+未確認: Windows 以外(macOS / Linux)でのフォントの所在は調べていません。
+別環境で作り直すときは `tools/make_manual_pdf.py` の `FONT_SRC` を、
+OFL などで再配布・埋め込みが認められたフォントに向けてください。

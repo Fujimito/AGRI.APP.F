@@ -36,6 +36,17 @@ tools/selftest.cjs            … 計算部分の自己テスト(配布物では
 tools/gastest.cjs             … Code.gs の受信処理の自己テスト(配布物ではない)
 tools/gasharness.cjs          … Code.gs を Node で動かすための張りぼて(配布物ではない)
 tools/fakegas.cjs             … ローカル確認用の受信口(配布物ではない)
+tools/make_manual_pdf.py      … マニュアルPDFの生成スクリプト(配布物ではない)
+docs/仕組み図_A3横.svg          … アプリの仕組み図(A3横・印刷用)
+docs/マニュアル_使い方と初期設定.pdf … 使い方・初期設定マニュアル(A4・9ページ)
+```
+
+`docs/` の2つは配布・掲示用の資料です。マニュアルPDFは次で作り直せます
+(Windows同梱の Noto Sans JP を太さ固定にしてPDFに埋め込みます。フォントの
+ライセンスは THIRD-PARTY-LICENSES.md 参照)。
+
+```
+python tools/make_manual_pdf.py
 ```
 
 農薬登録データ(`chemdb.json`)はこのリポジトリに含めていません。FAMICの利用規約が
