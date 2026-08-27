@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.70";
+const APP_VERSION = "v8.71";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -8781,9 +8781,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.70",
+    ver: "v8.71",
     date: "2026-08",
     isNew: true,
+    notes: ["📍 進捗地図に「📍 現在地」を付けました。押すと今いる場所を測って、そこへ地図が飛びます(倍率17)。地図タブの現在地と違って出し入れはせず、押すたび測り直します。散布中に自分の場所を見失ったときに使います(無料地図・Googleマップの両方)", "📍 位置情報は地図を寄せるためだけに使い、これまでどおりスプレッドシートにも他の端末にも送信しません"]
+  }, {
+    ver: "v8.70",
+    date: "2026-08",
     notes: ["🗺 作業タブの進捗地図だけマップIDが効いていなかったのを直しました。地図タブと進捗地図は中身が別の地図で、v8.68 では進捗地図側へマップIDを渡し忘れていたため、こちらだけ回せませんでした", "🗺 マップIDを保存した時点で両方の地図を作り直すようにしました。地図は一度作るとラスターかベクターかを変えられないため、これまでは保存してもアプリを読み直すまで回せませんでした"]
   }, {
     ver: "v8.69",
@@ -9381,7 +9385,8 @@ function ProgressLeafletCanvas(p) {
     setTimeout(() => map.invalidateSize(), 200);
     if (p.apiRef) p.apiRef.current = {
       resize: () => mapRef.current && mapRef.current.invalidateSize(),
-      fit
+      fit,
+      locate
     };
     return () => {
       map.remove();
@@ -9389,6 +9394,44 @@ function ProgressLeafletCanvas(p) {
       if (p.apiRef) p.apiRef.current = null;
     };
   }, []);
+
+  // 「📍 現在地」。測って印を置き、そこへ寄せる。
+  // 地図タブの現在地は押すたび出し入れするが、こちらは飛ぶだけにする。
+  // 散布中に押すのは自分の場所を見失ったときで、消したい場面がない。
+  const gpsRef = React.useRef(null);
+  const locate = () => {
+    const L = window.L;
+    if (!L || !mapRef.current) return;
+    if (!navigator.geolocation) {
+      p.flash && p.flash("この端末は位置情報に対応していません");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(pos => {
+      const m = mapRef.current;
+      if (!m) return;
+      const ll = [pos.coords.latitude, pos.coords.longitude];
+      if (gpsRef.current) {
+        m.removeLayer(gpsRef.current);
+        gpsRef.current = null;
+      }
+      gpsRef.current = L.circleMarker(ll, {
+        radius: 9,
+        color: "#fff",
+        weight: 3,
+        fillColor: "#3B7EA1",
+        fillOpacity: 1
+      }).addTo(m).bindTooltip("現在地", {
+        permanent: true,
+        direction: "top"
+      });
+      m.setView(ll, 17);
+    }, () => {
+      p.flash && p.flash("位置情報を取得できませんでした(権限を確認してください)");
+    }, {
+      enableHighAccuracy: true,
+      timeout: 10000
+    });
+  };
 
   // 「⊙ 今日の圃場へ」。親が数字を1つ増やして知らせる
   React.useEffect(() => {
@@ -9557,7 +9600,8 @@ function ProgressGoogleCanvas(p) {
         resize: () => {
           if (mapRef.current && window.google) window.google.maps.event.trigger(mapRef.current, "resize");
         },
-        fit
+        fit,
+        locate
       };
     }).catch(() => {
       if (!cancelled) setLoadErr(true);
@@ -9570,6 +9614,53 @@ function ProgressGoogleCanvas(p) {
       if (p.apiRef) p.apiRef.current = null;
     };
   }, []);
+
+  // 「📍 現在地」。Leaflet版と同じく、飛ぶだけ。
+  const gpsRef = React.useRef(null);
+  const locate = () => {
+    if (!mapRef.current || !window.google) return;
+    if (!navigator.geolocation) {
+      p.flash && p.flash("この端末は位置情報に対応していません");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(pos => {
+      const m = mapRef.current;
+      if (!m || !window.google) return;
+      const g = window.google.maps;
+      const ll = {
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude
+      };
+      if (gpsRef.current) {
+        gpsRef.current.setMap(null);
+        gpsRef.current = null;
+      }
+      gpsRef.current = new g.Marker({
+        position: ll,
+        map: m,
+        label: {
+          text: "現在地",
+          color: "#fff",
+          fontWeight: "700"
+        },
+        icon: {
+          path: g.SymbolPath.CIRCLE,
+          scale: 10,
+          fillColor: "#3B7EA1",
+          fillOpacity: 1,
+          strokeColor: "#fff",
+          strokeWeight: 3
+        }
+      });
+      m.setCenter(ll);
+      m.setZoom(17);
+    }, () => {
+      p.flash && p.flash("位置情報を取得できませんでした(権限を確認してください)");
+    }, {
+      enableHighAccuracy: true,
+      timeout: 10000
+    });
+  };
 
   React.useEffect(() => {
     if (p.fitSeq) fit();
@@ -9905,6 +9996,10 @@ function ProgressMapTab(p) {
     style: S.mapSeg,
     title: "その日の作業に入っている圃場が全部入るまで寄せ直す"
   }, "⊙ 今日の圃場へ"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => apiRef.current && apiRef.current.locate && apiRef.current.locate(),
+    style: S.mapSeg,
+    title: "今いる場所を測って、そこへ地図を寄せる"
+  }, "📍 現在地"), /*#__PURE__*/React.createElement("button", {
     onClick: refresh,
     disabled: loading,
     style: {
@@ -9941,6 +10036,8 @@ function ProgressMapTab(p) {
     gmapKey: p.gmapKey,
     // v8.70: これを渡し忘れていたため、進捗地図だけ回せなかった
     gmapId: p.gmapId,
+    // 位置情報が取れないときの知らせに使う
+    flash: p.flash,
     areaUnitKey: p.areaUnitKey,
     style: fullMap ? {
       ...S.mapBox,
