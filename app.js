@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.74";
+const APP_VERSION = "v8.75";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -8884,9 +8884,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.74",
+    ver: "v8.75",
     date: "2026-08",
     isNew: true,
+    notes: ["🐞 進捗地図が、圃場タブを一度開くまで白いままになる不具合を直しました。地図を作る処理が1回限りで、最初の読み込みに失敗すると二度とやり直さなかったためです。圃場タブを開くとそちらのやり直しで地図の部品が揃い、戻ってきたときに初めて出ていました", "🗺 今は進捗地図自身がやり直します。読み込めなければ4秒後に、地図ができていなければ2.5秒後に、自分でもう一度作ります(無料地図・Googleマップの両方)"]
+  }, {
+    ver: "v8.74",
+    date: "2026-08",
     notes: [
       "🚦 作業タブを進捗地図に一本化しました。「📋 作業一覧 / 🚦 進捗地図」の切替をなくし、地図を常に出します",
       "🚁 実績入力も地図から開けます。圃場をタップして「🚁 実績入力」(入力済みなら「🚁 実績を直す」)。吹き出しから、追加・外す・散布済・実績入力の4つができます",
@@ -9489,6 +9493,15 @@ function ProgressLeafletCanvas(p) {
     }
   };
 
+  // Leaflet 版も同じ理由で、作れなかったときにやり直せるようにしておく
+  const [loadAttempt, setLoadAttempt] = React.useState(0);
+  React.useEffect(() => {
+    if (ready || mapRef.current) return;
+    const t = setTimeout(() => {
+      if (!mapRef.current) setLoadAttempt(n => n + 1);
+    }, 2500);
+    return () => clearTimeout(t);
+  }, [ready, loadAttempt]);
   React.useEffect(() => {
     if (!window.L || !containerRef.current || mapRef.current) return;
     const L = window.L;
@@ -9521,7 +9534,7 @@ function ProgressLeafletCanvas(p) {
       mapRef.current = null;
       if (p.apiRef) p.apiRef.current = null;
     };
-  }, []);
+  }, [loadAttempt]);
 
   // 「📍 現在地」。測って印を置き、そこへ寄せる。
   // 地図タブの現在地は押すたび出し入れするが、こちらは飛ぶだけにする。
@@ -9665,6 +9678,8 @@ function ProgressGoogleCanvas(p) {
   const [ready, setReady] = React.useState(false);
   const [zoom, setZoom] = React.useState(15);
   const [loadErr, setLoadErr] = React.useState(false);
+  // 地図を作り直すための回数。これを増やすと下の effect がもう一度走る
+  const [loadAttempt, setLoadAttempt] = React.useState(0);
 
   const fit = () => {
     const g = window.google && window.google.maps;
@@ -9741,7 +9756,31 @@ function ProgressGoogleCanvas(p) {
       mapRef.current = null;
       if (p.apiRef) p.apiRef.current = null;
     };
-  }, []);
+  }, [loadAttempt]);
+
+  // 読み込めなかったときのやり直し。
+  // v8.74 までは依存が [] だったので、最初の1回で失敗すると
+  // そのまま白いままだった。地図タブを開くとそちらのやり直しで
+  // window.google が入り、戻ってきたときに作り直されて初めて出る
+  // ―― これが「圃場タブを一度開かないと出ない」の正体だった。
+  React.useEffect(() => {
+    if (!loadErr) return;
+    const t = setTimeout(() => {
+      setLoadErr(false);
+      setLoadAttempt(n => n + 1);
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [loadErr]);
+
+  // 失敗としては返ってこないが、地図ができていないことがある
+  // (入れ物の幅がまだ決まっていない等)。黙って白いままにしない。
+  React.useEffect(() => {
+    if (ready) return;
+    const t = setTimeout(() => {
+      if (!mapRef.current) setLoadAttempt(n => n + 1);
+    }, 2500);
+    return () => clearTimeout(t);
+  }, [ready, loadAttempt]);
 
   // 「📍 現在地」。Leaflet版と同じく、飛ぶだけ。
   const gpsRef = React.useRef(null);
