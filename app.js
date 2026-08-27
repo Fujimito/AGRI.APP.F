@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.77";
+const APP_VERSION = "v8.78";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -827,6 +827,9 @@ function App() {
   const [gasUrl, setGasUrlState] = useState(() => localStorage.getItem("tankmix:gasurl") || "");
   const [recorder, setRecorderState] = useState(() => localStorage.getItem("tankmix:recorder") || "");
   const [teamCode, setTeamCodeState] = useState(() => localStorage.getItem("tankmix:teamcode") || "");
+  // この起動時のチームコード。変更を検知するためだけに使う。
+  // 入力欄は1文字ごとに onChange が飛ぶので、直前の値とは比べられない(v8.78)
+  const teamCodeAtLoad = React.useRef(localStorage.getItem("tankmix:teamcode") || "").current;
   // 共有のオン・オフ。オフにすると、この端末は送りも受け取りもしない。
   // 常時つないでいる接続は無く、送るときだけHTTPSで1回ずつ叩いているので、
   // アプリを閉じても「切断」は起きない。だから明示的な切替が要る。
@@ -955,9 +958,14 @@ function App() {
     setRecorderState(v);
     localStorage.setItem("tankmix:recorder", v.trim());
   };
+  // チームを変えたら「どこまで受け取ったか」を捨てる。
+  // pullat はチームに紐付いていないので、残すと新しいチームに
+  // 前からあるデータが since で弾かれて一生届かない(v8.78)
   const setTeamCode = v => {
+    const prev = localStorage.getItem("tankmix:teamcode") || "";
     setTeamCodeState(v);
     localStorage.setItem("tankmix:teamcode", v.trim());
+    if (prev !== v.trim()) localStorage.removeItem("tankmix:pullat");
   };
   const flash = msg => {
     setToast(msg);
@@ -2269,8 +2277,11 @@ function App() {
       ...w,
       pushedAt: done.get(w.id)
     } : w));
+    // 送った墓標だけを差し引く。全消しにすると、送信中に外したものの
+    // 削除が一緒に捨てられ、他端末に残り続ける(v8.78)
+    const sentIds = new Set(tombs.map(x => String(x.id)));
     const t = loadTombs();
-    t.works = [];
+    t.works = t.works.filter(x => !sentIds.has(String(x.id)));
     save(TOMB_KEY, t);
     if (!quiet) flash("進捗を送信しました(" + items.length + "件)");
     return true;
@@ -2307,8 +2318,11 @@ function App() {
       ...f,
       pushedAt: done.get(f.id)
     } : f));
+    // 送った墓標だけを差し引く。全消しにすると、送信中に外したものの
+    // 削除が一緒に捨てられ、他端末に残り続ける(v8.78)
+    const sentIds = new Set(tombs.map(x => String(x.id)));
     const t = loadTombs();
-    t.fields = [];
+    t.fields = t.fields.filter(x => !sentIds.has(String(x.id)));
     save(TOMB_KEY, t);
     if (!quiet) flash("圃場を送信しました(" + items.length + "件)");
     return true;
@@ -2369,8 +2383,11 @@ function App() {
     } : c);
     setChemMaster(nextC);
     save("tankmix:chemmaster", nextC);
+    // 送った墓標だけを差し引く。全消しにすると、送信中に外したものの
+    // 削除が一緒に捨てられ、他端末に残り続ける(v8.78)
+    const sentIds = new Set(tombs.map(x => String(x.id)));
     const t = loadTombs();
-    t.chems = [];
+    t.chems = t.chems.filter(x => !sentIds.has(String(x.id)));
     save(TOMB_KEY, t);
     if (!quiet) flash("薬剤を送信しました(" + items.length + "件)");
     return true;
@@ -2402,6 +2419,9 @@ function App() {
       const key = String(inc.id);
       const old = byId.get(key);
       if (inc.deleted) {
+        // 手元のほうが新しければ削除を適用しない。作業IDと薬剤IDは
+        // 内容から決まるので、入れ直したものを古い墓標が消してしまう(v8.78)
+        if (old && String(old.updatedAt || "") > String(inc.updatedAt || "")) return;
         if (old) {
           byId.delete(key);
           removed++;
@@ -2436,6 +2456,9 @@ function App() {
         const key = String(inc.id);
         const old = byW.get(key);
         if (inc.deleted) {
+          // 手元のほうが新しければ削除を適用しない。作業IDと薬剤IDは
+          // 内容から決まるので、入れ直したものを古い墓標が消してしまう(v8.78)
+          if (old && String(old.updatedAt || "") > String(inc.updatedAt || "")) return;
           if (old) {
             byW.delete(key);
             wChanged++;
@@ -2450,7 +2473,10 @@ function App() {
           // 台帳への送信状態はこの端末の事情。受信で上書きしない
           synced: old.synced,
           reportSynced: old.reportSynced,
-          unreportPending: old.unreportPending
+          unreportPending: old.unreportPending,
+          // 実績メモは作業シートに列が無く、itemToWork が必ず空を入れる。
+          // 自分が送った行が戻ってきたときに消えていた(v8.78)
+          reportMemo: inc.reportMemo || old.reportMemo || ""
         } : itemToWork(inc));
         wChanged++;
       });
@@ -2482,6 +2508,9 @@ function App() {
         const key = String(inc.id);
         const old = byC.get(key);
         if (inc.deleted) {
+          // 手元のほうが新しければ削除を適用しない。作業IDと薬剤IDは
+          // 内容から決まるので、入れ直したものを古い墓標が消してしまう(v8.78)
+          if (old && String(old.updatedAt || "") > String(inc.updatedAt || "")) return;
           if (old) {
             byC.delete(key);
             cChanged++;
@@ -3048,6 +3077,7 @@ function App() {
     setRecorder,
     teamCode,
     setTeamCode,
+    teamCodeAtLoad,
     shareOn,
     setShareOn,
     pullSec,
@@ -3324,7 +3354,7 @@ function CalcTab(p) {
   }, "倍")), /*#__PURE__*/React.createElement("div", {
     style: S.chemResult,
     className: "num"
-  }, c.valid && p.totalMl > 0 ? /*#__PURE__*/React.createElement("span", null, "→ ", /*#__PURE__*/React.createElement("strong", null, fmt(c.ml)), " mL") : /*#__PURE__*/React.createElement("span", {
+  }, c.valid && p.totalMl > 0 ? /*#__PURE__*/React.createElement("span", null, "→ ", /*#__PURE__*/React.createElement("strong", null, fmt(c.ml)), (agriAmountUnit(c.form) === "kg" ? " g" : " mL")) : /*#__PURE__*/React.createElement("span", {
     style: {
       color: "#aab5ac"
     }
@@ -3398,7 +3428,7 @@ function CalcTab(p) {
     className: "num"
   }, fmt(c.ml), /*#__PURE__*/React.createElement("small", {
     style: S.unit
-  }, " mL")))))), p.mixOrder.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, agriAmountUnit(c.form) === "kg" ? " g" : " mL")))))), p.mixOrder.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.orderBox
   }, /*#__PURE__*/React.createElement("div", {
     style: S.orderTitle
@@ -3420,7 +3450,7 @@ function CalcTab(p) {
     }
   }), /*#__PURE__*/React.createElement("strong", null, c.name || "(無名)"), /*#__PURE__*/React.createElement("span", {
     style: S.tdSub
-  }, formLabel(c.form), "・", fmt(c.ml), " mL"), /*#__PURE__*/React.createElement("span", {
+  }, formLabel(c.form), "・", fmt(c.ml), (agriAmountUnit(c.form) === "kg" ? " g" : " mL")), /*#__PURE__*/React.createElement("span", {
     style: {
       marginLeft: "auto",
       fontSize: 13,
@@ -4856,7 +4886,7 @@ function WorkTab(p) {
         marginLeft: "auto",
         fontWeight: 700
       }
-    }, fmt(c.ml), " mL"))), (w.reportMemo || w.memo) && /*#__PURE__*/React.createElement("div", {
+    }, fmt(c.ml), (agriAmountUnit(c.form) === "kg" ? " g" : " mL")))), (w.reportMemo || w.memo) && /*#__PURE__*/React.createElement("div", {
       style: S.memoLine
     }, "備考:", w.reportMemo || w.memo)));
   }))))); // 帯を外したので、その高さぶんの下余白(76px)も不要になった
@@ -8537,7 +8567,21 @@ function SettingsTab(p) {
     placeholder: "例:jupiter2026",
     style: S.fieldInput,
     autoCapitalize: "off"
-  }))), /*#__PURE__*/React.createElement("div", {
+  }), p.teamCodeAtLoad && p.teamCode.trim() && p.teamCodeAtLoad !== p.teamCode.trim() && /*#__PURE__*/React.createElement("div", {
+    // チームを変えても端末の圃場・作業・薬剤は残る。
+    // 残るだけならさして問題はないが、そのあと編集すると
+    // 自動送信に乗って新しいチームへ出ていく。勝手に消さず知らせるだけにする(v8.78)
+    style: {
+      marginTop: 8,
+      padding: "9px 11px",
+      borderRadius: 8,
+      background: "#FFF4D6",
+      border: "1px solid #E3B505",
+      fontSize: 12,
+      lineHeight: 1.6,
+      color: "#6B4E00"
+    }
+  }, "⚠ チームコードを「" + p.teamCodeAtLoad + "」から変えています。前のチームで登録した圃場・作業・薬剤はこの端末に残ったままで、そのまま編集すると新しいチームへ送られます。持ち込みたくなければ、共有をオフにするか、対象の圃場を先に外してください。"))), /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.smallLabel,
       marginTop: 12
@@ -8888,6 +8932,19 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
+    ver: "v8.78",
+    date: "2026-08",
+    isNew: true,
+    notes: [
+      "🐞 削除が他の端末に伝わらない不具合を直しました。送信中に外した圃場の削除が一緒に捨てられていました",
+      "🐞 外した作業を入れ直すと、古い削除が追いかけてきて消す不具合を直しました。薬剤を同じ名前で登録し直したときも同じでした",
+      "🐞 実績メモが、自分で送った行を受け取り直したときに空になる不具合を直しました",
+      "⚖ 水和剤・顕粒水和剤・水溶剤・粒剤などの固形剤を「g」表示にしました。これまで画面は「mL」、アグリノート転記は「kg」で食い違っていました(数値自体は同じです)",
+      "🐞 チームコードを変えたとき、新しいチームに前からあるデータが届かない不具合を直しました",
+      "⚠ チームコードを変えても、前のチームで登録した圃場・作業・薬剤は端末に残ります。設定タブに警告を出すようにしました(勝手には消しません)",
+      "🧪 検査を 137件 → 152件 に増やしました"
+    ]
+  }, {
     ver: "v8.77",
     date: "2026-08",
     isNew: true,

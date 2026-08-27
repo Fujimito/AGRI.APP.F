@@ -377,6 +377,43 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   });
 }
 
+// ── v8.78 で直した3件が戻っていないか ──────────────
+// いずれも App() の中のクロージャなので値を取り出せない。
+// 形だけを見る。形の検査は弱いが、全消しに戻したときには落ちる。
+{
+  eq("墓標を全消ししていない", /t\.(works|fields|chems) = \[\];/.test(src), false);
+  eq("墓標は送った分だけ引く", (src.match(/sentIds\.has\(String\(x\.id\)\)/g) || []).length, 3);
+  eq("墓標の送信分を拾う", (src.match(/const sentIds = new Set\(tombs\.map/g) || []).length, 3);
+
+  // 受信の削除の枝にも編集日時の比較があるか
+  const delBranches = src.split("if (inc.deleted) {").slice(1);
+  eq("削除の枝は3か所", delBranches.length, 3);
+  delBranches.forEach((b, i) => {
+    const head = b.slice(0, 400);
+    eq("削除の枝" + (i + 1) + " に編集日時の比較がある",
+      /old && String\(old\.updatedAt \|\| ""\) > String\(inc\.updatedAt \|\| ""\)/.test(head), true);
+  });
+
+  // 実績メモを受信で空にしない
+  eq("実績メモを保護している", /reportMemo: inc\.reportMemo \|\| old\.reportMemo/.test(src), true);
+
+  // 固形剤の単位。転記は kg なので画面は g にする
+  eq("剤型で単位を切り替えている",
+    (src.match(/agriAmountUnit\(c\.form\) === "kg" \? " g" : " mL"/g) || []).length, 4);
+  eq("剤型を見ない mL 直書きが残っていない",
+    /fmt\(c\.ml\), " mL"/.test(src), false);
+  // 結果表の small は fmt(c.ml) と離れた位置にあり、上の検査をすり抜けていた
+  eq("結果表の単位も剤型で切り替わる",
+    src.includes('}, agriAmountUnit(c.form) === "kg" ? " g" : " mL")))))), p.mixOrder'), true);
+  eq("固形剤は kg 判定", t.agriAmountUnit("wg"), "kg");
+  eq("乳剤は mL 判定", t.agriAmountUnit("ec"), "mL");
+
+  // チームを変えたら pullat を捨てる
+  eq("チーム変更で pullat を捨てる",
+    /if \(prev !== v\.trim\(\)\) localStorage\.removeItem\("tankmix:pullat"\)/.test(src), true);
+  eq("切替えの警告を出している", /teamCodeAtLoad !== p\.teamCode\.trim\(\)/.test(src), true);
+}
+
 // ── 版数の整合(sw.js と揃っているか) ───────────────────
 const sw = fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8");
 const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];
