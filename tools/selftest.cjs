@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "toMapStatus",
+  "PROGRESS_ORDER", "toMapStatus", "workIdFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -324,6 +324,34 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("進捗 mixed(調合済)は未実施", t.toMapStatus("mixed"), "planned");
   eq("進捗 planned は未実施", t.toMapStatus("planned"), "planned");
   eq("進捗 知らない状態は未実施に倒す", t.toMapStatus("なにか"), "planned");
+}
+
+// ── 作業のIDは「日付＋圃場ID」から決まる ────────────────
+// 端末ごとに採番していた頃は、AとBが同じ日に同じ圃場を登録すると
+// 同期後に2行に増えていた。同じ入力から必ず同じIDが出ることを見る。
+{
+  const A = t.workIdFor("2026-08-27", 1001, 1);
+  const B = t.workIdFor("2026-08-27", 1001, 1);
+  eq("作業ID 同じ日・同じ圃場なら同じID", A, B);
+  eq("作業ID 日が違えば別のID", t.workIdFor("2026-08-28", 1001, 1) !== A, true);
+  eq("作業ID 圃場が違えば別のID", t.workIdFor("2026-08-27", 1002, 1) !== A, true);
+  eq("作業ID 2枚目は別のID", t.workIdFor("2026-08-27", 1001, 2) !== A, true);
+  eq("作業ID 数値で返る", typeof A, "number");
+  eq("作業ID 安全な整数の範囲", Number.isSafeInteger(A) && A > 0, true);
+  // 数千件規模で衝突しないことを実際に見る
+  {
+    const seen = new Set();
+    let dup = 0;
+    for (let d = 1; d <= 60; d++) {
+      const day = "2026-" + String(1 + (d % 12)).padStart(2, "0") + "-" + String(1 + (d % 28)).padStart(2, "0");
+      for (let f = 1; f <= 200; f++) {
+        const id = t.workIdFor(day, 1700000000000 + f, 1);
+        if (seen.has(id)) dup++;
+        seen.add(id);
+      }
+    }
+    eq("作業ID 12000件作っても衝突なし", dup, 0);
+  }
 }
 
 // ── 作業を消す道は、必ず墓標を積んで送る ───────────

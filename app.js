@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.72";
+const APP_VERSION = "v8.73";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -648,6 +648,28 @@ const addTomb = (kind, ids) => {
 // 複数まとめて作るときIDが衝突し、別の圃場を書き換えてしまう事故が起きるため、
 // 必ず前回より大きい値を返すカウンタ方式にしている。
 let __lastId = 0;
+// 作業のIDを「日付＋圃場ID」から決める。
+// 端末ごとに Date.now() で採番していた頃は、AとBが同じ日に同じ圃場を
+// 登録すると別のIDになり、同期すると両方が残って2行に増えていた
+// (実測: 圃場１枚をA・Bで登録して同期 → 両端末とも「作業リスト(2件)」)。
+// 内容から決めれば、どの端末で作っても同じ１行になる。
+//
+// ★数値で作ること。Code.gs の workObj_ が id を Number(r[0]) で読むので、
+//   文字列のIDにすると受け取った側で NaN になる。
+// FNV-1a を時を変えて2本回し、53bit に収める。数千件規模で衝突する見込みはない。
+const workIdFor = (workDate, fieldId, nth) => {
+  const s = String(workDate) + ":" + String(fieldId) + (nth > 1 ? "#" + nth : "");
+  let h1 = 0x811c9dc5,
+    h2 = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193) >>> 0;
+    h2 = Math.imul(h2 ^ c, 0x85ebca6b) >>> 0;
+  }
+  // 0 は返さない(未設定と見分けがつかなくなる)
+  return (h1 % 0x200000) * 0x100000000 + h2 + 1;
+};
+
 const newId = () => {
   const t = Date.now();
   __lastId = t > __lastId ? t : __lastId + 1;
@@ -1238,7 +1260,18 @@ function App() {
     autoPushFields();
   };
   const makeWork = f => ({
-    id: newId(),
+    // 同じ日に同じ圃場をもう一度入れるとき(午前と午後で分けた等)は連番を足す。
+    // 使っているIDは works 全体から見る(他の日とはそもそも衝突しない)。
+    id: (() => {
+      const used = new Set(works.map(w => String(w.id)));
+      let nth = 1,
+        id = workIdFor(workDate, f.id, 1);
+      while (used.has(String(id)) && nth < 50) {
+        nth++;
+        id = workIdFor(workDate, f.id, nth);
+      }
+      return id;
+    })(),
     workDate,
     fieldId: f.id,
     snapshot: {
@@ -3481,7 +3514,9 @@ function WorkTab(p) {
   // 作業タブの表示切替。"list"=作業一覧 / "map"=進捗地図。
   // 作業日と集計は両方で共通に出し、その下だけを差し替える。
   // 選んだ表示は端末に残す(見たい側が人によって違うため)
-  const [workView, setWorkView] = useState(() => load("tankmix:workview", "list") === "map" ? "map" : "list");
+  // v8.73: 既定を進捗地図にした。現場で見たいのは「あと何枚か」で、
+  // それは地図の方が速い。一度切り替えればその端末に残る。
+  const [workView, setWorkView] = useState(() => load("tankmix:workview", "map") === "list" ? "list" : "map");
   const chooseView = v => {
     setWorkView(v);
     save("tankmix:workview", v);
@@ -3512,6 +3547,24 @@ function WorkTab(p) {
   // タンクの累計と補給位置。state に持たず毎回 pendingDayList から導出するので、
   // 並べ替え・圃場の追加削除・実績入力のたびに自動で計算し直される
   const tankPlan = planTankRefills(pendingDayList, p.tankCapacityL);
+  // 同じ圃場がこの日に2件以上入っていないか。
+  // v8.73 でIDを「日付＋圃場ID」から決めたので新しくは増えないが、
+  // それ以前に別の端末と重なった分は残っている。黙って消すのは危ないので、
+  // 気づけるように出して、外すかどうかは人が決める。
+  const dupNames = React.useMemo(() => {
+    const byField = new Map();
+    dayList.filter(w => !w.reported).forEach(w => {
+      const k = String(w.fieldId);
+      byField.set(k, (byField.get(k) || 0) + 1);
+    });
+    const names = [];
+    byField.forEach((n, k) => {
+      if (n < 2) return;
+      const w = dayList.find(x => String(x.fieldId) === k);
+      names.push((w && p.resolveWork ? p.resolveWork(w).name : w && w.snapshot && w.snapshot.name) || "(名前不明)");
+    });
+    return names;
+  }, [dayList]);
   // 本日の投下量(L/10a)がまだ計算されていない圃場がある場合は警告バナーを出す
   const needsRateWarning = pendingDayList.some(w => !(parseFloat(w.plannedL) > 0));
   // 順送りナビの対象。nextWork(一覧の印)は壊さず、飛ばした分だけを別に除く
@@ -3822,25 +3875,14 @@ function WorkTab(p) {
     onClick: () => setPrepOpen(true),
     style: S.dayChemStrip,
     className: "no-print"
-  }, "🧪 ", p.dayChems.map(c => (c.name || "(無名)") + (c.ratio ? " " + c.ratio + "倍" : "")).join(" ／ "))), workView === "map" ? /*#__PURE__*/React.createElement(ProgressMapTab, {
-    fields: p.fields,
-    works: p.works,
-    workDate: p.workDate,
-    recorder: p.recorder,
-    areaUnitKey: p.areaUnitKey,
-    fetchProgress: p.fetchProgress,
-    // v8.67: 散布済のチェックはこの地図が入り口になった
-    toggleDone: p.toggleDone,
-    // 地図タブと同じエンジン設定を使う(無料地図 / Googleマップ)
-    mapEngine: p.mapEngine,
-    gmapKey: p.gmapKey,
-    gmapId: p.gmapId,
-    pullSec: p.pullSec,
-    active: true
-  }) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+  }, "🧪 ", p.dayChems.map(c => (c.name || "(無名)") + (c.ratio ? " " + c.ratio + "倍" : "")).join(" ／ "))), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
-  }, collapsibleHead("⚙ 今日の準備", prepOpen, () => setPrepOpen(!prepOpen)), prepOpen && /*#__PURE__*/React.createElement(React.Fragment, null, dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
+  },
+  // v8.73: 一覧でも地図でも同じものを出す。投下量と薬剤はその日に
+  // 1度決めるだけなので、畳んでおけば地図を狭めない。
+  // 以前は一覧側にだけあり、投下量を入れるためだけに地図を閉じていた。
+  collapsibleHead("⚙ 今日の準備", prepOpen, () => setPrepOpen(!prepOpen)), prepOpen && /*#__PURE__*/React.createElement(React.Fragment, null, dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.rateBox
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -4225,7 +4267,43 @@ function WorkTab(p) {
       ...S.note,
       marginTop: 8
     }
-  }, "タップした順にこの日のリストへ追加されます。地区を選ぶとまとめて追加できます。圃場の登録・編集は「データベース」タブで行えます。")))))), /*#__PURE__*/React.createElement("section", {
+  }, "タップした順にこの日のリストへ追加されます。地区を選ぶとまとめて追加できます。圃場の登録・編集は「データベース」タブで行えます。")))))), workView === "map" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(ProgressMapTab, {
+    fields: p.fields,
+    works: p.works,
+    workDate: p.workDate,
+    recorder: p.recorder,
+    areaUnitKey: p.areaUnitKey,
+    fetchProgress: p.fetchProgress,
+    // v8.67: 散布済のチェックはこの地図が入り口になった
+    toggleDone: p.toggleDone,
+    // v8.73: 圃場の出し入れも地図からできるようにした
+    addWork: p.addWork,
+    removeWork: p.removeWork,
+    // 地図タブと同じエンジン設定を使う(無料地図 / Googleマップ)
+    mapEngine: p.mapEngine,
+    gmapKey: p.gmapKey,
+    gmapId: p.gmapId,
+    pullSec: p.pullSec,
+    active: true
+  }), /*#__PURE__*/React.createElement("section", {
+    // 地図を見ながら作業を終えられるよう、送信もここに置く。
+    // 中身の進捗表示や中止は一覧側のものを使うので、ここはボタン1つだけ。
+    style: {
+      ...S.card,
+      marginTop: 12
+    },
+    className: "no-print"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.syncPending(),
+    disabled: p.syncing || pending === 0,
+    style: {
+      ...S.primaryBtn,
+      width: "100%",
+      opacity: p.syncing || pending === 0 ? 0.4 : 1
+    }
+  }, p.syncing ? "送信中…" : pending === 0 ? "☁ 送信するものはありません" : "☁ " + dateLabel(p.workDate) + "の未送信 " + pending + "件を送信"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "送信されるのは", dateLabel(p.workDate), "ぶんだけです。送信済みは二重登録されません")) ) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -4238,7 +4316,20 @@ function WorkTab(p) {
     }
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, dateLabel(p.workDate), "の作業リスト(", dayList.length, "件)"), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, dateLabel(p.workDate), "の作業リスト(", dayList.length, "件)"), dupNames.length > 0 && /*#__PURE__*/React.createElement("div", {
+    // 同じ圃場が2件入っているときの知らせ。黙って片方を消すことはしない。
+    style: {
+      width: "100%",
+      background: "#FBF0EE",
+      border: "1.5px solid #E8C4BB",
+      borderRadius: 10,
+      padding: "8px 10px",
+      marginBottom: 10,
+      fontSize: 13,
+      fontWeight: 700,
+      color: "#8a2f1c"
+    }
+  }, "⚠ 同じ圃場が2件入っています：", dupNames.slice(0, 5).join("、"), dupNames.length > 5 ? "他" + (dupNames.length - 5) + "件" : "", "。別の端末と重なった可能性があります。どちらかを「外す」で外してください"), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       gap: 8,
@@ -8789,9 +8880,20 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.72",
+    ver: "v8.73",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "🐞 端末AとBが同じ日に同じ圃場を登録すると、共有後に同じ圃場が2行に増える不具合を直しました。作業のIDを端末ごとの時刻で採番していたためです。「日付＋圃場ID」から決めるようにしたので、どの端末で作っても同じ１行になります(共有をオフにしている間に両方で登録しても同じです)",
+      "⚠ それ以前に増えてしまった分は残るので、同じ圃場が2件入っているときは作業一覧に知らせを出します。どちらを残すかは人が決めてください(こちらで自動で消すことはしません)",
+      "🚦 進捗地図で圃場をタップすると、「＋ 本日の作業に追加」「− 本日の作業から外す」が出るようにしました。圃場の出し入れのためだけに作業一覧へ戻る必要がなくなります。押した直後に取り直すので、その場で色が変わります",
+      "⚙ 「⚙ 今日の準備」(投下量・本日の薬剤・圃場の追加)を、進捗地図のときでも上に出すようにしました。畳んであるので地図は狭くなりません",
+      "☁ 進捗地図の下にも送信ボタンを置きました。地図を見ながら作業を終えられます",
+      "🚦 作業タブの既定の表示を「🚦 進捗地図」にしました。実績入力・並べ替え・アグリノート転記は「📋 作業一覧」側に残してあります。一度切り替えれば、その端末には選んだ方が残ります"
+    ]
+  }, {
+    ver: "v8.72",
+    date: "2026-08",
     notes: ["🐞 「🗑 選択して削除」と「🗑 この日をすべて外す」で外した圃場が、進捗地図で未実施(赤)のままになる不具合を修正しました。スプレッドシート側の行を消す印(墓標)を積んでいなかったためです。1件ずつの「外す」には入っていたので、「外す」なら対象外(黄)に戻るのに「選択して削除」だと戻らない、という差になっていました", "🧪 同じ穴がまた開かないよう、作業を消す道が必ず墓標を積んで送ることを確かめるテストを追加しました(自己テスト 121件 → 130件)"]
   }, {
     ver: "v8.71",
@@ -9889,6 +9991,21 @@ function ProgressMapTab(p) {
     };
   }, [p.active, from, to, refreshMs]);
 
+  // 地図から圃場を出し入れした直後は、その場で取り直す。
+  // 送信(pushProgress)は非同期なので、少し待ってから取りに行く。
+  // 間に合わなかったときは次の拍子(自動取得の間隔)で揃う。
+  // これがないと、「外す」を押しても最大で間隔の分だけ赤いままに見える。
+  const dayWorkCount = (p.works || []).filter(w => w.workDate === from).length;
+  const firstCountRef = React.useRef(true);
+  React.useEffect(() => {
+    if (firstCountRef.current) {
+      firstCountRef.current = false;
+      return;
+    }
+    const t = setTimeout(() => refreshRef.current(), 1500);
+    return () => clearTimeout(t);
+  }, [dayWorkCount]);
+
   // ── 圃場ごとの状態を決める ──
   // サーバーから来た内容を土台にし、この端末にしかない未送信の実績を上へ重ねる。
   // 自分で入れた実績が、送信するまで地図に出ないのはかえって迷うため。
@@ -10114,12 +10231,19 @@ function ProgressMapTab(p) {
     // 作業に入っていない圃場をここから追加はしない。
     // 圃場の登録は作業一覧側の仕事のままにしてある。
     const sw = (p.works || []).find(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
-    if (!sw) return /*#__PURE__*/React.createElement("p", {
+    if (!sw) return p.addWork && /*#__PURE__*/React.createElement("button", {
+      // 地図を見ながら「ここも撒こう」となったときの道。
+      // v8.72 までは「作業一覧で追加してください」と案内するだけだった。
+      onClick: () => {
+        p.addWork(sel.field.id);
+        setSel(null);
+      },
       style: {
-        ...S.smallLabel,
-        marginTop: 12
+        ...S.primaryBtn,
+        width: "100%",
+        marginTop: 14
       }
-    }, "この日の作業に入っていません。「📋 作業一覧」で圃場を追加すると、ここでチェックを入れられます。");
+    }, "＋ 本日の作業に追加");
     if (!p.toggleDone) return null;
     return /*#__PURE__*/React.createElement("button", {
       onClick: () => {
@@ -10134,6 +10258,22 @@ function ProgressMapTab(p) {
         marginTop: 14
       }
     }, sw.reported ? "↩ 散布済を取り消す" : "✓ 散布済にする");
+  })(), (() => {
+    // 今日はやめるとなったとき。圃場マスタからは消さない。
+    const sw = (p.works || []).find(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
+    if (!sw || !p.removeWork) return null;
+    return /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        if (!confirm("「" + sel.field.name + "」をこの日の作業から外します。\n" + (sw.reported ? "入力済みの実績も消えます。\n" : "") + "(圃場マスタには残ります)")) return;
+        p.removeWork(sw.id);
+        setSel(null);
+      },
+      style: {
+        ...S.smallSecondary,
+        width: "100%",
+        marginTop: 8
+      }
+    }, "− 本日の作業から外す");
   })(), /*#__PURE__*/React.createElement("button", {
     onClick: () => setSel(null),
     style: {
