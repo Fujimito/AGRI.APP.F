@@ -414,6 +414,15 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("切替えの警告を出している", /teamCodeAtLoad !== p\.teamCode\.trim\(\)/.test(src), true);
 }
 
+// ── 進捗地図の吹き出しにナビがあるか ────────────────
+{
+  eq("吹き出しにナビを出している",
+    src.includes('naviLink(fieldCenter(sel.field)'), true);
+  eq("ナビの文言", src.includes("この圃場へナビ"), true);
+  // 座標が無いときは a ではなく button になる(href=\"#\" で飛ばないため)
+  eq("座標が無いときの逃げ道がある", /naviLink = \(center, style, label\) => center \?/.test(src), true);
+}
+
 // ── 版数の整合(sw.js と揃っているか) ───────────────────
 const sw = fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8");
 const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];
