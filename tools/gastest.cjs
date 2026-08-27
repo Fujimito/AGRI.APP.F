@@ -375,6 +375,47 @@ const F2 = {
   eq("進捗は作業IDを返す", pr.items.length > 0 && pr.items[0].id !== undefined, true);
 }
 
+// ── 14d. 30日を過ぎた削除済みの行を捨てる ────────────────
+// 削除しても行は残る(墓標)ので、放っておくと増え続ける。
+// 実データでは 999行中 354行 が中身の空いた削除済みの行だった。
+// ただし早く捨てすぎると、長く同期していない端末に削除が伝わらない。
+{
+  const ctx = makeContext({});
+  const mk = (id, upd) => ({
+    id, workDate: "2026-08-27", fieldId: 6000 + id, fieldName: "圃場",
+    status: "planned", plannedL: 0, sprayedL: 0, reportAreaA: "",
+    chemCount: 0, chemText: "", crop: "", areaA: 10, chems: [],
+    totalL: 0, waterMl: 0, memo: "", seq: 0, by: "x", deviceId: "d",
+    reportedAt: "", updatedAt: upd,
+  });
+  post(ctx, { type: "pushWorks", team: "Jupiter", items: [mk(1, "2026-08-01T00:00:00.000Z"), mk(2, "2026-08-01T00:00:00.000Z")] });
+  const sh = ctx.getWorkSheet_();
+  const atCol = 16;  // 更新日時(1始まり)
+  const delCol = 17; // 削除(1始まり)
+
+  // 1件を削除し、更新日時を 100日前に偽装する
+  post(ctx, { type: "pushWorks", team: "Jupiter",
+    items: [{ id: 1, deleted: true, updatedAt: "2026-08-27T00:00:00.000Z", fieldId: 0, workDate: "", status: "planned", by: "x", deviceId: "d" }] });
+  eq("削除しても行は残る", sh.getLastRow() - 1, 2);
+  const old = new Date(Date.now() - 100 * 86400000).toISOString();
+  sh.getRange(2, atCol, 1, 1).setValues([[old]]);
+  eq("削除の印が立っている", !!sh.getRange(2, delCol, 1, 1).getValues()[0][0], true);
+
+  // 次の送信で掃除される
+  const r = post(ctx, { type: "pushWorks", team: "Jupiter", items: [mk(3, "2026-08-27T02:00:00.000Z")] });
+  eq("掃除件数を返す", r.purged, 1);
+  eq("行が減っている", sh.getLastRow() - 1, 2);
+  const ids = [];
+  sh.getRange(2, 1, 2, 1).getValues().forEach(x => ids.push(String(x[0])));
+  eq("残ったのは2と3", ids.sort().join(","), "2,3");
+
+  // まだ新しい墓標は捨てない
+  post(ctx, { type: "pushWorks", team: "Jupiter",
+    items: [{ id: 2, deleted: true, updatedAt: "2026-08-27T03:00:00.000Z", fieldId: 0, workDate: "", status: "planned", by: "x", deviceId: "d" }] });
+  const r2 = post(ctx, { type: "pushWorks", team: "Jupiter", items: [mk(4, "2026-08-27T04:00:00.000Z")] });
+  eq("新しい墓標は残す", r2.purged, 0);
+}
+
 // ── 15. 作業日がシート側で日付に化けても、文字列で返す ──
 // スプレッドシートは "2026-08-26" を Date として解釈する。そのまま String() すると
 // "Wed Aug 26 2026 ..." になり、アプリの「その日の作業」に一致しなくなって

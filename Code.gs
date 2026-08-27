@@ -195,6 +195,13 @@ function getShareSheet_() {
 // 誤操作や古い端末からの保存で、他の人が入れた圃場・薬剤が一瞬で消えうる。
 // 上書き直前の値をここに積んでおけば、コピーして戻すだけで復旧できる。
 const SHARE_LOG_NAME = "_共有データ履歴";
+// 削除済みの行を残しておく日数。
+// 墓標(削除の印)は、他の端末が受け取るまで残しておく必要がある。
+// 早く捨てると、長く同期していない端末に削除が伝わらず、
+// その端末が古い作業を押し戻す。逆に残しすぎると行が増え続ける。
+// 30日 = 「1シーズンの間に一度も開かない端末はない」という前提。
+// この前提が崩れる使い方になったら伸ばすこと。
+const TOMB_KEEP_DAYS = 30;
 const SHARE_LOG_MAX = 200; // これを超えたら古い行から捨てる(シートの肥大化を防ぐ)
 
 function getShareLogSheet_() {
@@ -577,6 +584,28 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
   const width = headers.length;
   const last = sh.getLastRow();
   const rows = last >= 2 ? sh.getRange(2, 1, last - 1, width).getValues() : [];
+
+  // TOMB_KEEP_DAYS より古い削除済みの行を捨てる。
+  // 削除しても行は残る(墓標)ので、放っておくと増え続ける。
+  // 実データでは 999行中 354行が中身の空いた削除済みの行だった。
+  // 鍵を作る前に捨てる。あとで捨てると idx の添字がずれる。
+  const delCol = headers.indexOf("削除");
+  const atCol = headers.indexOf("更新日時");
+  let purged = 0;
+  if (delCol >= 0 && atCol >= 0) {
+    const limit = new Date(Date.now() - TOMB_KEEP_DAYS * 86400000).toISOString();
+    const kept = [];
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      // 更新日時はシート側で Date に化けることがある。ISO に揃えてから比べる
+      const v = r[atCol];
+      const iso = v instanceof Date ? v.toISOString() : String(v == null ? "" : v);
+      if (r[delCol] && iso && iso < limit) { purged++; continue; }
+      kept.push(r);
+    }
+    if (purged > 0) rows.length = 0, Array.prototype.push.apply(rows, kept);
+  }
+
   // 行を探す鍵は「チーム＋ID」。IDだけで探すと、
   // チームの違う行を上書きしてしまう。
   //  ・端末のチームコードを変えてから作業を触ると、前のチームの行が
@@ -622,12 +651,15 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
     }
   }
 
-  if (updated > 0 || added > 0) {
+  if (updated > 0 || added > 0 || purged > 0) {
     ensureRows_(sh, rows.length + 1);   // +1 は見出し行
     sh.getRange(2, 1, rows.length, width).setValues(rows);
+    // 掃除で減ったぶん、下に古い行が残る。行ごと消す
+    const extra = (last - 1) - rows.length;
+    if (extra > 0) sh.deleteRows(2 + rows.length, extra);
   }
   pushRecLogs_(logs);
-  return { ok: true, added: added, updated: updated, skipped: skipped, serverTime: at };
+  return { ok: true, added: added, updated: updated, skipped: skipped, purged: purged, serverTime: at };
 }
 
 // ── 差分取得:since より後にサーバーが書いた行だけ返す ──

@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.80";
+const APP_VERSION = "v8.81";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -8949,6 +8949,15 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
+    ver: "v8.81",
+    date: "2026-08",
+    isNew: true,
+    notes: [
+      "🧹 削除した作業・圃場・薬剤の行を、30日過ぎたらシートから捨てるようにしました。削除しても行自体は残る作りなので、放っておくと増え続けます",
+      "※ 30日は「削除を他の端末に伝えるための猟予期間」です。1ヶ月以上アプリを開かない端末があると、その端末が古い作業を押し戻すことがあります",
+      "🧪 GASの検査を 94件 → 100件 に増やしました"
+    ]
+  }, {
     ver: "v8.80",
     date: "2026-08",
     isNew: true,

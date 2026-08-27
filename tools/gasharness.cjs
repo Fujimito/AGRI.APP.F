@@ -107,7 +107,11 @@ class FakeSheet {
     this.rows[at] = values.map(coerce);
   }
   setFrozenRows(n) { this.frozen = n; }
-  deleteRows(start, count) { this.rows.splice(start - 1, count); }
+  deleteRows(start, count) {
+    // 実物は行ごと消すので、シートの行数そのものが減る
+    this.rows.splice(start - 1, count);
+    this.maxRows = Math.max(1, this.maxRows - count);
+  }
 }
 
 class FakeSpreadsheet {
