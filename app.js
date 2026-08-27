@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.67";
+const APP_VERSION = "v8.68";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -805,6 +805,16 @@ function App() {
   const [gasUrl, setGasUrlState] = useState(() => localStorage.getItem("tankmix:gasurl") || "");
   const [recorder, setRecorderState] = useState(() => localStorage.getItem("tankmix:recorder") || "");
   const [teamCode, setTeamCodeState] = useState(() => localStorage.getItem("tankmix:teamcode") || "");
+  // 共有のオン・オフ。オフにすると、この端末は送りも受け取りもしない。
+  // 常時つないでいる接続は無く、送るときだけHTTPSで1回ずつ叩いているので、
+  // アプリを閉じても「切断」は起きない。だから明示的な切替が要る。
+  // 記録は今までどおり端末に残り、オンに戻したときに未送信ぶんが送られる。
+  // 既定はオン(これまでの動きを変えないため)。
+  const [shareOn, setShareOnState] = useState(() => localStorage.getItem("tankmix:shareon") !== "0");
+  const setShareOn = v => {
+    setShareOnState(v);
+    localStorage.setItem("tankmix:shareon", v ? "1" : "0");
+  };
   const [syncing, setSyncing] = useState(false);
   // 農薬データ(IndexedDB)の状態。null = 未取り込み、{count, savedAt} = 取り込み済み
   const [chemDbInfo, setChemDbInfo] = useState(null);
@@ -1065,6 +1075,22 @@ function App() {
   useEffect(() => {
     autoPushWorks();
   }, [works]);
+  // 共有をオンに戻したら、オフの間にたまったぶんを追いかけて送り、
+  // ついでに取り直す。オンにした直後にsyncReady()を呼んでも、
+  // setStateはすぐには反映されないので、効果として shareOn の変化を見る。
+  const shareOnFirstRef = useRef(true);
+  useEffect(() => {
+    if (shareOnFirstRef.current) {
+      shareOnFirstRef.current = false;
+      return; // 起動時は他の効果が取りに行くので二重に走らせない
+    }
+    if (!shareOn) return;
+    autoPullAtRef.current = 0;
+    autoPushFields();
+    autoPushChems();
+    autoPushWorks();
+    autoPullShared();
+  }, [shareOn]);
   // その日の中で何番目かを作業自体に持たせる。
   // 送信のときに並びを数えるだけだと、入れ替えても作業の中身は
   // 変わらないので stampUpdated が時刻を進めず、未送信として拾われない。
@@ -1794,6 +1820,12 @@ function App() {
     return null;
   };
   const syncPending = async startFromId => {
+    // 共有オフの間は台帳への送信も止める。オフなのに一部だけ送られると
+    // 「オフにしたつもりが送られていた」になる
+    if (!shareOn) {
+      flash("共有がオフです。画面右上の「共有オフ」を押してオンにしてください");
+      return;
+    }
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
     if (!url || syncingRef.current) return;
     syncingRef.current = true;
@@ -1933,6 +1965,10 @@ function App() {
     }
   };
   const cloudSave = async () => {
+    if (!shareOn) {
+      flash(notReadyMsg());
+      return;
+    }
     if (!teamCode.trim()) {
       flash("チームコードを設定してください");
       return;
@@ -1975,6 +2011,10 @@ function App() {
     } else flash("保存に失敗しました。URLとGASの更新・デプロイを確認してください");
   };
   const cloudLoad = async () => {
+    if (!shareOn) {
+      flash(notReadyMsg());
+      return;
+    }
     if (!teamCode.trim()) {
       flash("チームコードを設定してください");
       return;
@@ -2026,9 +2066,13 @@ function App() {
   // 未送信 = updatedAt が pushedAt と食い違うもの
   const pendingOf = list => list.filter(x => x.updatedAt && x.updatedAt !== x.pushedAt);
   const syncReady = () => {
+    if (!shareOn) return false; // 共有オフ。送りも受け取りもしない
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
     return !!url && !!teamCode.trim();
   };
+  // 共有できない理由は2つあり、直し方が違う。まとめて同じ文言を出すと
+  // 「URLもチームも入っているのに送れない」の原因が分からなくなる。
+  const notReadyMsg = () => shareOn ? "送信先URLとチームコードを設定してください" : "共有がオフです。画面右上の「共有オフ」を押してオンにしてください";
   const fieldToItem = f => {
     const c = compactField(f);
     return {
@@ -2152,7 +2196,7 @@ function App() {
   const pushProgress = async opt => {
     const quiet = opt && opt.quiet;
     if (!syncReady()) {
-      if (!quiet) flash("送信先URLとチームコードを設定してください");
+      if (!quiet) flash(notReadyMsg());
       return false;
     }
     const cur = load("tankmix:works", []);
@@ -2195,7 +2239,7 @@ function App() {
   const pushFieldsSync = async opt => {
     const quiet = opt && opt.quiet;
     if (!syncReady()) {
-      if (!quiet) flash("送信先URLとチームコードを設定してください");
+      if (!quiet) flash(notReadyMsg());
       return false;
     }
     const cur = load("tankmix:fields", []);
@@ -2256,7 +2300,7 @@ function App() {
   const pushChemsSync = async opt => {
     const quiet = opt && opt.quiet;
     if (!syncReady()) {
-      if (!quiet) flash("送信先URLとチームコードを設定してください");
+      if (!quiet) flash(notReadyMsg());
       return false;
     }
     const cur = load("tankmix:chemmaster", []);
@@ -2295,7 +2339,7 @@ function App() {
   const pullSharedSync = async opt => {
     const quiet = opt && opt.quiet;
     if (!syncReady()) {
-      if (!quiet) flash("送信先URLとチームコードを設定してください");
+      if (!quiet) flash(notReadyMsg());
       return false;
     }
     const since = localStorage.getItem("tankmix:pullat") || "";
@@ -2426,7 +2470,7 @@ function App() {
   // 受け取った内容で埋もれたまま送られない
   const syncShared = async () => {
     if (!syncReady()) {
-      flash("送信先URLとチームコードを設定してください");
+      flash(notReadyMsg());
       return;
     }
     setSyncing(true);
@@ -2703,11 +2747,11 @@ function App() {
     const onOnline = () => {
       const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
       const pend = load("tankmix:works", []).filter(w => w.workDate === workDate && isPending(w)).length;
-      if (url && pend > 0) syncPending();
+      if (shareOn && url && pend > 0) syncPending();
     };
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
-  }, [workDate]);
+  }, [workDate, shareOn]);
 
   // 見た目の表示用。上の効果は「戻ったときに送る」ためのもので、
   // 役割が違うので別に持つ。
@@ -2772,6 +2816,23 @@ function App() {
     },
     title: online ? "電波あり。共有できます" : "圏外です。記録は端末に残り、電波が戻ってから送られます"
   }, online ? "● オンライン" : "○ オフライン"), /*#__PURE__*/React.createElement("button", {
+    // 共有の入切。設定タブの奥にあると、散布中に切りたくなったときに
+    // たどり着けない。オフのときだけ赤く目立たせる(送っていない状態が
+    // 見た目で分かるように)。
+    onClick: () => {
+      const next = !shareOn;
+      setShareOn(next);
+      flash(next ? "☁ 共有をオンにしました。未送信ぶんを送ります" : "🚫 共有をオフにしました。記録はこの端末だけに残ります");
+    },
+    style: {
+      ...S.hdrChip,
+      background: shareOn ? "#F1F5F2" : "#F6E4E0",
+      color: shareOn ? "#3E5147" : "#9A3B26",
+      borderColor: shareOn ? "#D8E0D2" : "#E7C3BA",
+      cursor: "pointer"
+    },
+    title: shareOn ? "共有オン。押すとオフになり、この端末は送りも受け取りもしなくなります" : "共有オフ。押すとオンになり、たまっている未送信ぶんが送られます"
+  }, shareOn ? "☁ 共有オン" : "🚫 共有オフ"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setTab("settings"),
     style: {
       ...S.hdrChip,
@@ -2938,6 +2999,8 @@ function App() {
     setRecorder,
     teamCode,
     setTeamCode,
+    shareOn,
+    setShareOn,
     pullSec,
     setPullSec,
     authKey,
@@ -6595,12 +6658,14 @@ function GoogleMapTab(p) {
         zoom: z,
         mapTypeId: "hybrid",
         // マップIDが入っているときだけベクター地図にする。
-        // ベクターにすると、指二本での回転と傾けが使える。
-        // この2つのオプションはベクター地図のときだけ効く(公式)。
+        // ベクターにすると、指二本での回転が使える。
+        // headingInteractionEnabled はベクター地図のときだけ効く(公式)。
+        // 傾け(tilt)はここでは指定しない。公式によれば、コードで書かなければ
+        // マップID側の設定が使われる。Cloud Console のチェックを
+        // 付け外ししたとおりに効くようにしてある。
         ...(p.gmapId ? {
           mapId: p.gmapId,
-          headingInteractionEnabled: true,
-          tiltInteractionEnabled: true
+          headingInteractionEnabled: true
         } : {}),
         mapTypeControl: false,
         streetViewControl: false,
@@ -8298,7 +8363,31 @@ function SettingsTab(p) {
     "aria-label": "削除"
   }, "✕")))))), /*#__PURE__*/React.createElement("section", {
     style: S.card
-  }, collapsibleHead("送信・共有", openSec.send, () => toggleSec("send")), openSec.send && /*#__PURE__*/React.createElement(React.Fragment, null, secHead("１　つなぎ先", true), /*#__PURE__*/React.createElement("label", {
+  }, collapsibleHead("送信・共有", openSec.send, () => toggleSec("send")), openSec.send && /*#__PURE__*/React.createElement(React.Fragment, null, secHead("０　共有の入切", true), /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 10,
+      flexWrap: "wrap",
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.setShareOn(!p.shareOn),
+    style: {
+      ...S.secondaryBtn,
+      background: p.shareOn ? "#2F6B45" : "#9A3B26",
+      color: "#fff",
+      borderColor: "transparent",
+      minWidth: 150
+    }
+  }, p.shareOn ? "☁ 共有オン" : "🚫 共有オフ"), /*#__PURE__*/React.createElement("span", {
+    style: {
+      fontSize: 12,
+      color: "#5b6b60"
+    }
+  }, "画面右上のボタンと同じものです")), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "オフにすると、この端末は送りも受け取りもしません。記録は今までどおり端末に残り、オンに戻したときにまとめて送られます。アプリを閉じてもこの設定は残ります(常時つないでいる接続は無く、送るときだけ通信しているため、閉じても切断は起きません)。"), secHead("１　つなぎ先"), /*#__PURE__*/React.createElement("label", {
     style: S.areaField
   }, /*#__PURE__*/React.createElement("span", {
     style: S.smallLabel
@@ -8585,7 +8674,7 @@ function SettingsTab(p) {
     }
   }, "✓ 保存済み"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "地図を指二本で回したいときだけ入れてください。Google Cloud Console の「マップの管理」でマップIDを新しく作り、種類に「ベクター」を選んで「回転」と「傾斜」を有効にしたものを貼り付けます(APIキーと同じプロジェクトで作ってください)。空のままなら今までどおりの地図で、回転はできません。※ 衛星写真をベクター地図で出したときの見え方はこちらでは未検証です。合わなければこの欄を空にして保存すれば戻ります。無料地図(国土地理院)側は回転に対応していません。")))), /*#__PURE__*/React.createElement("section", {
+  }, "地図を指二本で回したいときだけ入れてください。Google Cloud Console の「マップの管理」でマップIDを新しく作り、種類に「ベクター」を選んで「ローテーション」にチェックを入れたものを貼り付けます(「チルト」は入っていても入っていなくても構いません。このチェックのとおりに効きます)(APIキーと同じプロジェクトで作ってください)。空のままなら今までどおりの地図で、回転はできません。※ 衛星写真をベクター地図で出したときの見え方はこちらでは未検証です。合わなければこの欄を空にして保存すれば戻ります。無料地図(国土地理院)側は回転に対応していません。")))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("散布タンク", openSec.tank, () => toggleSec("tank")), openSec.tank && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("label", {
     style: S.areaField
@@ -8684,13 +8773,17 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.67",
+    ver: "v8.68",
     date: "2026-08",
     isNew: true,
+    notes: ["☁ 画面右上に共有の入切ボタンを付けました。「☁ 共有オン / 🚫 共有オフ」を押すだけで切り替わります。設定タブの奥まで行かなくても、散布中にその場で止められます(設定タブの「送信・共有」にも同じボタンがあります)", "🚫 オフの間は、この端末は送りも受け取りもしません。圃場・薬剤・作業予定の自動共有、進捗の送信、台帳への「☁ 全データを送信」、古い方式の「☁↑ 端末→共有へ保存 / ☁↓ 共有→端末へ読込」がすべて止まります。記録は今までどおり端末に残ります", "☁ オンに戻すと、オフの間にたまった未送信ぶんを自動で送り、最新を取り直します", "⚙ この設定は端末に残ります。アプリを閉じても消えません。そもそも常時つないでいる接続は無く、送るときだけ通信しているので、アプリを閉じても共有が切れることはありません(閉じている間は自動の送受信が動かないだけです)"]
+  }, {
+    ver: "v8.67",
+    date: "2026-08",
     notes: [
       "🚦 散布済のチェックを「🚦 進捗地図」に移しました。地図で圃場をタップして「✓ 散布済にする」を押すとその場で緑に変わります。もう一度タップすれば「↩ 散布済を取り消す」。実散布量を入れてあるときだけ確認を出します",
       "📋 作業一覧の行頭にあった散布済チェックを外し、一覧側は実績入力だけに戻しました。その日の作業に入っていない圃場は地図からチェックできません(圃場の追加はこれまでどおり作業一覧側です)",
-      "🗺 地図を指二本で回せるようにしました。⚙設定タブの地図の欄に「マップID」を追加しています。Google Cloud Console の「マップの管理」で種類「ベクター」のマップIDを作り、「回転」と「傾斜」を有効にして貼り付けてください(APIキーだけでは回せません)。空のままなら今までどおりです。※ 衛星写真をベクター地図で出したときの見え方はこちらでは未検証です",
+      "🗺 地図を指二本で回せるようにしました。⚙設定タブの地図の欄に「マップID」を追加しています。Google Cloud Console の「マップの管理」で種類「ベクター」のマップIDを作り、「ローテーション」にチェックを入れて貼り付けてください(APIキーだけでは回せません)。空のままなら今までどおりです。※ 衛星写真をベクター地図で出したときの見え方はこちらでは未検証です",
       "🧭 v8.65 の「🧭 進行方向」を外しました。地図の入れ物をCSSで回していただけで、Leaflet も Google も回転を知らないため、回した状態では地図を指で動かせませんでした(実測: 北が上なら右へ400pxで中央タイルが 5/27/12 → 5/26/12、90°回すと動かない)"
     ]
   }, {
@@ -9420,12 +9513,14 @@ function ProgressGoogleCanvas(p) {
         zoom: withPoly.length ? 16 : 5,
         mapTypeId: "hybrid",
         // マップIDが入っているときだけベクター地図にする。
-        // ベクターにすると、指二本での回転と傾けが使える。
-        // この2つのオプションはベクター地図のときだけ効く(公式)。
+        // ベクターにすると、指二本での回転が使える。
+        // headingInteractionEnabled はベクター地図のときだけ効く(公式)。
+        // 傾け(tilt)はここでは指定しない。公式によれば、コードで書かなければ
+        // マップID側の設定が使われる。Cloud Console のチェックを
+        // 付け外ししたとおりに効くようにしてある。
         ...(p.gmapId ? {
           mapId: p.gmapId,
-          headingInteractionEnabled: true,
-          tiltInteractionEnabled: true
+          headingInteractionEnabled: true
         } : {}),
         mapTypeControl: false,
         streetViewControl: false,
