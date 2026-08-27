@@ -309,6 +309,34 @@ const F2 = {
   eq("壊れた薬剤JSONは空配列にする", [again.ok, again.works[0].chems], [true, []]);
 }
 
+// ── 14b. チームが違えば、同じIDでも別の行 ─────────────
+// v8.73 で作業IDを「日付＋圃場ID」から決めたため、別のチームが
+// 同じ日に同じ圃場を入れるとIDが一致する。行をIDだけで探していると
+// 互いの行を上書きし、チーム欄ごと奇麗に入れ替わる。
+// 端末のチームコードを変えたときも同じことが起きる(実測で確認済み)。
+{
+  const ctx = makeContext({});
+  const mk = (id, name) => ({
+    id, workDate: "2026-08-26", fieldId: 1001, fieldName: name,
+    status: "planned", plannedL: 0, sprayedL: 0, reportAreaA: "",
+    chemCount: 0, chemText: "", crop: "", areaA: 10, chems: [],
+    totalL: 0, waterMl: 0, memo: "", seq: 0, by: "x", deviceId: "d",
+    reportedAt: "", updatedAt: "2026-08-26T01:00:00.000Z",
+  });
+  post(ctx, { type: "pushWorks", team: "Jupiter", items: [mk(777, "\u5609\u5cf61")] });
+  post(ctx, { type: "pushWorks", team: "Saturn", items: [mk(777, "\u6ce2\u91ce1")] });
+
+  const jup = post(ctx, { type: "pull", team: "Jupiter", since: "" });
+  const sat = post(ctx, { type: "pull", team: "Saturn", since: "" });
+  eq("チーム Jupiter の作業は1件", jup.works.length, 1);
+  eq("チーム Saturn の作業は1件", sat.works.length, 1);
+  eq("Jupiter の中身が残っている", (jup.works[0] || {}).fieldName, "\u5609\u5cf61");
+  eq("Saturn の中身が残っている", (sat.works[0] || {}).fieldName, "\u6ce2\u91ce1");
+  const prJ = post(ctx, { type: "progress", team: "Jupiter", date: "2026-08-26" });
+  const prS = post(ctx, { type: "progress", team: "Saturn", date: "2026-08-26" });
+  eq("進捗もチームごとに1件ずつ", [prJ.items.length, prS.items.length], [1, 1]);
+}
+
 // ── 15. 作業日がシート側で日付に化けても、文字列で返す ──
 // スプレッドシートは "2026-08-26" を Date として解釈する。そのまま String() すると
 // "Wed Aug 26 2026 ..." になり、アプリの「その日の作業」に一致しなくなって

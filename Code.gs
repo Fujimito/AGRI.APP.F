@@ -561,8 +561,17 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
   const width = headers.length;
   const last = sh.getLastRow();
   const rows = last >= 2 ? sh.getRange(2, 1, last - 1, width).getValues() : [];
+  // 行を探す鍵は「チーム＋ID」。IDだけで探すと、
+  // チームの違う行を上書きしてしまう。
+  //  ・端末のチームコードを変えてから作業を触ると、前のチームの行が
+  //    新しいチームへ移ってしまう(実測で確認)
+  //  ・作業IDは v8.73 から「日付＋圃場ID」で決まるので、別のチームが
+  //    同じ日に同じ圃場を入れるとIDが一致し、互いに消し合う
+  // チームコードはどのシートも列 1。
+  const TEAM_COL = 1;
+  const keyOf_ = (t, id) => String(t == null ? "" : t) + "\u241F" + String(id);
   const idx = {};
-  for (let i = 0; i < rows.length; i++) idx[String(rows[i][idCol])] = i;
+  for (let i = 0; i < rows.length; i++) idx[keyOf_(rows[i][TEAM_COL], rows[i][idCol])] = i;
 
   const at = isoNow_();
   const logs = [];
@@ -574,7 +583,7 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
       skipped++;
       continue;
     }
-    const key = String(item.id);
+    const key = keyOf_(team, item.id);
     const values = toRow(item, team, at);
     if (key in idx) {
       const i = idx[key];
