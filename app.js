@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.69";
+const APP_VERSION = "v8.70";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2973,6 +2973,9 @@ function App() {
       display: "none"
     }
   }, /*#__PURE__*/React.createElement(MapTabRouter, {
+    // マップIDを入れ替えたら地図を作り直す。
+    // ラスターかベクターかは地図を作るときに決まり、あとから変えられない。
+    key: gmapId || "raster",
     fields,
     addFieldWithPolygon,
     upsertField,
@@ -8778,9 +8781,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.69",
+    ver: "v8.70",
     date: "2026-08",
     isNew: true,
+    notes: ["🗺 作業タブの進捗地図だけマップIDが効いていなかったのを直しました。地図タブと進捗地図は中身が別の地図で、v8.68 では進捗地図側へマップIDを渡し忘れていたため、こちらだけ回せませんでした", "🗺 マップIDを保存した時点で両方の地図を作り直すようにしました。地図は一度作るとラスターかベクターかを変えられないため、これまでは保存してもアプリを読み直すまで回せませんでした"]
+  }, {
+    ver: "v8.69",
+    date: "2026-08",
     notes: ["🚦 共有をオフにしているとき、進捗地図に「設定タブで『送信先URL』と『チームコード』を入れてください」と出ていたのを直しました。どちらも入っているのに設定タブへ案内される状態で、原因にたどり着けませんでした。今は「共有がオフです」と出ます", "⚙ 共有オフのときの案内文が2か所に別々に書かれていたのを1か所にまとめました(片方だけ直して文言がずれるのを防ぐため)"]
   }, {
     ver: "v8.68",
@@ -9921,7 +9928,10 @@ function ProgressMapTab(p) {
   }, /*#__PURE__*/React.createElement(useGoogle && p.gmapKey ? ProgressGoogleCanvas : ProgressLeafletCanvas, {
     // 地図の実体を入れ替える。key を分けておかないと、設定を切り替えたとき
     // React が同じ位置のコンポーネントとして使い回し、前の地図のDOMが残る
-    key: useGoogle && p.gmapKey ? "google" : "leaflet",
+    // マップIDを入れ替えたときも作り直させる。
+    // 地図は一度作るとラスターかベクターかが変わらないので、
+    // key を変えないと保存しても回せないままになる。
+    key: (useGoogle && p.gmapKey ? "google" : "leaflet") + ":" + (p.gmapId || ""),
     fields: p.fields,
     statusByField,
     onlyTarget,
@@ -9929,6 +9939,8 @@ function ProgressMapTab(p) {
     apiRef,
     fitSeq,
     gmapKey: p.gmapKey,
+    // v8.70: これを渡し忘れていたため、進捗地図だけ回せなかった
+    gmapId: p.gmapId,
     areaUnitKey: p.areaUnitKey,
     style: fullMap ? {
       ...S.mapBox,
