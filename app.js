@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.75";
+const APP_VERSION = "v8.76";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -3871,7 +3871,7 @@ function WorkTab(p) {
   // v8.73: 一覧でも地図でも同じものを出す。投下量と薬剤はその日に
   // 1度決めるだけなので、畳んでおけば地図を狭めない。
   // 以前は一覧側にだけあり、投下量を入れるためだけに地図を閉じていた。
-  collapsibleHead("⚙ 今日の準備", prepOpen, () => setPrepOpen(!prepOpen)), prepOpen && /*#__PURE__*/React.createElement(React.Fragment, null, dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
+  collapsibleHead("🌾 本日の作業圃場登録", prepOpen, () => setPrepOpen(!prepOpen)), prepOpen && /*#__PURE__*/React.createElement(React.Fragment, null, dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.rateBox
   }, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
@@ -4184,7 +4184,17 @@ function WorkTab(p) {
     style: S.prepBlock
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "圃場を追加"), /*#__PURE__*/React.createElement(React.Fragment, null, (p.areas || []).length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, "圃場を追加"), dayList.length > 0 && /*#__PURE__*/React.createElement("button", {
+    // v8.76: 一覧を畳んだので、全部やり直したいときに
+    // 一覧を開かせるのはおかしい。登録する場所と同じところに置く。
+    onClick: deleteAllToday,
+    style: {
+      ...S.smallDanger,
+      width: "100%",
+      padding: "11px 0",
+      marginBottom: 10
+    }
+  }, "🗑 この日をすべて外す(" + dayList.length + "件)"), /*#__PURE__*/React.createElement(React.Fragment, null, (p.areas || []).length > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       flexWrap: "wrap",
@@ -4381,15 +4391,9 @@ function WorkTab(p) {
       padding: "13px 0",
       opacity: selected.length === 0 ? 0.4 : 1
     }
-  }, "🗑 選択した", selected.length, "件を外す"), /*#__PURE__*/React.createElement("button", {
-    onClick: deleteAllToday,
-    style: {
-      ...S.smallDanger,
-      padding: "13px 0"
-    }
-  }, "🗑 この日をすべて外す"))), dayList.length === 0 && /*#__PURE__*/React.createElement("p", {
+  }, "🗑 選択した", selected.length, "件を外す"))), dayList.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "この日の作業はまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "上の「⚙ 今日の準備」→「圃場を追加」で追加するか、データベースタブで圃場を登録してください。"), dayList.length > 1 && !groupMode && /*#__PURE__*/React.createElement("p", {
+  }, "この日の作業はまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "上の「🌾 本日の作業圃場登録」→「圃場を追加」で追加するか、地図で圃場をタップして「＋ 本日の作業に追加」を押してください。"), dayList.length > 1 && !groupMode && /*#__PURE__*/React.createElement("p", {
     style: {
       ...S.note,
       marginTop: 0,
@@ -8884,9 +8888,13 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.75",
+    ver: "v8.76",
     date: "2026-08",
     isNew: true,
+    notes: ["🌾 「⚙ 今日の準備」を「🌾 本日の作業圃場登録」に名前を変えました", "🗑 「🗑 この日をすべて外す」を、作業リストの中から「🌾 本日の作業圃場登録」の中へ移しました。登録する場所とやり直す場所が同じになります。一覧を開く必要はありません"]
+  }, {
+    ver: "v8.75",
+    date: "2026-08",
     notes: ["🐞 進捗地図が、圃場タブを一度開くまで白いままになる不具合を直しました。地図を作る処理が1回限りで、最初の読み込みに失敗すると二度とやり直さなかったためです。圃場タブを開くとそちらのやり直しで地図の部品が揃い、戻ってきたときに初めて出ていました", "🗺 今は進捗地図自身がやり直します。読み込めなければ4秒後に、地図ができていなければ2.5秒後に、自分でもう一度作ります(無料地図・Googleマップの両方)"]
   }, {
     ver: "v8.74",
@@ -8905,7 +8913,7 @@ function SettingsTab(p) {
       "🐞 端末AとBが同じ日に同じ圃場を登録すると、共有後に同じ圃場が2行に増える不具合を直しました。作業のIDを端末ごとの時刻で採番していたためです。「日付＋圃場ID」から決めるようにしたので、どの端末で作っても同じ１行になります(共有をオフにしている間に両方で登録しても同じです)",
       "⚠ それ以前に増えてしまった分は残るので、同じ圃場が2件入っているときは作業一覧に知らせを出します。どちらを残すかは人が決めてください(こちらで自動で消すことはしません)",
       "🚦 進捗地図で圃場をタップすると、「＋ 本日の作業に追加」「− 本日の作業から外す」が出るようにしました。圃場の出し入れのためだけに作業一覧へ戻る必要がなくなります。押した直後に取り直すので、その場で色が変わります",
-      "⚙ 「⚙ 今日の準備」(投下量・本日の薬剤・圃場の追加)を、進捗地図のときでも上に出すようにしました。畳んであるので地図は狭くなりません",
+      "⚙ 「🌾 本日の作業圃場登録」(投下量・本日の薬剤・圃場の追加)を、進捗地図のときでも上に出すようにしました。畳んであるので地図は狭くなりません",
       "☁ 進捗地図の下にも送信ボタンを置きました。地図を見ながら作業を終えられます",
       "🚦 作業タブの既定の表示を「🚦 進捗地図」にしました。実績入力・並べ替え・アグリノート転記は「📋 作業一覧」側に残してあります。一度切り替えれば、その端末には選んだ方が残ります"
     ]
