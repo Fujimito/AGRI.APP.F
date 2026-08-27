@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.73";
+const APP_VERSION = "v8.74";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -3478,6 +3478,9 @@ function TankViz({
 // ═══════════════════ 作業・記録タブ ═══════════════════
 function WorkTab(p) {
   const [query, setQuery] = useState("");
+  // 地図の下の「作業リスト」を開いているか。
+  // 既定は閉じておく。現場では地図だけ見ればよい。
+  const [listOpen, setListOpen] = useState(false);
   const [reportingId, setReportingId] = useState(null);
   const [agriOpen, setAgriOpen] = useState(false); // アグリノート転記ビュー
   const [repFlights, setRepFlights] = useState([""]);
@@ -3516,11 +3519,10 @@ function WorkTab(p) {
   // 選んだ表示は端末に残す(見たい側が人によって違うため)
   // v8.73: 既定を進捗地図にした。現場で見たいのは「あと何枚か」で、
   // それは地図の方が速い。一度切り替えればその端末に残る。
-  const [workView, setWorkView] = useState(() => load("tankmix:workview", "map") === "list" ? "list" : "map");
-  const chooseView = v => {
-    setWorkView(v);
-    save("tankmix:workview", v);
-  };
+  // v8.74: 作業一覧を別の表示としてはやめ、地図を常に主にした。
+  // 大きな集計タイルは一覧のときだけ出していたもの。
+  // 戻したくなったときのために形は残してある。
+  const workView = "map";
   // 「今日の準備」は既定で畳む。まだ圃場が入っていない日は開いた状態で始める
   const [prepOpen, setPrepOpen] = useState(() => p.works.filter(w => w.workDate === p.workDate).length === 0);
   const [pickForDay, setPickForDay] = useState(false);
@@ -3767,20 +3769,7 @@ function WorkTab(p) {
       ...S.smallSecondary,
       whiteSpace: "nowrap"
     }
-  }, "今日")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.segWrap,
-      marginTop: 12
-    },
-    className: "no-print"
-  }, [["list", "📋 作業一覧"], ["map", "🚦 進捗地図"]].map(v => /*#__PURE__*/React.createElement("button", {
-    key: v[0],
-    onClick: () => chooseView(v[0]),
-    style: {
-      ...S.seg,
-      ...(workView === v[0] ? S.segOn : {})
-    }
-  }, v[1]))), workView === "list" ? /*#__PURE__*/React.createElement("div", {
+  }, "今日")), workView === "list" ? /*#__PURE__*/React.createElement("div", {
     style: S.totalsBar,
     className: "num"
   },/*#__PURE__*/React.createElement("div", {
@@ -3832,10 +3821,10 @@ function WorkTab(p) {
   // 作業一覧向けの部品は、進捗地図のときは出さない。地図を見たいときに
   // 地図が画面の下半分へ押し出されていた。投下量の警告も、直す先の
   // 「今日の準備」が一覧側にしかないので揃える。
-  workView === "list" && needsRateWarning &&/*#__PURE__*/React.createElement("div", {
+  needsRateWarning &&/*#__PURE__*/React.createElement("div", {
     style: S.rateWarnBand,
     className: "no-print"
-  }, /*#__PURE__*/React.createElement("span", null, "⚠"), /*#__PURE__*/React.createElement("span", null, "本日の投下量(L/10a)が未入力の圃場があります。下の欄に入力して「面積から一括計算」を押してください。")), workView === "list" && dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, /*#__PURE__*/React.createElement("span", null, "⚠"), /*#__PURE__*/React.createElement("span", null, "本日の投下量(L/10a)が未入力の圃場があります。下の欄に入力して「面積から一括計算」を押してください。")), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.naviPanel,
     className: "no-print"
   }, naviNext ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
@@ -3871,7 +3860,7 @@ function WorkTab(p) {
   }, "↩ 飛ばした圃場を戻す"))), /*#__PURE__*/React.createElement(WorkProgress, {
     total: dayList.length,
     done: dayList.length - pendingDayList.length
-  }), workView === "list" && p.dayChems.length > 0 && /*#__PURE__*/React.createElement("button", {
+  }), p.dayChems.length > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => setPrepOpen(true),
     style: S.dayChemStrip,
     className: "no-print"
@@ -4267,7 +4256,7 @@ function WorkTab(p) {
       ...S.note,
       marginTop: 8
     }
-  }, "タップした順にこの日のリストへ追加されます。地区を選ぶとまとめて追加できます。圃場の登録・編集は「データベース」タブで行えます。")))))), workView === "map" ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(ProgressMapTab, {
+  }, "タップした順にこの日のリストへ追加されます。地区を選ぶとまとめて追加できます。圃場の登録・編集は「データベース」タブで行えます。")))))), /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(ProgressMapTab, {
     fields: p.fields,
     works: p.works,
     workDate: p.workDate,
@@ -4279,6 +4268,9 @@ function WorkTab(p) {
     // v8.73: 圃場の出し入れも地図からできるようにした
     addWork: p.addWork,
     removeWork: p.removeWork,
+    // v8.74: 実績入力も地図から開く。ポップアップ自体は
+    // この上(WorkTab)で出すので、ここでは「開け」と頒むだけ。
+    onReport: w => openReport(w),
     // 地図タブと同じエンジン設定を使う(無料地図 / Googleマップ)
     mapEngine: p.mapEngine,
     gmapKey: p.gmapKey,
@@ -4303,7 +4295,19 @@ function WorkTab(p) {
     }
   }, p.syncing ? "送信中…" : pending === 0 ? "☁ 送信するものはありません" : "☁ " + dateLabel(p.workDate) + "の未送信 " + pending + "件を送信"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "送信されるのは", dateLabel(p.workDate), "ぶんだけです。送信済みは二重登録されません")) ) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
+  }, "送信されるのは", dateLabel(p.workDate), "ぶんだけです。送信済みは二重登録されません")) ), /*#__PURE__*/React.createElement("button", {
+    // v8.74: 作業一覧を別の表示としてはやめた。
+    // 現場で見るのは地図だけで済む。ただし順送りナビ・並べ替え・
+    // まとめ散布・タンク補給の区切り・書き出しは地図に載せられないので、
+    // 消さずにここへ畳んである。
+    onClick: () => setListOpen(v => !v),
+    style: {
+      ...S.smallSecondary,
+      width: "100%",
+      marginTop: 12
+    },
+    className: "no-print"
+  }, listOpen ? "▲ 作業リストを閉じる" : "📋 作業リストを開く(" + dayList.length + "件)"), listOpen && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -8880,9 +8884,19 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.73",
+    ver: "v8.74",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "🚦 作業タブを進捗地図に一本化しました。「📋 作業一覧 / 🚦 進捗地図」の切替をなくし、地図を常に出します",
+      "🚁 実績入力も地図から開けます。圃場をタップして「🚁 実績入力」(入力済みなら「🚁 実績を直す」)。吹き出しから、追加・外す・散布済・実績入力の4つができます",
+      "📋 順送りナビ・並べ替え・まとめ散布・タンク補給の区切り・実績の一括入力・アグリノート転記・CSV・印刷は消していません。地図の下の「📋 作業リストを開く」に畳んであります(既定は閉じています)",
+      "⚠ 投下量未入力の警告と順送りナビは、地図のときも上に出るようにしました",
+      "🐞 進捗地図の吹き出しに出る入力日を、必ず日付の形(2026-08-27)で出すようにしました。実績入力日が空のときに更新日時をそのまま出していたためです。※ スプレッドシート側の Code.gs を差し替えて再デプロイしてください"
+    ]
+  }, {
+    ver: "v8.73",
+    date: "2026-08",
     notes: [
       "🐞 端末AとBが同じ日に同じ圃場を登録すると、共有後に同じ圃場が2行に増える不具合を直しました。作業のIDを端末ごとの時刻で採番していたためです。「日付＋圃場ID」から決めるようにしたので、どの端末で作っても同じ１行になります(共有をオフにしている間に両方で登録しても同じです)",
       "⚠ それ以前に増えてしまった分は残るので、同じ圃場が2件入っているときは作業一覧に知らせを出します。どちらを残すかは人が決めてください(こちらで自動で消すことはしません)",
@@ -10258,6 +10272,22 @@ function ProgressMapTab(p) {
         marginTop: 14
       }
     }, sw.reported ? "↩ 散布済を取り消す" : "✓ 散布済にする");
+  })(), (() => {
+    // 実散布量・フライト回数・備考の入力。
+    // 数字を入れる作業なので、地図の上ではなく専用のポップアップで行う。
+    const sw = (p.works || []).find(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
+    if (!sw || !p.onReport) return null;
+    return /*#__PURE__*/React.createElement("button", {
+      onClick: () => {
+        p.onReport(sw);
+        setSel(null);
+      },
+      style: {
+        ...S.smallPrimary,
+        width: "100%",
+        marginTop: 8
+      }
+    }, sw.reported ? "🚁 実績を直す" : "🚁 実績入力");
   })(), (() => {
     // 今日はやめるとなったとき。圃場マスタからは消さない。
     const sw = (p.works || []).find(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);

@@ -645,7 +645,12 @@ function progressItems_(team, from, to) {
       sprayedL: r[7] === "" ? 0 : Number(r[7]),
       areaA: r[8] === "" ? "" : Number(r[8]),
       by: String(r[11] || ""),
-      at: String(r[13] instanceof Date ? ymd_(r[13]) : r[13] || r[WORK_AT_COL] || ""),
+      // 実績入力日。r[13] が空のときは更新日時で代用するが、
+      // そちらは ISO の時刻文字列や Date のままのことがある。
+      // String() でそのまま返すと、進捗地図の吹き出しに
+      // "Thu Aug 27 2026 00:00:00 GMT+0900 (日本標準時)" がそのまま出る。
+      // 両方とも ymd_ を通して日付の形に揃える。
+      at: ymd_(r[13]) || ymd_(r[WORK_AT_COL]) || "",
     });
   }
   return out;

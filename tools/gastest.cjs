@@ -336,6 +336,16 @@ const F2 = {
   eq("progress も日付で絞り込める", [pr.ok, pr.items.length], [true, 1]);
   const none = post(ctx, { type: "progress", team: TEAM, date: "2026-08-27" });
   eq("別の日には出ない", none.items.length, 0);
+  // 実績入力日も yyyy-MM-dd で返す。String(Date) のままだと
+  // 進捗地図の吹き出しに "Thu Aug 27 2026 ..." が出る
+  eq("progress の実績入力日も yyyy-MM-dd", pr.items[0].at, "2026-08-26");
+  // r[13] が空のときは更新日時で代用するが、それも日付の形にする
+  {
+    const sh2 = ctx.SHEET_STATE.getSheetByName("作業");
+    sh2.getRange(2, 14).setValue("");
+    const pr2 = post(ctx, { type: "progress", team: TEAM, date: "2026-08-26" });
+    eq("progress 実績入力日が空なら更新日時を日付で返す", /^\d{4}-\d{2}-\d{2}$/.test(pr2.items[0].at), true);
+  }
 }
 
 // ── 16. doGet ──
