@@ -326,6 +326,29 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("進捗 知らない状態は未実施に倒す", t.toMapStatus("なにか"), "planned");
 }
 
+// ── 作業を消す道は、必ず墓標を積んで送る ───────────
+// 墓標(tombstone)を積まないと、シート側の行が残る。残ると進捗地図は
+// その圃場を未実施(赤)のまま出し続け、対象外(黄)に戻らない。
+// v8.71 の removeWorks がこれを抜かしていて、「外す」だと消えるのに
+// 「🗑 選択して削除」だと消えない、という差になっていた。
+// これらは App() の中にあるので値としては取り出せない。原文で確かめる。
+{
+  const body = name => {
+    const head = src.indexOf("const " + name + " = ");
+    if (head < 0) return null;
+    // 関数の終わりは、同じ字下がりの "  };" まで
+    const end = src.indexOf("\n  };", head);
+    return end < 0 ? null : src.slice(head, end);
+  };
+  ["removeWork", "removeWorks", "deleteWork"].forEach(name => {
+    const b = body(name);
+    eq("削除 " + name + " が見つかる", b !== null, true);
+    if (!b) return;
+    eq("削除 " + name + " が墓標を積む", /addTomb\("works"/.test(b), true);
+    eq("削除 " + name + " が進捗を送る", /pushProgress\(/.test(b), true);
+  });
+}
+
 // ── 版数の整合(sw.js と揃っているか) ───────────────────
 const sw = fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8");
 const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];
