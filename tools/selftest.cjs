@@ -528,6 +528,27 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("undefined も空として扱う", [k(undefined, undefined), k(undefined, "x")], [false, false]);
 }
 
+// ── 共有オフ→オンの順序(v8.87) ───────────────────────
+// auto* は debounce の有無が揃っておらず(押し込みは1.5秒、受け取りは即座)、
+// 並べて呼ぶと受け取りが先に走る。効果の中身を取り出して順番を見る。
+{
+  const m = src.match(/const shareOnFirstRef[\s\S]*?\n  \}, \[shareOn\]\);/);
+  eq("shareOn の効果が見つかる", !!m, true);
+  const body = m ? m[0] : "";
+  const at = name => body.indexOf(name);
+  eq("送信3種と受信がこの順で並んでいる",
+    at("pushFieldsSync") > 0 &&
+    at("pushFieldsSync") < at("pushChemsSync") &&
+    at("pushChemsSync") < at("pushProgress") &&
+    at("pushProgress") < at("pullSharedSync"), true);
+  eq("4つとも await している",
+    (body.match(/await (pushFieldsSync|pushChemsSync|pushProgress|pullSharedSync)\(/g) || []).length, 4);
+  eq("debounce 付きの auto* を使っていない",
+    /auto(PushFields|PushChems|PushWorks|PullShared)\(/.test(body), false);
+  eq("途中で打ち切れる(オフに戻したときに送信を飛ばさない)",
+    body.includes("alive = false") && body.includes("if (!alive) return;"), true);
+}
+
 // ── 版数の整合(sw.js と揃っているか) ───────────────────
 const sw = fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8");
 const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];

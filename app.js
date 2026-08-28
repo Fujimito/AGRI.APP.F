@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.86";
+const APP_VERSION = "v8.87";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -1163,6 +1163,12 @@ function App() {
   // 共有をオンに戻したら、オフの間にたまったぶんを追いかけて送り、
   // ついでに取り直す。オンにした直後にsyncReady()を呼んでも、
   // setStateはすぐには反映されないので、効果として shareOn の変化を見る。
+  //
+  // auto* を並べて呼んではいけない。autoPushFields / autoPushChems /
+  // autoPushWorks は1.5秒の debounce 付きで、autoPullShared だけ即座に走る。
+  // 並べた順に関係なく受け取りが先に走り、オフの間にたまった未送信の変更が
+  // 受け取った内容に埋もれたまま送られない。syncShared と同じく
+  // 「送ってから受け取る」を await で守る(v8.87)。
   const shareOnFirstRef = useRef(true);
   useEffect(() => {
     if (shareOnFirstRef.current) {
@@ -1170,11 +1176,32 @@ function App() {
       return; // 起動時は他の効果が取りに行くので二重に走らせない
     }
     if (!shareOn) return;
-    autoPullAtRef.current = 0;
-    autoPushFields();
-    autoPushChems();
-    autoPushWorks();
-    autoPullShared();
+    let alive = true;
+    (async () => {
+      if (!syncReady()) return;
+      await pushFieldsSync({
+        quiet: true
+      });
+      if (!alive) return;
+      await pushChemsSync({
+        quiet: true
+      });
+      if (!alive) return;
+      await pushProgress({
+        quiet: true
+      });
+      if (!alive) return;
+      // 直前まで取りに行っていても、ここでは必ず取り直す
+      autoPullAtRef.current = 0;
+      await pullSharedSync({
+        quiet: true
+      });
+    })();
+    // 途中で共有をオフに戻された・画面を離れたときは、そこで打ち切る。
+    // 残りを走らせると、オフにしたあとに送信が飛ぶ
+    return () => {
+      alive = false;
+    };
   }, [shareOn]);
   // その日の中で何番目かを作業自体に持たせる。
   // 送信のときに並びを数えるだけだと、入れ替えても作業の中身は

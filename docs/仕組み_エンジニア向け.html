@@ -163,9 +163,9 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <h1>薬液調合ノート<br>内部構造</h1>
   <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
   <dl class="facts">
-    <div class="fact"><dt>app.js</dt><dd class="num">12,225<small>行</small></dd></div>
+    <div class="fact"><dt>app.js</dt><dd class="num">12,252<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,194<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">194<small>件</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">199<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">127<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
@@ -314,7 +314,7 @@ sequenceDiagram
     </div>
   </div>
   <div class="col">
-  <p>順番は<strong>必ず「送ってから受け取る」</strong>。逆にすると、手元の未送信の変更が受信データに埋もれる。共有をオフからオンに戻したときの経路だけこの順が守られておらず、<code>await</code> していない。<strong>未修正。</strong></p>
+  <p>順番は<strong>必ず「送ってから受け取る」</strong>。逆にすると、手元の未送信の変更が受信データに埋もれる。共有をオフからオンに戻したときの経路だけこの順が守られていなかった。<strong>v8.87 で修正</strong>(08節)。</p>
   <p><code>serverTime</code> は<strong>今より2分手前</strong>を返す(<code>PULL_LAG_MS</code>)。押し込み中の行を取りこぼさないための幅で、代わりに直近2分の行は毎回配り直される(08節)。</p>
   <p><code>pullat</code> は<strong>チームに紐付いていない</strong>。チームコードを変えたら捨てる(v8.78)。残すと、新しいチームに前からあるデータが <code>since</code> で弾かれて一生届かない。</p>
   </div>
@@ -414,6 +414,17 @@ flowchart TD
 <section>
   <h2><span class="no">08</span><span>詰まる所</span></h2>
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
+
+  <div class="fail">
+    <h3>共有をオンに戻すと、受け取りが送信を追い越す</h3>
+    <p class="ver">v8.87 で修正</p>
+    <dl>
+      <dt>機構</dt><dd>オンに戻す効果は <code>autoPushFields</code> → <code>autoPushChems</code> → <code>autoPushWorks</code> → <code>autoPullShared</code> の順に並べてあった。ところが<strong>押し込み3つは1.5秒の debounce 付き</strong>で、<strong><code>autoPullShared</code> だけ即座に走る</strong>。並べた順に関係なく、受け取りが1.5秒先に走る。</dd>
+      <dt>症状</dt><dd>オフの間にたまった未送信の変更が、受け取った内容に埋もれたまま送られない。<code>keepLocalEdit</code> と編集日時の比較が効くので消えはしないが、<strong>送信のきっかけを失って次の編集まで残る</strong>。</dd>
+      <dt>対処</dt><dd><code>syncShared</code> と同じく、下位の同期関数(<code>pushFieldsSync</code> 等)を <code>await</code> で直列に呼ぶ。<code>auto*</code> は使わない。途中で共有をオフに戻されたら <code>alive</code> で打ち切る(オフにしたあとに送信が飛ばないように)。</dd>
+      <dt>検証</dt><dd>効果の中身をソースから取り出して、4つの呼び出しの順・<code>await</code> の数・<code>auto*</code> を使っていないことを見ている。UIを動かさずに順序を固定できる。</dd>
+    </dl>
+  </div>
 
   <div class="fail">
     <h3>2台が同時に「2回目」を入れると、片方が消える</h3>
@@ -561,7 +572,7 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">194</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">199</td></tr>
       <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">127</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
@@ -604,7 +615,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.86 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.87 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>
