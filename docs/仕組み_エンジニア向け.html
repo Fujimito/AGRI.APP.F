@@ -165,7 +165,7 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <dl class="facts">
     <div class="fact"><dt>app.js</dt><dd class="num">12,033<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,086<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">161<small>件</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">171<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">100<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
@@ -188,7 +188,7 @@ flowchart LR
   subgraph D2["端末B (PWA)"]
     UI2["React UI"] --- LS2[("localStorage")]
   end
-  SW["Service Worker<br/>tankmix-v8.82"]
+  SW["Service Worker<br/>tankmix-v8.83"]
   GAS["Apps Script<br/>doGet / doPost"]
   SS[("スプレッドシート<br/>5シート")]
   MAP["地図タイル<br/>国土地理院 / Google"]
@@ -377,11 +377,13 @@ flowchart TD
     </tbody>
   </table>
   </div>
-  <div class="note warn">
-    <span class="t">既知の穴 — 「大きい方を採る」が、未実施を隠す</span>
-    <p><code>put</code> は <code>RANK[新] &gt; RANK[現]</code> のときだけ上書きする。<strong>同じ圃場に同じ日の作業が2件あると、片方が <code>done</code> ならもう片方が未実施でも地図は緑になる。</strong></p>
-    <p><strong>実測で再現(v8.82)。</strong>実績を入れた圃場を「＋「〇〇」の○圃場をまとめて追加」でもう一度入れると、<code>addWorks</code> の重複除外が <code>!w.reported</code> なので通ってしまい、<code>workIdFor(date, fieldId, 2)</code> の2件目ができる。このとき作業リストは「1 / 2 済」「あと 1 圃場」と正しく出すが、ポリゴンの <code>fill</code> は <code>#2E7D4F</code>(実施済)のままだった。<strong>赤が消えない不具合と逆向きで、こちらは警告帯も出ない。</strong></p>
-    <p>散布済のチェックを<strong>外した</strong>ときも同じ理屈で、サーバーの <code>done</code> が勝ち続ける。次の自動取得(既定45秒)まで緑のままで、圏外なら戻らない。<strong>いずれも未修正。</strong></p>
+  <div class="note">
+    <span class="t">直した穴 — 圃場単位ではなく作業単位で数える(v8.83)</span>
+    <p><strong>v8.82までの実装。</strong><code>put</code> は <code>RANK[新] &gt; RANK[現]</code> のときだけ上書きしていた。同じ圃場に同じ日の作業が2件あると、片方が <code>done</code> ならもう片方が未実施でも地図は緑になった。</p>
+    <p><strong>実測で再現してから直した。</strong>実績を入れた圃場を「＋「〇〇」の○圃場をまとめて追加」でもう一度入れると、<code>addWorks</code> の重複除外が <code>!w.reported</code> なので通ってしまい、<code>workIdFor(date, fieldId, 2)</code> の2件目ができる。このとき作業リストは「1 / 2 済」と正しく出すのに、ポリゴンの <code>fill</code> は <code>#2E7D4F</code>(実施済)のままだった。</p>
+    <p><strong>v8.83 の形。</strong>まず作業IDで <code>byWork</code> に重ね(スナップショット→手元の順。手元が勝つ)、そのあと圃場ごとに畳んで <code>doneCount === total</code> のときだけ <code>done</code>。<strong>1件でも未実施が残れば赤。</strong>吹き出しに <code>この日の作業 2件（1件済）</code> を出し、「✓ 散布済にする」は <code>swList.find(w =&gt; !w.reported)</code> で未実施側を拾う。</p>
+    <p>散布済のチェックを<strong>外した</strong>ときにサーバーの <code>done</code> が勝ち続けていたのも、同じ仕組みで直った。作業IDで重ねるときに手元が上書きするため、外した瞬間に赤へ戻る(実測で確認)。</p>
+    <p class="sub"><strong>残っている制約。</strong>古い Code.gs は進捗に作業IDを返さないので重ねられず、手元だけ済んでいる途中の状態で二重に数える。出るのは赤で、安全側に倒れる。</p>
   </div>
 </section>
 
@@ -539,7 +541,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.82 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.83 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>

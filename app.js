@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.82";
+const APP_VERSION = "v8.83";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -8949,9 +8949,20 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.82",
+    ver: "v8.83",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "🚦 進捗地図の色を、圃場単位ではなく作業単位で数えるようにしました。同じ圃場にその日の作業が2件あるとき、前は片方が済んだ時点で緑になっていました",
+      "⚠ 実績を入れた圃場を「＋「〇〇」の○圃場をまとめて追加」でもう一度入れると起きていました。午前と午後で分けて撒く日に、残りが緑で隠れます。緑は「終わった」と読まれるので、赤が余分に出るのと違って危ない側でした",
+      "📍 地図の吹き出しに「この日の作業 ○件（○件済）」を出しました(2件以上のときだけ)。地図は圃場単位で塗るため、色だけでは何件残っているかが見えません",
+      "✓ 吹き出しの「散布済にする」「実績入力」が、まだ済んでいない作業を先に拾うようになりました。前は先頭の1件を決め打ちで取っていたため、2件目に手が届きませんでした",
+      "※ 散布済のチェックを外したときに緑のまま戻らなかったのも、同じ理屈でした。こちらも直っています",
+      "🧪 端末側の検査を 161件 → 171件 に増やしました"
+    ]
+  }, {
+    ver: "v8.82",
+    date: "2026-08",
     notes: [
       "📖 使い方ガイドと画面の案内が、無くなったタブを指していたのを直しました。v8.61 で「データベースタブ」をなくしたあとも、ガイドにはその節が丸ごと残っていました",
       "⚠ 圃場が0件のときに出る案内が「データベースタブの🌾圃場で登録してください」のままでした。初めて使う人が最初に見る画面です",
@@ -10192,16 +10203,28 @@ function ProgressMapTab(p) {
   // サーバーから来た内容を土台にし、この端末にしかない未送信の実績を上へ重ねる。
   // 自分で入れた実績が、送信するまで地図に出ないのはかえって迷うため。
   const statusByField = React.useMemo(() => {
-    const m = new Map();
-    const put = (fieldId, st) => {
-      // 圃場IDはサーバー経由だと数値、端末側も数値だが、過去の版で文字列に
-      // なったデータが混ざりうる。取り違えると同じ圃場が2件に割れて、
-      // 片方が地図に出ない。キーは文字列に揃えて突き合わせる。
-      const key = String(fieldId);
-      const cur = m.get(key);
-      if (!cur || PROGRESS_RANK[st.status] > PROGRESS_RANK[cur.status]) m.set(key, st);
+    // まず作業ごとに1件へまとめ、そのあと圃場ごとに畳む。
+    // v8.82までは圃場ごとに「状態の大きい方」を採っていたため、
+    // 同じ日に同じ圃場を二度入れると(午前と午後で分けた等)、
+    // 片方が済んだ時点でもう片方が未実施でも緑になっていた。
+    // 緑は「終わった」と読まれるので、残りが見えないのは危ない(v8.83)。
+    const byWork = new Map();
+    let anon = 0;
+    const put = (id, fieldId, st) => {
+      // 同じ作業がスナップショットと手元の両方に出るので、作業IDで重ねる。
+      // 手元を後に入れるのでこちらが勝つ。散布済を外した直後は手元が正しい。
+      // 古い Code.gs は作業IDを返さない。そのときは重ねられず二重に数えるが、
+      // 分かれるのは「手元だけ済」の途中の状態だけで、出るのは赤(安全側)。
+      const key = id === undefined || id === null || id === "" ? "?" + ++anon : String(id);
+      byWork.set(key, {
+        ...st,
+        // 圃場IDはサーバー経由だと数値、端末側も数値だが、過去の版で文字列に
+        // なったデータが混ざりうる。取り違えると同じ圃場が2件に割れて、
+        // 片方が地図に出ない。キーは文字列に揃えて突き合わせる。
+        fieldKey: String(fieldId)
+      });
     };
-    (snap.items || []).forEach(it => put(it.fieldId, {
+    (snap.items || []).forEach(it => put(it.id, it.fieldId, {
       status: toMapStatus(it.status || "planned"),
       by: it.by || "",
       at: it.at || "",
@@ -10211,7 +10234,7 @@ function ProgressMapTab(p) {
     }));
     (p.works || []).forEach(w => {
       if (!w.workDate || w.workDate < from || w.workDate > to) return;
-      put(w.fieldId, {
+      put(w.id, w.fieldId, {
         status: w.reported ? "done" : "planned",
         by: p.recorder || "",
         at: w.reportDate || "",
@@ -10220,6 +10243,41 @@ function ProgressMapTab(p) {
         // この端末で入れたが、まだ送れていない実績。色は変えず件数だけ出す
         pending: !!(w.reported && w.updatedAt && w.updatedAt !== w.pushedAt)
       });
+    });
+    const m = new Map();
+    byWork.forEach(e => {
+      let cur = m.get(e.fieldKey);
+      if (!cur) {
+        cur = {
+          status: "planned",
+          by: "",
+          at: "",
+          sprayedL: 0,
+          areaA: "",
+          pending: false,
+          total: 0,
+          doneCount: 0,
+          bestRank: -1
+        };
+        m.set(e.fieldKey, cur);
+      }
+      cur.total++;
+      if (e.status === "done") cur.doneCount++;
+      if (e.pending) cur.pending = true;
+      // 吹き出しに出す中身は、実績のあるほうを優先する
+      const r = PROGRESS_RANK[e.status];
+      if (r > cur.bestRank) {
+        cur.bestRank = r;
+        cur.by = e.by;
+        cur.at = e.at;
+        cur.sprayedL = e.sprayedL;
+        cur.areaA = e.areaA;
+      }
+    });
+    // 1件でも未実施が残っていれば未実施。ここが v8.83 の本体
+    m.forEach(v => {
+      v.status = v.doneCount === v.total ? "done" : "planned";
+      delete v.bestRank;
     });
     return m;
   }, [snap, p.works, from, to, p.recorder]);
@@ -10449,7 +10507,17 @@ function ProgressMapTab(p) {
       fontSize: 16,
       fontWeight: 800
     }
-  }, sel.st ? (PROGRESS_STATES[sel.st.status] || PROGRESS_STATES.none).label : "この期間の作業はありません"), sel.st && sel.st.status === "done" && /*#__PURE__*/React.createElement("div", {
+  }, sel.st ? (PROGRESS_STATES[sel.st.status] || PROGRESS_STATES.none).label : "この期間の作業はありません"), sel.st && sel.st.total > 1 && /*#__PURE__*/React.createElement("div", {
+    // 1枚の圃場にその日の作業が複数あるときだけ出す。
+    // 地図は圃場単位で塗るので、色だけでは何件残っているかが見えない(v8.83)
+    style: {
+      ...S.smallLabel,
+      marginTop: 6,
+      fontWeight: 700,
+      color: sel.st.status === "done" ? "#1F6B43" : "#9A3B26"
+    },
+    className: "num"
+  }, "この日の作業 " + sel.st.total + "件（" + sel.st.doneCount + "件済）"), sel.st && sel.st.status === "done" && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.smallLabel,
       marginTop: 6
@@ -10470,7 +10538,11 @@ function ProgressMapTab(p) {
     // この日の作業に入っている場合だけ、ここで散布済を切り替えられる。
     // 作業に入っていない圃場をここから追加はしない。
     // 圃場の登録は作業一覧側の仕事のままにしてある。
-    const sw = (p.works || []).find(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
+    // 同じ日に同じ圃場が2件あることがある(午前と午後で分けた等)。
+    // 先頭を決め打ちで取ると、済んだほうをつかんで二件目に手が届かない。
+    // まだ済んでいないものを先に、全部済んでいれば最後の1件を取る(v8.83)。
+    const swList = (p.works || []).filter(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
+    const sw = swList.find(w => !w.reported) || swList[swList.length - 1];
     if (!sw) return p.addWork && /*#__PURE__*/React.createElement("button", {
       // 地図を見ながら「ここも撒こう」となったときの道。
       // v8.72 までは「作業一覧で追加してください」と案内するだけだった。
@@ -10501,7 +10573,11 @@ function ProgressMapTab(p) {
   })(), (() => {
     // 実散布量・フライト回数・備考の入力。
     // 数字を入れる作業なので、地図の上ではなく専用のポップアップで行う。
-    const sw = (p.works || []).find(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
+    // 同じ日に同じ圃場が2件あることがある(午前と午後で分けた等)。
+    // 先頭を決め打ちで取ると、済んだほうをつかんで二件目に手が届かない。
+    // まだ済んでいないものを先に、全部済んでいれば最後の1件を取る(v8.83)。
+    const swList = (p.works || []).filter(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
+    const sw = swList.find(w => !w.reported) || swList[swList.length - 1];
     if (!sw || !p.onReport) return null;
     return /*#__PURE__*/React.createElement("button", {
       onClick: () => {
@@ -10516,7 +10592,11 @@ function ProgressMapTab(p) {
     }, sw.reported ? "🚁 実績を直す" : "🚁 実績入力");
   })(), (() => {
     // 今日はやめるとなったとき。圃場マスタからは消さない。
-    const sw = (p.works || []).find(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
+    // 同じ日に同じ圃場が2件あることがある(午前と午後で分けた等)。
+    // 先頭を決め打ちで取ると、済んだほうをつかんで二件目に手が届かない。
+    // まだ済んでいないものを先に、全部済んでいれば最後の1件を取る(v8.83)。
+    const swList = (p.works || []).filter(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
+    const sw = swList.find(w => !w.reported) || swList[swList.length - 1];
     if (!sw || !p.removeWork) return null;
     return /*#__PURE__*/React.createElement("button", {
       onClick: () => {

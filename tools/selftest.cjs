@@ -442,6 +442,30 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.indexOf("「☁ 全データを送信」で送信が完了"), -1);
 }
 
+// ── 進捗地図の色は作業単位(v8.83) ──────────────
+// v8.82までは圃場ごとに「状態の大きい方」を採っていたため、同じ日に
+// 同じ圃場が2件あると、片方が未実施でも緑になっていた(実測で確認)。
+{
+  eq("作業IDで重ねている", src.includes("const byWork = new Map();"), true);
+  eq("スナップショットの作業IDを渡している",
+    src.includes("put(it.id, it.fieldId, {"), true);
+  eq("手元の作業IDを渡している", src.includes("put(w.id, w.fieldId, {"), true);
+  eq("1件でも未実施なら未実施",
+    src.includes('v.status = v.doneCount === v.total ? "done" : "planned";'), true);
+  eq("大きい方を採る古い判定が残っていない",
+    src.indexOf("PROGRESS_RANK[st.status] > PROGRESS_RANK[cur.status]"), -1);
+  eq("吹き出しの中身は実績のあるほうを優先",
+    src.includes("if (r > cur.bestRank) {"), true);
+  eq("bestRank は外に出さない", src.includes("delete v.bestRank;"), true);
+  // 吹き出しは先頭固定ではなく、まだ済んでいない作業を先に取る
+  eq("未実施を先に拾う",
+    src.includes("swList.find(w => !w.reported) || swList[swList.length - 1]"), true);
+  eq("先頭固定の find が残っていない",
+    src.indexOf('const sw = (p.works || []).find(w => String(w.fieldId)'), -1);
+  eq("2件以上のときは件数を出す",
+    src.includes('"この日の作業 " + sel.st.total + "件（" + sel.st.doneCount + "件済）"'), true);
+}
+
 // ── 版数の整合(sw.js と揃っているか) ───────────────────
 const sw = fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8");
 const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];
