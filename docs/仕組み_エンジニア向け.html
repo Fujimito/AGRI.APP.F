@@ -165,7 +165,7 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <dl class="facts">
     <div class="fact"><dt>app.js</dt><dd class="num">12,033<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,086<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">171<small>件</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">178<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">100<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
@@ -188,7 +188,7 @@ flowchart LR
   subgraph D2["端末B (PWA)"]
     UI2["React UI"] --- LS2[("localStorage")]
   end
-  SW["Service Worker<br/>tankmix-v8.83"]
+  SW["Service Worker<br/>tankmix-v8.84"]
   GAS["Apps Script<br/>doGet / doPost"]
   SS[("スプレッドシート<br/>5シート")]
   MAP["地図タイル<br/>国土地理院 / Google"]
@@ -414,6 +414,18 @@ flowchart TD
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
 
   <div class="fail">
+    <h3>保存に失敗しても、何も起きない</h3>
+    <p class="ver">v8.84 で修正 / 実測では Chromium の上限は約50MB、iOS Safari は一般に5MB</p>
+    <dl>
+      <dt>機構</dt><dd><code>save()</code> は <code>catch</code> で <code>console.error</code> するだけだった。<strong>React の状態は先に更新されている</strong>ので、画面には入ったように見える。</dd>
+      <dt>症状</dt><dd>その日の実績を入れ、作業を終え、アプリを開き直して初めて消えているのに気づく。<strong>静かなデータ消失。</strong></dd>
+      <dt>確率</dt><dd>作業1,503件＋圃場3枚で 575KB(1件約380バイト)。実データ規模では余裕があるが、圃場の頂点が多い使い方ではいつか届く。</dd>
+      <dt>対処</dt><dd><code>saveFailHook</code> をトップレベルに置き、App が起動時に差し込む。失敗したら<strong>自分で閉じるまで消えない赤帯</strong>を出す。トーストだと見逃す。</dd>
+      <dt>検証</dt><dd><code>Storage.prototype.setItem</code> を <code>QuotaExceededError</code> で落ちるように差し替え、帯が出て <code>localStorage</code> に入っていないことを確認した。<code>code 22</code> / <code>1014</code> も見る。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>シートの行数上限で、送信が丸ごと落ちる</h3>
     <p class="ver">v8.80 で修正 / 実データ 999行 : 上限1000行 で発生</p>
     <dl>
@@ -541,7 +553,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.83 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.84 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>

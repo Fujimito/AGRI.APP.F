@@ -14,7 +14,7 @@
 <rect x="45" y="34" width="1497" height="72" rx="10" fill="#2F6B45"/>
 <text x="70" y="72" font-size="30" font-weight="800" fill="#FFFFFF">薬液調合ノート（農薬散布防除記録）</text>
 <text x="70" y="97" font-size="17" fill="#CFE4D8">オフライン対応PWA ─ アプリの仕組み</text>
-<text x="1517" y="68" font-size="22" font-weight="800" fill="#FFFFFF" text-anchor="end">v8.83</text>
+<text x="1517" y="68" font-size="22" font-weight="800" fill="#FFFFFF" text-anchor="end">v8.84</text>
 <text x="1517" y="94" font-size="14" fill="#CFE4D8" text-anchor="end">2026-08 時点</text>
 
 <!-- ROW1 -->

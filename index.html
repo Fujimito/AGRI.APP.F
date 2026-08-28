@@ -20,7 +20,15 @@
        ・<style> にアプリ全体のリセットCSSと地図の札のスタイルを持っている
        ・<script> で Service Worker を登録している
      ため。外部ファイルに切り出せば外せるが、1ファイルで完結する構成を保つため今は残す。
-     なお nonce はGitHub Pages(静的配信)ではリクエストごとに振れないので使えない。 -->
+     なお nonce はGitHub Pages(静的配信)ではリクエストごとに振れないので使えない。
+
+     ⚠ frame-ancestors は <meta> 経由だと**ブラウザに無視される**(仕様)。
+     コンソールに「the Content Security Policy directive 'frame-ancestors' is
+     ignored when delivered via a <meta> element」と出るのはこれ。実測で確認済み。
+     効かせるにはHTTPヘッダーが要るが、GitHub Pages はヘッダーを付けられないので
+     **この構成では埋め込みを防げない**。行を残してあるのは、ヘッダーを付けられる
+     場所へ移したときにそのまま効くようにするため。今は効いていないと思って扱うこと。
+     ログインもセッションも無いため、埋め込まれても他人のデータは見えない。 -->
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://maps.googleapis.com https://maps.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://cyberjapandata.gsi.go.jp https://*.googleapis.com https://*.gstatic.com; connect-src 'self' https://script.google.com https://script.googleusercontent.com https://msearch.gsi.go.jp https://maps.googleapis.com https://*.googleapis.com https://*.gstatic.com; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 <meta name="theme-color" content="#2E7D4F" />

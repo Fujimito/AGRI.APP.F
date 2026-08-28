@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.83";
+const APP_VERSION = "v8.84";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -515,11 +515,21 @@ const load = (key, fallback) => {
     return fallback;
   }
 };
+// 保存に失敗したことを画面へ出すための受け口。
+// save() はトップレベルなので flash を直接呼べない。App が起動時に差し込む。
+// v8.83までは console.error だけで黙っていた。React の状態は更新済みなので
+// 画面には入ったように見え、開き直して初めて消えているのに気づく(v8.84)。
+let saveFailHook = null;
 const save = (key, value) => {
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    return true;
   } catch (e) {
     console.error(e);
+    // 例外の名前は端末で違う。code 22 / 1014 も同じ意味で使われる
+    const full = !!e && (e.name === "QuotaExceededError" || e.name === "NS_ERROR_DOM_QUOTA_REACHED" || e.code === 22 || e.code === 1014);
+    if (saveFailHook) saveFailHook(full ? "端末の保存領域がいっぱいです。いま入れた内容は保存されていません。設定タブの「データ管理」で書き出してから、古い日の作業を減らしてください" : "保存に失敗しました。いま入れた内容は画面にしか残っていません");
+    return false;
   }
 };
 
@@ -971,6 +981,15 @@ function App() {
     setToast(msg);
     setTimeout(() => setToast(""), 2400);
   };
+  // 保存に失敗したときの帯。トーストだけだと見逃すので、
+  // 消すまで出したままにする。失うのはその日の作業だから(v8.84)
+  const [saveFail, setSaveFail] = React.useState("");
+  React.useEffect(() => {
+    saveFailHook = msg => setSaveFail(msg);
+    return () => {
+      saveFailHook = null;
+    };
+  }, []);
   // ── Raw と Save の使い分け ──
   // Save … 人がこの端末で編集したとき。変わったレコードに updatedAt を打つ
   // Raw  … 同期で受け取った内容を入れるとき、および送信済みフラグの書き戻し。
@@ -2764,7 +2783,10 @@ function App() {
     const body = works.map(w => {
       const f = resolveWork(w);
       const chems = w.chems || []; // 移行データや共有データには薬剤欄が無いことがある
-      const chemsStr = chems.map(c => c.name + "(" + useLabel(c.use) + "・" + formLabel(c.form) + "・" + c.ratio + "倍・" + (isFinite(c.ml) ? Math.round(c.ml) : 0) + "mL)").join(" / ");
+      // 固形剤は g。画面は v8.78 で切り替えたが、CSV だけ mL のままだった。
+      // 数値は同じ(1mL = 1g で計算している)が、渡された人が粉を
+      // 体積で量ると量が狂う。提出する記録なので表記を揃える(v8.84)
+      const chemsStr = chems.map(c => c.name + "(" + useLabel(c.use) + "・" + formLabel(c.form) + "・" + c.ratio + "倍・" + (isFinite(c.ml) ? Math.round(c.ml) : 0) + (agriAmountUnit(c.form) === "kg" ? "g" : "mL") + ")").join(" / ");
       const flights = w.flights || [];
       const flightStr = flights.length > 1 ? flights.map(fl => plain(fl, 1) + "L").join(" + ") : "";
       return [w.workDate, f.name, f.crop || "", plain(parseFloat(w.reportAreaA || f.areaA), 2), chems.length, chemsStr, plain(w.totalL), plain(w.waterMl / 1000, 3), w.reported ? plain(w.sprayedL) : "", w.reported ? flights.length || 1 : "", flightStr, w.reported ? "散布済" : "調合のみ", w.reportDate || "", w.reportMemo || w.memo || ""].map(csvCell).join(",");
@@ -2941,7 +2963,30 @@ function App() {
       syncPending();
     },
     style: S.headerBadge
-  }, syncing ? "送信中…" : "☁ " + dateLabel(workDate) + " 未送信 " + pendingCount + "件"))), chemWarnings.length > 0 && /*#__PURE__*/React.createElement("div", {
+  }, syncing ? "送信中…" : "☁ " + dateLabel(workDate) + " 未送信 " + pendingCount + "件"))), saveFail && /*#__PURE__*/React.createElement("div", {
+    style: {
+      ...S.warnBand,
+      background: "#FDE2E2",
+      borderColor: "#E58B8B"
+    },
+    className: "no-print"
+  }, /*#__PURE__*/React.createElement("span", {
+    style: S.warnIcon
+  }, "⚠"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      flex: 1,
+      minWidth: 0,
+      fontSize: 13,
+      fontWeight: 700
+    }
+  }, saveFail), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSaveFail(""),
+    style: {
+      ...S.smallSecondary,
+      flex: "none",
+      padding: "4px 10px"
+    }
+  }, "閉じる")), chemWarnings.length > 0 && /*#__PURE__*/React.createElement("div", {
     style: S.warnBand,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("span", {
@@ -8949,9 +8994,19 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.83",
+    ver: "v8.84",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "⚠ 端末の保存領域がいっぱいで保存できなかったときに、赤い帯を出すようにしました。これまでは黙って失敗しており、画面には入ったように見えて、アプリを開き直して初めて消えているのに気づく状態でした",
+      "※ 帯は自分で閉じるまで消えません。失うのがその日の作業なので、一瞬の表示だと見逃します",
+      "📄 CSVの書き出しで、固形剤の量が「mL」になっていたのを「g」に直しました。画面は v8.78 で切り替えたのに、CSVだけ残っていました",
+      "※ 数値自体は変わりません(1mL = 1g で計算しています)。ただし渡された人が粉剤を計量カップで量ると量が狂います。粉は必ずはかりで量ってください",
+      "🧪 端末側の検査を 171件 → 178件 に増やしました"
+    ]
+  }, {
+    ver: "v8.83",
+    date: "2026-08",
     notes: [
       "🚦 進捗地図の色を、圃場単位ではなく作業単位で数えるようにしました。同じ圃場にその日の作業が2件あるとき、前は片方が済んだ時点で緑になっていました",
       "⚠ 実績を入れた圃場を「＋「〇〇」の○圃場をまとめて追加」でもう一度入れると起きていました。午前と午後で分けて撒く日に、残りが緑で隠れます。緑は「終わった」と読まれるので、赤が余分に出るのと違って危ない側でした",

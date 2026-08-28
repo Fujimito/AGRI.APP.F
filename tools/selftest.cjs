@@ -466,6 +466,23 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.includes('"この日の作業 " + sel.st.total + "件（" + sel.st.doneCount + "件済）"'), true);
 }
 
+// ── 保存の失敗を黙らせない・CSVの単位(v8.84) ───────
+// save() は v8.83 まで console.error だけで黙っていた。React の状態は
+// 更新済みなので、画面には入ったように見えて次に開くと消えている。
+{
+  eq("保存失敗の受け口がある", src.includes("let saveFailHook = null;"), true);
+  eq("上限を越えたときを見分けている",
+    src.includes('e.name === "QuotaExceededError"') && src.includes("e.code === 22"), true);
+  eq("失敗を画面へ渡している", src.includes("if (saveFailHook) saveFailHook(full"), true);
+  eq("App が受け口を差し込む", src.includes("saveFailHook = msg => setSaveFail(msg);"), true);
+  eq("帯は自分で閉じるまで残る", src.includes("onClick: () => setSaveFail(\"\"),"), true);
+  // CSV は提出する記録。固形剤を mL と書くと、体積で量られる
+  eq("CSV も剤型で単位を切り替える",
+    src.includes('(agriAmountUnit(c.form) === "kg" ? "g" : "mL")'), true);
+  eq("CSV に mL の直書きが残っていない",
+    src.indexOf('Math.round(c.ml) : 0) + "mL)"'), -1);
+}
+
 // ── 版数の整合(sw.js と揃っているか) ───────────────────
 const sw = fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8");
 const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];
