@@ -607,161 +607,43 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   });
 }
 
-// ── 全画面でも現在地ボタンが出るか(ソースの形) ────────
+// ── 全画面の操作ボタン(v8.93) ────────────────────────
+// 上端(v8.89)も下端(v8.90〜8.92)も、実機では見出し・タブバーの裏に回った。
+// 覆いより手前に描かれるものがあるため。上下を使わず、地図の右わきに置く。
 {
   const tab = src.slice(src.indexOf("function ProgressMapTab"), src.indexOf("const S = {"));
-  const seg = tab.slice(tab.indexOf("S.mapFullBar"));
+  const seg = tab.slice(tab.indexOf("S.mapSideBtns"));
   eq("全画面のときに現在地ボタンを出す", seg.includes("apiRef.current.locate"), true);
   eq("全画面のボタンは fullMap のときだけ",
-    /fullMap && [\s\S]{0,1400}S\.mapFullBar/.test(tab), true);
+    /fullMap && [\s\S]{0,1600}S\.mapSideBtns/.test(tab), true);
   eq("全画面に札の切替もある", seg.includes("setShowLabels"), true);
-  eq("全画面のボタンは4つ",
-    (seg.match(/S\.mapFullBarBtn(?!Off)/g) || []).length, 4);
-  // ── 上端に置かない(v8.90) ──
-  // env(safe-area-inset-top) は端末で違い、実機では覆いが見出しを隠しきれず
-  // 上のボタンが裏に回って押せなかった。下端なら機種差に振り回されない。
-  eq("上端に固定していない", /mapFullBtnAt|inset-top/.test(seg), false);
-  // ── fixed に頼らない(v8.92) ──
-  // iPhone15 では、上端(v8.89)でも下端(v8.90)でも fixed が期待どおりに
-  // 効かなかった。覆い(mapWrapFull)は display:flex / column なので、
-  // 一番下の子として置けば fixed も z-index も要らない。
-  eq("帯は fixed ではない", /mapFullBar: \{[\s\S]{0,900}position: "fixed"/.test(src), false);
-  eq("z-index に頼っていない", /mapFullBar: \{[\s\S]{0,900}zIndex:/.test(src), false);
-  eq("縮まずに残る(地図に押し潰されない)",
-    /mapFullBar: \{[\s\S]{0,900}flexShrink: 0/.test(src), true);
-  eq("覆いは縦並びで、地図が残りを取る",
-    /mapWrapFull: \{[\s\S]{0,400}flexDirection: "column"/.test(src) &&
-    /mapBox: \{[\s\S]{0,200}flex: 1/.test(src), true);
-  eq("下の余白は覆い側が safe-area で持つ(二重にしない)",
-    /mapWrapFull: \{[\s\S]{0,400}env\(safe-area-inset-bottom\)/.test(src) &&
-    !/mapFullBar: \{[\s\S]{0,900}safe-area-inset-bottom/.test(src), true);
-  eq("帯は覆いの中に置く(外に出すと fixed が要る)",
-    /style: fullMap \? S\.mapWrapFull : S\.mapWrap[\s\S]{0,3000}S\.mapFullBar/.test(src), true);
-  eq("入りきらなければ横に流す(2段にして地図を削らない)",
-    /mapFullBar: \{[\s\S]{0,700}flexWrap: "nowrap"[\s\S]{0,120}overflowX: "auto"/.test(src), true);
-  eq("はみ出す前に縮む(絵文字の幅は環境で変わる)",
-    /mapFullBarBtn: \{[\s\S]{0,700}flexShrink: 1[\s\S]{0,120}minWidth: 0/.test(src), true);
-  eq("指で押す的が44pxを下回らない",
-    /mapFullBarBtn: \{[\s\S]{0,700}minHeight: 44/.test(src), true);
-}
+  eq("全画面のボタンは4つ", (seg.match(/S\.mapSideBtn(?!s|Off)/g) || []).length, 4);
 
-// ── 差分描画の署名(v8.91) ────────────────────────────
-// ここに入れ忘れたものは「サーバーには届いているのに地図が変わらない」
-// という形で出る。利用者からは共有が壊れたのと見分けが付かない。
-{
-  const sig = t.fieldDrawSig;
-  const F = { id: 1, name: "北の田", areaA: 12.5, updatedAt: "2026-08-01T00:00:00.000Z",
-              polygon: [[33,130],[33,131],[34,131]] };
-  const ST = { status: "planned", by: "藤本", at: "2026-08-20", sprayedL: 0, areaA: 12.5, pending: false };
-  const base = sig(F, ST, true, "a");
+  // ── 画面の上下を使わない(v8.93) ──
+  eq("上端にも下端にも貼り付けていない",
+    /mapSideBtns: \{[\s\S]{0,600}(top: 0|bottom: 0|inset-top|inset-bottom)/.test(src), false);
+  eq("縦は真ん中に置く",
+    /mapSideBtns: \{[\s\S]{0,600}top: "50%"[\s\S]{0,120}transform: "translateY\(-50%\)"/.test(src), true);
+  eq("覆いを基準にする(画面を基準にしない)",
+    /mapSideBtns: \{[\s\S]{0,300}position: "absolute"/.test(src) &&
+    !/mapSideBtns: \{[\s\S]{0,600}position: "fixed"/.test(src), true);
+  eq("覆いは絶対配置の基準になる(position が付いている)",
+    /mapWrapFull: \{[\s\S]{0,200}position: "fixed"/.test(src), true);
+  eq("地図(zIndex 0 の入れ物)より前に出す",
+    /mapSideBtns: \{[\s\S]{0,600}zIndex: 2/.test(src), true);
+  eq("覆いの中に置く(外に出すと画面基準になる)",
+    /style: fullMap \? S\.mapWrapFull : S\.mapWrap[\s\S]{0,3000}S\.mapSideBtns/.test(src), true);
 
-  eq("同じ材料なら同じ署名", sig(F, ST, true, "a"), base);
-  // 色が変わるもの
-  eq("状態が変われば変わる", sig(F, { ...ST, status: "done" }, true, "a") !== base, true);
-  eq("作業から外れれば変わる(対象外へ)", sig(F, null, true, "a") !== base, true);
-  // 色は変えないが吹き出しに出るもの。落とすと吹き出しだけ古くなる
-  eq("実散布量が変われば変わる", sig(F, { ...ST, sprayedL: 95 }, true, "a") !== base, true);
-  eq("記録者が変われば変わる", sig(F, { ...ST, by: "田中" }, true, "a") !== base, true);
-  eq("入力日が変われば変わる", sig(F, { ...ST, at: "2026-08-21" }, true, "a") !== base, true);
-  eq("報告面積が変われば変わる", sig(F, { ...ST, areaA: 11 }, true, "a") !== base, true);
-  eq("未送信の印が変われば変わる", sig(F, { ...ST, pending: true }, true, "a") !== base, true);
-  // 札まわり
-  eq("札の出し分けが変われば変わる", sig(F, ST, false, "a") !== base, true);
-  eq("面積の単位が変われば変わる", sig(F, ST, true, "ha") !== base, true);
-  eq("圃場名が変われば変わる", sig({ ...F, name: "南の田" }, ST, true, "a") !== base, true);
-  eq("面積が変われば変わる", sig({ ...F, areaA: 20 }, ST, true, "a") !== base, true);
-  // 形
-  eq("囲み直せば変わる(編集時刻)",
-    sig({ ...F, updatedAt: "2026-08-02T00:00:00.000Z" }, ST, true, "a") !== base, true);
-  eq("頂点の数が変われば変わる(編集時刻が無い古いデータ向け)",
-    sig({ ...F, updatedAt: "", polygon: [[33,130],[33,131],[34,131],[34,130]] }, null, true, "a") !==
-    sig({ ...F, updatedAt: "", polygon: [[33,130],[33,131],[34,131]] }, null, true, "a"), true);
-  // 区切りの取り違えが起きないこと(隣の項目へ食い込まない)
-  eq("項目の境目が混ざらない",
-    sig({ ...F, name: "あ", areaA: "" }, null, true, "a") !==
-    sig({ ...F, name: "", areaA: "あ" }, null, true, "a"), true);
-}
-
-// ── 差分の出し方(v8.91) ──────────────────────────────
-{
-  const d = t.diffDraw;
-  const m = o => new Map(Object.entries(o));
-  eq("何も変わっていなければ何もしない",
-    d(m({ a: "1", b: "2" }), m({ a: "1", b: "2" })), { draw: [], drop: [] });
-  eq("増えたものは作る",
-    d(m({ a: "1" }), m({ a: "1", b: "2" })), { draw: ["b"], drop: [] });
-  eq("消えたものは消す",
-    d(m({ a: "1", b: "2" }), m({ a: "1" })), { draw: [], drop: ["b"] });
-  eq("変わったものは消してから作り直す",
-    d(m({ a: "1" }), m({ a: "9" })), { draw: ["a"], drop: ["a"] });
-  eq("初回は全部作る", d(new Map(), m({ a: "1", b: "2" })), { draw: ["a", "b"], drop: [] });
-  eq("全部消えたら全部消す", d(m({ a: "1", b: "2" }), new Map()), { draw: [], drop: ["a", "b"] });
-}
-
-// ── 差分描画が両方の地図に入っているか(ソースの形) ────
-// 全消しに戻ると、45秒ごとに全部作り直す元の重さに戻る。
-// 逆に記憶の捨て忘れがあると、地図を作り直したとき空のままになる。
-{
-  const L = src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas"));
-  const G = src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab"));
-  [["Leaflet", L], ["Google", G]].forEach(([name, body]) => {
-    eq(name + " は署名で比べる", body.includes("fieldDrawSig(f, st, showLabel, p.areaUnitKey)"), true);
-    eq(name + " は差分を取る", body.includes("diffDraw(prevSig, nextSig)"), true);
-    eq(name + " は消すぶんと作るぶんを分けて当てる",
-      body.includes("d.drop.forEach") && body.includes("d.draw.forEach"), true);
-    eq(name + " は地図を作り直したら記憶を捨てる",
-      (body.match(/drawnRef\.current = new Map\(\)/g) || []).length >= 2, true);
-  });
-  // 描画の effect の中で全消ししていないこと
-  const drawEffectOf = body => {
-    const i = body.indexOf("const showLabel = labelsVisible");
-    const j = body.indexOf("fitRef.current = targetBounds;", i);
-    return i > 0 && j > i ? body.slice(i, j) : "";
-  };
-  eq("Leaflet は描き直しで全消ししない", /clearLayers\(\)/.test(drawEffectOf(L)), false);
-  eq("Google は描き直しで全消ししない", /overlaysRef/.test(drawEffectOf(G)), false);
-  eq("Google の重ね物は圃場ごとにまとめている", G.includes("cur.overlays.forEach"), true);
-  eq("使わなくなった overlaysRef が残っていない", src.includes("overlaysRef"), false);
-}
-
-// ── 札(圃場名・面積)の出し分け(v8.89) ────────────────
-// 札は圃場1枚につきDOMを1つ(Leaflet)ないし2つ(Google)作り、パン・ズームの
-// たびに全部の位置が計算し直される。倍率だけでは、寄った状態で圃場が密な
-// ときに逃げ道がないので、手で消せるようにした。
-{
-  const v = t.labelsVisible, Z = t.PROGRESS_LABEL_MIN_ZOOM;
-  eq("しきい値は15", Z, 15);
-  eq("ONかつ倍率が足りていれば出す", v(true, Z), true);
-  eq("ONでも倍率が足りなければ出さない", v(true, Z - 1), false);
-  eq("OFFなら倍率が足りていても出さない", v(false, Z + 5), false);
-  eq("未設定(undefined)は従来どおり出す", v(undefined, Z), true);
-  eq("未設定でも倍率が足りなければ出さない", v(undefined, Z - 1), false);
-}
-
-// ── 札の切替が地図まで届いているか(ソースの形) ────────
-{
-  const tab = src.slice(src.indexOf("function ProgressMapTab"), src.indexOf("const S = {"));
-  eq("端末に残す", tab.includes('"tankmix:proglabels"'), true);
-  eq("既定は出す(更新で急に消えない)", tab.includes('!== "0"'), true);
-  eq("キャンバスへ渡している", /showLabels,/.test(tab), true);
-  // 上のツールバーにも、全画面の帯にも切替がある(押す場所が1か所だと、
-  // 全画面をやめてから戻る手間になる)
-  eq("ツールバーにも切替がある",
-    tab.indexOf("setShowLabels") < tab.indexOf("S.mapFullBar"), true);
-  eq("切替は2か所ある", (tab.match(/setShowLabels\(!showLabels\)/g) || []).length, 2);
-  const canvases = [
-    src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas")),
-    src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab")),
-  ];
-  canvases.forEach((body, i) => {
-    const name = i === 0 ? "Leaflet" : "Google";
-    eq(name + " が labelsVisible で判定する",
-      body.includes("labelsVisible(p.showLabels, zoom)"), true);
-    eq(name + " の描き直しの条件にも入っている",
-      /\}, \[ready, p\.fields, p\.statusByField, labelsVisible\(p\.showLabels, zoom\)/.test(body), true);
-    eq(name + " に倍率だけの判定が残っていない",
-      /showLabel = zoom >= PROGRESS_LABEL_MIN_ZOOM/.test(body), false);
-  });
+  // ── 小さく、それでも押せる ──
+  eq("指で押す的は44px角",
+    /mapSideBtn: \{[\s\S]{0,300}width: 44,[\s\S]{0,40}height: 44/.test(src), true);
+  // 絵文字だけなので、何のボタンかは title と読み上げ用の名前で補う
+  eq("4つとも読み上げ用の名前がある",
+    (seg.match(/"aria-label":/g) || []).length, 4);
+  eq("4つとも title がある(seg には次の全画面ボタンの title も1つ入る)",
+    (seg.match(/title:/g) || []).length >= 4, true);
+  eq("札OFFのときの見た目がある", src.includes("mapSideBtnOff: {"), true);
+  eq("使わなくなった帯の定義が残っていない", src.includes("mapFullBar"), false);
 }
 
 // ── 共有オフ→オンの順序(v8.87) ───────────────────────

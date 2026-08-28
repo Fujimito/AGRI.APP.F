@@ -163,9 +163,9 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <h1>薬液調合ノート<br>内部構造</h1>
   <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
   <dl class="facts">
-    <div class="fact"><dt>app.js</dt><dd class="num">12,744<small>行</small></dd></div>
+    <div class="fact"><dt>app.js</dt><dd class="num">12,749<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,194<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">285<small>件</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">236<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">127<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
@@ -449,7 +449,20 @@ flowchart TD
       <dt>調べた<br>こと</dt><dd>祖先に <code>transform</code> があると <code>fixed</code> の基準が画面でなくなる。これを当てて再現を試みると、<strong>覆いが縮む症状(v8.89の画面写真そのもの)は再現できた</strong>が、<strong>帯が消える症状は再現できなかった</strong>(旧方式の帯も覆いの下端に出た)。<code>index.html</code> の <code>.app-shell</code> 側にも <code>transform</code>・<code>filter</code>・<code>contain</code> は無い。<strong>原因は未特定。</strong></dd>
       <dt>対処</dt><dd>原因を突き止める代わりに、<strong>原因になりうる仕組みそのものをやめた</strong>。帯は覆いの子で、覆いは <code>display:flex; flex-direction:column</code>。ならば「一番下の子」として普通に置けばよく、<code>position:fixed</code> も <code>z-index</code> も要らない。<strong>レイアウト上の場所を実際に占める</strong>ので、画面外や何かの裏へ押し出されようがない。地図(<code>flex:1</code>)がそのぶん縮む。</dd>
       <dt>効果の<br>確かめ方</dt><dd>祖先に <code>transform</code> を当てて覆いを縮ませた状態(107〜791px)でも、帯は覆いの下端(729〜791px)に付いて回り、4つとも画面内に残った。<strong>覆いが画面を覆えなくても帯は出る</strong>。</dd>
-      <dt>残る<br>不確かさ</dt><dd>元の症状を再現できていない以上、<strong>これで直ったとは言えない</strong>。実機で確かめるまでは未解決として扱う。</dd>
+      <dt>結末</dt><dd><strong>これでも駄目だった。</strong>iPhone15 では帯が「タブバーの下に隠れて見えない」。原因はここで判明した(すぐ下)。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>見出しとタブバーが、全画面の覆いより手前に描かれる</h3>
+    <p class="ver">v8.93 で解決 / 3回外して4回目</p>
+    <dl>
+      <dt>機構</dt><dd>実機(iPhone15)では、見出し(<code>header</code>)とタブバーが全画面の覆い(<code>mapWrapFull</code>, <code>position:fixed; z-index:900</code>)より<strong>手前に描かれる</strong>。したがって画面の上端・下端に置いたボタンは、座標の上では画面内にあっても<strong>その裏に回って押せない</strong>。</dd>
+      <dt>3回外した<br>理由</dt><dd>手元の検証が<strong>座標しか見ていなかった</strong>。<code>getBoundingClientRect()</code> で「画面内にある」ことは確かめたが、<strong>その位置で最前面にいるか</strong>を確かめていなかった。<code>document.elementFromPoint()</code> を使えば1回で分かった。</dd>
+      <dt>再現の<br>作り方</dt><dd>見出しとタブバーに <code>position:relative; z-index:1000</code> を当てるだけ。これで実機と同じ状態になる。同じ条件で <code>elementFromPoint</code> を見ると、<strong>上端の1つ目は見出しの文字、2つ目は <code>HEADER</code>、下端はタブバーの <code>BUTTON</code></strong> が手前にいて、どれも押せない。</dd>
+      <dt>対処</dt><dd><strong>画面の上下を使わない。</strong>地図の右わきに縦一列(<code>position:absolute</code> で覆いを基準)。上下の端から離れているので、見出し・タブバー・ノッチ・ホームバーのどれにも当たらない。絵文字だけの44px角にして幅も取らない。</dd>
+      <dt>検証</dt><dd>見出しとタブバーを手前に出した状態、さらに覆いが縮んだ状態(107〜791px)を重ねても、<strong>4つとも <code>elementFromPoint</code> が自分を返す</strong>(＝最前面で押せる)。393x852(iPhone15相当)・360x780・852x393(横向き)・1280x720 で確認。</dd>
+      <dt>教訓</dt><dd>重なりの不具合は<strong>座標では捕まらない</strong>。「見えているか」は <code>elementFromPoint</code> で聞く。</dd>
     </dl>
   </div>
 
@@ -622,7 +635,7 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">285</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">236</td></tr>
       <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">127</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
@@ -665,7 +678,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.92 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.93 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>
