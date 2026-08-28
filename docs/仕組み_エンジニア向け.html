@@ -163,10 +163,10 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <h1>薬液調合ノート<br>内部構造</h1>
   <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
   <dl class="facts">
-    <div class="fact"><dt>app.js</dt><dd class="num">12,033<small>行</small></dd></div>
-    <div class="fact"><dt>Code.gs</dt><dd class="num">1,086<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">178<small>件</small></dd></div>
-    <div class="fact"><dt>GAS側テスト</dt><dd class="num">100<small>件</small></dd></div>
+    <div class="fact"><dt>app.js</dt><dd class="num">12,206<small>行</small></dd></div>
+    <div class="fact"><dt>Code.gs</dt><dd class="num">1,194<small>行</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">185<small>件</small></dd></div>
+    <div class="fact"><dt>GAS側テスト</dt><dd class="num">127<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
 </header>
@@ -308,12 +308,13 @@ sequenceDiagram
   G->>S: 更新日時が since より後の行だけ
   G-->>B: fields, works, chems, serverTime
   Note over B: 送信状態と実績メモは上書きしない
-  Note over B: pullat = serverTime
+  Note over B: pullat = serverTime<br/>(今より2分手前)
 </pre>
     </div>
   </div>
   <div class="col">
   <p>順番は<strong>必ず「送ってから受け取る」</strong>。逆にすると、手元の未送信の変更が受信データに埋もれる。共有をオフからオンに戻したときの経路だけこの順が守られておらず、<code>await</code> していない。<strong>未修正。</strong></p>
+  <p><code>serverTime</code> は<strong>今より2分手前</strong>を返す(<code>PULL_LAG_MS</code>)。押し込み中の行を取りこぼさないための幅で、代わりに直近2分の行は毎回配り直される(08節)。</p>
   <p><code>pullat</code> は<strong>チームに紐付いていない</strong>。チームコードを変えたら捨てる(v8.78)。残すと、新しいチームに前からあるデータが <code>since</code> で弾かれて一生届かない。</p>
   </div>
 </section>
@@ -397,13 +398,13 @@ flowchart TD
       <tr><td>作業</td><td class="num">24</td><td>予定と実績。進捗地図の元</td><td>チーム＋作業ID</td></tr>
       <tr><td>圃場マスタ</td><td class="num">14</td><td>名前・作物・面積・ポリゴン</td><td>チーム＋圃場ID</td></tr>
       <tr><td>薬剤マスタ</td><td class="num">11</td><td>薬剤名・剤型・希釈倍率</td><td>チーム＋薬剤名</td></tr>
-      <tr><td>防除記録</td><td class="num">—</td><td>確定した台帳。追記のみ</td><td><strong>記録IDのみ</strong></td></tr>
+      <tr><td>防除記録</td><td class="num">16</td><td>確定した台帳。追記のみ</td><td>チーム＋記録ID</td></tr>
       <tr><td>_共有データ</td><td class="num">4</td><td>上書き前の値を残す履歴。200行で打ち切り</td><td>—</td></tr>
     </tbody>
   </table>
   </div>
   <div class="col">
-  <p>防除記録シートだけチームコード列がなく、記録IDだけで行を探す。作業IDが内容から決まるようになったので、別チームが同じ日に同じ圃場を入れると理屈の上では衝突する。<strong>未修正。</strong></p>
+  <p>防除記録シートだけチームコード列がなく、記録IDだけで行を探していた。作業IDが内容から決まるので、別チームが同じ日に同じ圃場を入れると衝突する。<strong>v8.85 で修正</strong>(08節)。チームコードは<strong>列16</strong>、つまり末尾に足してある。先頭に挿すと既存シートの全列がずれ、設置済みのスプレッドシートを手で直すことになるため。他のシートは列1なので、位置は揃っていない。</p>
   <h3>日付が化ける</h3>
   <p>スプレッドシートは <code>"2026-08-27"</code> をセルに入れた時点で <code>Date</code> と解釈する。読み戻すと <code>Date</code> オブジェクトになり、テキスト書式の列へ書き戻すと <code>"Mon Jul 13 2026 00:00:00 GMT+0900"</code> になる。<code>WORK_TEXT_COLS</code> で書式を固定しつつ、<code>ymd_()</code> が <code>Date</code>・ISO文字列・化けた文字列のどれでも <code>yyyy-MM-dd</code> に戻す。</p>
   </div>
@@ -412,6 +413,42 @@ flowchart TD
 <section>
   <h2><span class="no">08</span><span>詰まる所</span></h2>
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
+
+  <div class="fail">
+    <h3>受信の基準時刻が、書き込み中の行を追い越す</h3>
+    <p class="ver">v8.85 で緩和(上限つき) / 実測はしていない</p>
+    <dl>
+      <dt>機構</dt><dd>押し込み(<code>upsertRows_</code>)は行を組み立てる前に更新日時 <code>at</code> を採り、そのあと <code>ensureRows_</code> と <code>setValues</code> を通ってから実際にシートへ載る。この間に別の端末が <code>pull</code> で基準時刻を採って読み終えると、その行は<strong>「<code>at</code> は基準時刻より古いのに、読んだ時点ではまだシートに無い」</strong>状態をすり抜ける。</dd>
+      <dt>症状</dt><dd>pull した端末は基準時刻を保存して次回そこから先だけを求めるので、<strong>その行は永久に配られない</strong>。消えたことに気づく手立てがない。</dd>
+      <dt>なぜ<br>重なるか</dt><dd><code>pull</code> は <code>doRead_</code> で<strong>ロックを取る前に</strong>抜ける。読みを速くするための設計で、そのぶん押し込みとの重なりが排除されていない。</dd>
+      <dt>対処</dt><dd><code>pull</code> にもロックを取らせる案と迷ったが、他端末の送信を待って <code>busy</code> を返すようになり、電波の悪い現場で<strong>新しい失敗モードが増える</strong>。代わりに返す基準時刻を <code>PULL_LAG_MS</code>(2分)手前にした。書き込み中だった行は次回もう一度配られる。</dd>
+      <dt>代償</dt><dd>直近2分の行を毎回配り直す。マージは冪等なので害はないが、編集日時が進んでいないものまで適用すると保存と再描画が毎回走るので、アプリ側に <code>keepLocalEdit</code> を置いて止めた。</dd>
+      <dt>限界</dt><dd><strong>上限つきの保証</strong>。<code>at</code> を採ってから <code>setValues</code> が載るまでが2分を超えて長引けば、依然として取りこぼす。この所要時間は実測していない。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>更新日時が Date に化けて、since の比較が壊れる</h3>
+    <p class="ver">v8.85 で修正 / 圃場マスタ・薬剤マスタのみ</p>
+    <dl>
+      <dt>機構</dt><dd>更新日時は ISO 文字列で書くが、<strong>書式を固定していない列ではシートが日時として解釈</strong>し、読み戻すと <code>Date</code> で返る。<code>String()</code> すると <code>"Wed Aug 26 2026 ..."</code> になり、ISO との辞書順比較が壊れる。作業シートだけ <code>WORK_TEXT_COLS</code> で守られており、圃場マスタと薬剤マスタが抜けていた。掃除の側は対処済みなのに <code>pullRows_</code> が素通しだった。</dd>
+      <dt>症状</dt><dd><code>"W" &gt; "2"</code> なので<strong>常に「新しい」と判定される</strong>。取りこぼしではなく配り過ぎで、害は軽いが <code>since</code> の絞り込みがその行だけ効かなくなる。</dd>
+      <dt>対処</dt><dd><code>atIso_()</code> を切り出して読み側で吸収し、<code>FIELD_TEXT_COLS</code> / <code>CHEM_TEXT_COLS</code> でそもそも化けさせないようにした。両方やる。</dd>
+      <dt>見逃した<br>理由</dt><dd>張りぼてが ISO の日時を化かしておらず、<code>setNumberFormat</code> も素通りだった。<strong>さらに <code>Date</code> の realm が違い、Code.gs 側の <code>instanceof Date</code> が常に false</strong>だった(09節)。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>別チームが、同じ記録IDで台帳の行を奪い合う</h3>
+    <p class="ver">v8.85 で修正 / 台帳(防除記録シート)だけ取り残されていた</p>
+    <dl>
+      <dt>機構</dt><dd><code>findRow_</code> が<strong>記録IDだけ</strong>で行を探していた。記録IDは作業IDそのもので、v8.73 から「日付＋圃場ID」で決まる。つまり<strong>チームが違っても同じIDになる</strong>。圃場マスタ・作業シートは <code>upsertRows_</code> が「チーム＋ID」で分けていたのに、台帳だけチームコード列を持っていなかった。</dd>
+      <dt>症状</dt><dd>別チームが同じ日に同じ圃場を入れると、<strong>後から送ったほうが相手の行を書き換える</strong>。<code>report</code> なら相手の記録が勝手に「散布済」になり、実散布量と報告日まで相手のものに置き換わる。テストで再現させた。</dd>
+      <dt>対処</dt><dd>列16に「チームコード」を足し、<code>findRow_</code> を「記録ID＋チーム」で探すようにした。<strong>末尾に足している</strong>のは、先頭に挿すと既存シートの全列がずれ、設置済みのスプレッドシートを手で直すことになるため。</dd>
+      <dt>移行</dt><dd>v8.84 以前に書かれた行はチーム欄が空で、<strong>どのチームのものか判別できない</strong>。拾えないと <code>report</code> が既存行を見つけられず二重行になるので、第2段として拾い、拾った側が <code>claimRow_</code> でチームを書き戻す。触るたびに1行ずつ移行される。別チームが同じ記録IDを持っていた場合は<strong>先に触ったほうがその行を取る</strong>が、これは v8.84 までと同じ挙動で、情報が無い以上これ以上は詰められない。</dd>
+      <dt>互換</dt><dd><code>team</code> を送らない旧アプリからはIDだけで探す。旧アプリ × 新GAS を壊さないため。</dd>
+    </dl>
+  </div>
 
   <div class="fail">
     <h3>保存に失敗しても、何も起きない</h3>
@@ -511,8 +548,8 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">155</td></tr>
-      <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">100</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">185</td></tr>
+      <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">127</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
     </tbody>
@@ -520,7 +557,8 @@ flowchart TD
   </div>
   <div class="col">
   <p>app.js は <code>ReactDOM.createRoot(...)</code> の行を差し替えて評価し、トップレベルの関数を <code>globalThis</code> へ吐き出す。UIを動かさずに計算だけ試せる。</p>
-  <p>張りぼては<strong>実物の嫌なところを模す</strong>のが仕事。<code>"2026-08-27"</code> を <code>Date</code> に化かす、1000行で例外にする、<code>deleteRows</code> で行数が減る。ここを手加減すると、08節のような不具合がすり抜ける。</p>
+  <p>張りぼては<strong>実物の嫌なところを模す</strong>のが仕事。<code>"2026-08-27"</code> を <code>Date</code> に化かす、<strong>ISO の日時も同じく化かす</strong>、<strong><code>setNumberFormat("@")</code> を当てた列だけは化かさない</strong>、1000行で例外にする、<code>deleteRows</code> で行数が減る。ここを手加減すると、08節のような不具合がすり抜ける。</p>
+  <p>張りぼての <code>Date</code> は<strong>vm の外で作られる</strong>。そのまま渡すと Code.gs 側の <code>v instanceof Date</code> が realm 違いで必ず false になり、<code>ymd_</code>・<code>atIso_</code>・掃除の Date 分岐が<strong>一度も通らないままテストが通っていた</strong>(文字列パースのフォールバックが拾っていた)。<code>makeContext</code> でこちら側の <code>Date</code> を渡して realm を揃えている。</p>
   <h3>直したことの確かめ方</h3>
   <p>テストを足したら<strong>必ず対照を取る</strong>。修正を戻して、足したテストが実際に落ちることを見る。落ちないテストは何も守っていない。戻したあとはハッシュで元通りを確認する。</p>
   </div>
@@ -553,7 +591,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.84 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.85 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>

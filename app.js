@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.84";
+const APP_VERSION = "v8.85";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -667,6 +667,23 @@ let __lastId = 0;
 // ★数値で作ること。Code.gs の workObj_ が id を Number(r[0]) で読むので、
 //   文字列のIDにすると受け取った側で NaN になる。
 // FNV-1a を時を変えて2本回し、53bit に収める。数千件規模で衝突する見込みはない。
+// 受け取った1件を、手元の1件で押しとどめるか。true なら適用しない。
+//
+// GAS は pull の基準時刻を少し手前にずらして返す(Code.gs の PULL_LAG_MS)。
+// 押し込み中の行を取りこぼさないための措置だが、代わりに直近の行が毎回
+// 配り直される。編集日時が進んでいないものまで適用すると、中身は同じなのに
+// 保存と再描画が毎回走り、受信件数の表示も嘘になる。
+//
+// 編集日時が両方入っていれば「同じかそれより古い」で止める。同じ編集日時は
+// 同じ編集なので、適用しても結果は変わらない。
+// 片方が空のときは従来どおり「手元のほうが新しければ残す」だけにする。
+// 空を「最も古い」と見なすため、空 vs 空は止めない(初期データを取りこぼさない)。
+const keepLocalEdit = (oldAt, incAt) => {
+  const a = String(oldAt || ""),
+    b = String(incAt || "");
+  if (a && b) return a >= b;
+  return a > b;
+};
 const workIdFor = (workDate, fieldId, nth) => {
   const s = String(workDate) + ":" + String(fieldId) + (nth > 1 ? "#" + nth : "");
   let h1 = 0x811c9dc5,
@@ -1941,6 +1958,10 @@ function App() {
       if (!w.synced) {
         const j = await post({
           type: "record",
+          // 台帳シートは記録IDだけで行を探していた。別チームが同じ日に同じ圃場を
+          // 入れると作業IDが一致して互いの行を上書きする。GAS側がチームで
+          // 分けられるように送る(v8.85)
+          team: teamCode.trim(),
           recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
           record: buildPayload(w)
         });
@@ -1966,6 +1987,10 @@ function App() {
       if (cur && cur.unreportPending && cur.synced) {
         const j = await post({
           type: "unreport",
+          // 台帳シートは記録IDだけで行を探していた。別チームが同じ日に同じ圃場を
+          // 入れると作業IDが一致して互いの行を上書きする。GAS側がチームで
+          // 分けられるように送る(v8.85)
+          team: teamCode.trim(),
           recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
           record: buildPayload(cur)
         });
@@ -1985,6 +2010,10 @@ function App() {
       if (cur && cur.reported && cur.synced && !cur.reportSynced) {
         const j = await post({
           type: "report",
+          // 台帳シートは記録IDだけで行を探していた。別チームが同じ日に同じ圃場を
+          // 入れると作業IDが一致して互いの行を上書きする。GAS側がチームで
+          // 分けられるように送る(v8.85)
+          team: teamCode.trim(),
           recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
           record: buildPayload(cur)
         });
@@ -2468,7 +2497,7 @@ function App() {
       }
       // この端末に、まだ送っていない新しい編集があるなら残す。
       // 受け取った側で上書きすると、目の前で直したばかりの形が戻る
-      if (String(old.updatedAt || "") > String(inc.updatedAt || "")) return;
+      if (keepLocalEdit(old.updatedAt, inc.updatedAt)) return;
       byId.set(key, {
         ...old,
         ...itemToField(inc)
@@ -2499,7 +2528,7 @@ function App() {
           return;
         }
         if (!inc.workDate) return; // 壊れた行は入れない
-        if (old && String(old.updatedAt || "") > String(inc.updatedAt || "")) return;
+        if (old && keepLocalEdit(old.updatedAt, inc.updatedAt)) return;
         byW.set(key, old ? {
           ...old,
           ...itemToWork(inc),
@@ -2550,7 +2579,7 @@ function App() {
           }
           return;
         }
-        if (old && String(old.updatedAt || "") > String(inc.updatedAt || "")) return;
+        if (old && keepLocalEdit(old.updatedAt, inc.updatedAt)) return;
         byC.set(key, old ? {
           ...old,
           ...itemToChem(inc)

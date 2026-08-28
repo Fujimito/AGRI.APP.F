@@ -66,10 +66,14 @@ const HEADERS = [
   "状態",         // 13 調合済 / 散布済
   "報告日",       // 14
   "備考",         // 15
+  // 末尾に足している。先頭に挿すと既存シートの全列がずれ、設置済みの
+  // スプレッドシートを手で直すことになる。台帳は人が読む表なので、
+  // 他シート(圃場マスタ・作業)の列1と位置が揃わないのは許容する。
+  "チームコード", // 16
 ];
 const COL = {
   ID: 2, AREA: 7, CHEM_N: 8, CHEM_TEXT: 9, TOTAL: 10, WATER: 11,
-  SPRAYED: 12, STATUS: 13, REPORT_DATE: 14, MEMO: 15,
+  SPRAYED: 12, STATUS: 13, REPORT_DATE: 14, MEMO: 15, TEAM: 16,
 };
 
 // ── セルに書く文字列を「数式ではない」ものとして固定する ──
@@ -109,6 +113,9 @@ function secretEquals_(a, b) {
   return diff === 0;
 }
 
+// 見出しは掴むたびに現行 HEADERS と突き合わせる。列を足した版へ差し替えたとき、
+// 古い見出しのまま新しい幅で書くと見出しと中身がずれる(getRecSheet_ と同じ理由)。
+// 直すのは見出し行だけで、データ行には触らない。
 function getSheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sh = ss.getSheetByName(SHEET_NAME);
@@ -116,6 +123,17 @@ function getSheet_() {
   if (sh.getLastRow() === 0) {
     sh.appendRow(HEADERS);
     sh.getRange(1, 1, 1, HEADERS.length).setFontWeight("bold").setBackground("#EDF5EE");
+    sh.setFrozenRows(1);
+    return sh;
+  }
+  const cur = sh.getRange(1, 1, 1, HEADERS.length).getValues()[0];
+  let same = true;
+  for (let i = 0; i < HEADERS.length; i++) {
+    if (String(cur[i]) !== HEADERS[i]) { same = false; break; }
+  }
+  if (!same) {
+    sh.getRange(1, 1, 1, HEADERS.length).setValues([HEADERS])
+      .setFontWeight("bold").setBackground("#EDF5EE");
     sh.setFrozenRows(1);
   }
   return sh;
@@ -169,14 +187,50 @@ function fixHeaders() {
   sh.setFrozenRows(1);
 }
 
-// 指定した記録IDの行番号を返す(なければ0)
-function findRow_(sh, recordId) {
+// 指定した記録IDの行番号を返す(なければ0)。
+//
+// 探す鍵は「記録ID＋チームコード」。IDだけで探すと、別のチームが同じ日に
+// 同じ圃場を入れたとき同じ記録IDになり(作業IDは v8.73 から日付＋圃場IDで
+// 決まる)、互いの行を上書きし合う。台帳(圃場マスタ・作業)は upsertRows_ で
+// 既にチーム＋IDで分けているが、防除記録シートだけ列が無く取り残されていた。
+//
+// チーム欄が空の行は v8.84 以前に書かれたもので、どのチームのものか判別できない。
+// 拾えないと report / unreport が既存行を見つけられず二重行になるため、
+// 第2段として拾う。拾った側が呼び出し元でチームを書き戻し、以後は正しく分かれる。
+// 別チームが同じ記録IDを持っていた場合は先に触ったほうがその行を取るが、
+// これは v8.84 までと同じ挙動で、情報が無い以上これ以上は詰められない。
+//
+// team が空(チーム未設定、または team を送らない旧アプリ)のときはIDだけで探す。
+// 旧アプリ × 新GAS の組み合わせを壊さないため。
+function findRow_(sh, recordId, team) {
   if (sh.getLastRow() < 2) return 0;
-  const ids = sh.getRange(2, COL.ID, sh.getLastRow() - 1, 1).getValues().flat();
-  for (let i = 0; i < ids.length; i++) {
-    if (String(ids[i]) === String(recordId)) return i + 2;
+  const n = sh.getLastRow() - 1;
+  const ids = sh.getRange(2, COL.ID, n, 1).getValues();
+  const t = String(team == null ? "" : team);
+  if (!t) {
+    for (let i = 0; i < n; i++) {
+      if (String(ids[i][0]) === String(recordId)) return i + 2;
+    }
+    return 0;
   }
-  return 0;
+  const teams = sh.getRange(2, COL.TEAM, n, 1).getValues();
+  let legacy = 0;
+  for (let i = 0; i < n; i++) {
+    if (String(ids[i][0]) !== String(recordId)) continue;
+    const rt = String(teams[i][0] == null ? "" : teams[i][0]);
+    if (rt === t) return i + 2;
+    if (!rt && !legacy) legacy = i + 2;
+  }
+  return legacy;
+}
+
+// チーム欄が空の行に、いま送ってきたチームを書き入れる。
+// findRow_ が第2段で拾った行を、その場で移行するための後始末。
+function claimRow_(sh, row, team) {
+  const t = String(team == null ? "" : team);
+  if (!t || row <= 0) return;
+  if (String(sh.getRange(row, COL.TEAM).getValue() || "")) return;
+  sh.getRange(row, COL.TEAM).setValue(safeCell_(t));
 }
 
 // チーム共有データ用のシート(チームコード / データ / 保存日時 / 保存者)
@@ -326,6 +380,28 @@ const CHEM_ID_COL = 0, CHEM_EDIT_COL = 6, CHEM_AT_COL = 7;
 // 超えたぶんはアプリ側が分割して送り直す。無言で切り捨てない。
 const PUSH_MAX = 300;
 
+// ── pull が返す基準時刻を、どれだけ手前にずらすか ──
+//
+// 押し込み(upsertRows_)は行を組み立てる前に更新日時 at を採り、そのあと
+// ensureRows_ と setValues を通ってから実際にシートへ載る。この間に別の端末が
+// pull で基準時刻を採って読み終えると、その行は「at は基準時刻より古いのに、
+// 読んだ時点ではまだシートに無い」状態をすり抜ける。pull した端末は基準時刻を
+// 保存して次回そこから先だけを求めるので、その行は永久に配られない。
+// 静かな取りこぼしで、消えたことに気づく手立てがない。
+//
+// pull は doRead_ でロックを取らずに走るため(そのぶん読みが速い)、この重なりは
+// 排除されていない。ロックを取らせる案もあったが、pull が他端末の送信を待って
+// busy を返すようになり、電波の悪い現場で新しい失敗モードが増える。
+//
+// 代わりに、返す基準時刻を「今より少し手前」にする。書き込み中だった行は
+// 次回もう一度配られる。マージは冪等(編集日時で勝ち負けを決める)なので
+// 二度配られても害はない。
+//
+// 上限つきの保証である点に注意する。at を採ってから setValues がシートに
+// 載るまでがこの幅を超えて長引けば、依然として取りこぼす。実測はしていない。
+// 幅を広げるほど安全になるが、毎回配り直す行が増える。
+const PULL_LAG_MS = 120000;   // 2分
+
 // 更新日時は ISO8601 の文字列で持つ。Date のまま入れるとシートのタイムゾーンや
 // 表示形式に引きずられ、差分取得(since より新しい行)の比較がずれる。
 // ISO文字列なら辞書順の比較がそのまま時刻の比較になる。
@@ -364,6 +440,17 @@ function isoNow_() {
   return new Date().toISOString();
 }
 
+// 更新日時セルの値を ISO 文字列に戻す。
+// ISO を書き込んでも、書式が固定されていない列ではシートが日付として解釈し、
+// 読み戻すと Date で返る。そのまま String() すると "Wed Aug 26 2026 ..." になり、
+// ISO 文字列との辞書順比較が壊れる("W" > "2" なので、常に「新しい」と判定される)。
+// 取りこぼしではなく配り過ぎになるので害は軽いが、since の絞り込みがその行だけ
+// 効かなくなる。掃除の側では対処していたのに pullRows_ が素通しだった(v8.85)。
+function atIso_(v) {
+  if (v instanceof Date) return v.toISOString();
+  return String(v == null ? "" : v);
+}
+
 // ヘッダー行を現行の定義に合わせる。列を増やした版へ差し替えたとき、
 // 古いヘッダーのまま新しい幅で書き込むと見出しと中身がずれるため、
 // シートを掴むたびに幅だけ確認する。
@@ -393,18 +480,35 @@ function getRecSheet_(name, headers, headBg) {
 // 読み戻しは ymd_ でも直せるが、そもそも文字列のまま置いておく方が安全。
 // 表示上も "2026-08-26" のままで、ロケールで揺れない。
 const WORK_TEXT_COLS = [3, 15, 16];  // 作業日 / 実績入力日時 / 編集日時(1始まり)
+// 圃場マスタと薬剤マスタにも同じ手当てが要る。編集日時・更新日時は ISO 文字列だが、
+// 書式が固定されていないとシートが日付として解釈して Date で返す。
+// atIso_ が読み側で吸収するようになったが、そもそも化けさせない方が確実(1始まり)。
+const FIELD_TEXT_COLS = [10, 11];    // 編集日時 / 更新日時
+const CHEM_TEXT_COLS  = [7, 8];      // 編集日時 / 更新日時
 
-function getFieldSheet_() { return getRecSheet_(FIELD_SHEET, FIELD_HEADERS, "#EDF5EE"); }
-function getWorkSheet_()  {
-  const sh = getRecSheet_(WORK_SHEET, WORK_HEADERS, "#EAF3FA");
-  // 一度だけではなく毎回当てる。列を増やした版へ差し替えたときや、
-  // 手でシートを作り直したときに抜けるのを防ぐ。軽い操作なので毎回でも良い。
-  WORK_TEXT_COLS.forEach(function (c) {
+// 指定した列を文字列書式に固定する。一度だけではなく毎回当てる。
+// 列を増やした版へ差し替えたときや、手でシートを作り直したときに抜けるのを防ぐ。
+function forceTextCols_(sh, cols) {
+  cols.forEach(function (c) {
     sh.getRange(1, c, sh.getMaxRows() || 1000, 1).setNumberFormat("@");
   });
+}
+
+function getFieldSheet_() {
+  const sh = getRecSheet_(FIELD_SHEET, FIELD_HEADERS, "#EDF5EE");
+  forceTextCols_(sh, FIELD_TEXT_COLS);
   return sh;
 }
-function getChemSheet_()  { return getRecSheet_(CHEM_SHEET,  CHEM_HEADERS,  "#F3EEF8"); }
+function getWorkSheet_()  {
+  const sh = getRecSheet_(WORK_SHEET, WORK_HEADERS, "#EAF3FA");
+  forceTextCols_(sh, WORK_TEXT_COLS);
+  return sh;
+}
+function getChemSheet_()  {
+  const sh = getRecSheet_(CHEM_SHEET, CHEM_HEADERS, "#F3EEF8");
+  forceTextCols_(sh, CHEM_TEXT_COLS);
+  return sh;
+}
 
 // ── 圃場1件 → 行 ──
 // 文字列はすべて safeCell_ を通す。圃場名・地区はユーザーの自由入力で、
@@ -449,7 +553,7 @@ function fieldObj_(r) {
     center: (lat === "" || lng === "") ? null : [Number(lat), Number(lng)],
     polygon: Array.isArray(poly) ? poly : [],
     updatedAt: String(r[FIELD_EDIT_COL] || ""),
-    serverAt: String(r[FIELD_AT_COL] || ""),
+    serverAt: atIso_(r[FIELD_AT_COL]),
     by: String(r[11] || ""),
     deleted: !!r[13],
   };
@@ -502,7 +606,7 @@ function workObj_(r) {
     by: String(r[11] || ""),
     reportedAt: ymd_(r[13]),
     updatedAt: String(r[WORK_EDIT_COL] || ""),
-    serverAt: String(r[WORK_AT_COL] || ""),
+    serverAt: atIso_(r[WORK_AT_COL]),
     deleted: !!r[16],
     crop: String(r[17] || ""),
     areaA: r[18] === "" ? "" : Number(r[18]),
@@ -551,7 +655,7 @@ function chemObj_(r) {
     form: String(r[4] || ""),
     maxUse: r[5] === "" ? "" : Number(r[5]),
     updatedAt: String(r[CHEM_EDIT_COL] || ""),
-    serverAt: String(r[CHEM_AT_COL] || ""),
+    serverAt: atIso_(r[CHEM_AT_COL]),
     deleted: !!r[10],
   };
 }
@@ -598,8 +702,7 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       // 更新日時はシート側で Date に化けることがある。ISO に揃えてから比べる
-      const v = r[atCol];
-      const iso = v instanceof Date ? v.toISOString() : String(v == null ? "" : v);
+      const iso = atIso_(r[atCol]);
       if (r[delCol] && iso && iso < limit) { purged++; continue; }
       kept.push(r);
     }
@@ -673,7 +776,7 @@ function pullRows_(sh, headers, atCol, team, since, mapper) {
     const r = rows[i];
     if (!r[0] && r[0] !== 0) continue;              // 空行
     if (team && String(r[1]) !== String(team)) continue;
-    if (s && String(r[atCol] || "") <= s) continue;
+    if (s && atIso_(r[atCol]) <= s) continue;
     out.push(mapper(r));
   }
   return out;
@@ -840,6 +943,7 @@ function buildRow_(data, status) {
     status,
     safeCell_(status === "散布済" ? (rec.reportDate || "") : ""),
     safeCell_((status === "散布済" ? (rec.reportMemo || rec.memo) : rec.memo) || ""),
+    safeCell_(String(data.team || "")),
   ];
 }
 
@@ -865,9 +969,10 @@ function doRead_(type, data) {
     if (!data.team) return json_({ ok: false, error: "team required" });
     const since = String(data.since || "");
     // serverTime は「この応答が含む範囲の終わり」。次回の since に使う。
-    // 読む前に採っておく。読んでいる最中に他の端末が書いた行は、次回もう一度
-    // 配られるだけで済む。読んだ後に採ると、その行を永久に取りこぼす。
-    const serverTime = isoNow_();
+    // 読む前に採っておく。読んだ後に採ると、読んでいる最中に書かれた行を
+    // 永久に取りこぼす。
+    // さらに PULL_LAG_MS ぶん手前にずらす。理由は定義側のコメントを参照。
+    const serverTime = new Date(Date.now() - PULL_LAG_MS).toISOString();
     return json_({
       ok: true,
       fields: pullRows_(getFieldSheet_(), FIELD_HEADERS, FIELD_AT_COL, data.team, since, fieldObj_),
@@ -1003,7 +1108,10 @@ function doPost(e) {
       return json_({ ok: false, error: "invalid payload" });
     }
     const sh = getSheet_();
-    const row = findRow_(sh, rec.id);
+    const team = String(data.team || "");
+    const row = findRow_(sh, rec.id, team);
+    // 第2段で拾ったチーム欄が空の行は、ここで自分のチームのものとして確定させる
+    if (row > 0) claimRow_(sh, row, team);
 
     if (type === "record") {
       // 既に行がある場合は薬剤の内容だけ上書きする。

@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "toMapStatus", "workIdFor",
+  "PROGRESS_ORDER", "toMapStatus", "workIdFor", "keepLocalEdit",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -481,6 +481,24 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.includes('(agriAmountUnit(c.form) === "kg" ? "g" : "mL")'), true);
   eq("CSV に mL の直書きが残っていない",
     src.indexOf('Math.round(c.ml) : 0) + "mL)"'), -1);
+}
+
+// ── 受信マージの押しとどめ判定(v8.85) ────────────────
+// GAS が pull の基準時刻を手前にずらすので、直近の行は毎回配り直される。
+// 編集日時が進んでいないものを適用すると、保存と再描画が毎回走る。
+{
+  const k = t.keepLocalEdit;
+  eq("同じ編集日時は適用しない",
+    k("2026-08-01T00:00:00.000Z", "2026-08-01T00:00:00.000Z"), true);
+  eq("手元のほうが新しければ適用しない",
+    k("2026-08-02T00:00:00.000Z", "2026-08-01T00:00:00.000Z"), true);
+  eq("受け取ったほうが新しければ適用する",
+    k("2026-08-01T00:00:00.000Z", "2026-08-02T00:00:00.000Z"), false);
+  eq("手元に無い(空)なら適用する", k("", "2026-08-01T00:00:00.000Z"), false);
+  eq("受け取った側に編集日時が無ければ適用しない",
+    k("2026-08-01T00:00:00.000Z", ""), true);
+  eq("両方とも空なら適用する(初期データを取りこぼさない)", k("", ""), false);
+  eq("undefined も空として扱う", [k(undefined, undefined), k(undefined, "x")], [false, false]);
 }
 
 // ── 版数の整合(sw.js と揃っているか) ───────────────────

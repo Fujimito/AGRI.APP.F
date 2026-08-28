@@ -53,8 +53,12 @@ const F2 = {
   eq("pull 中心座標", all.fields[0].center, [33.1, 130.4]);
   eq("pull 面積", all.fields[0].areaA, 12.5);
 
+  // serverTime は「今」ではなく PULL_LAG_MS ぶん手前を返す。押し込み中だった行を
+  // 取りこぼさないための幅なので、直後に同じ since で引くと同じ行が再び返る。
   const none = post(ctx, { type: "pull", team: TEAM, since: all.serverTime });
-  eq("pull since 以降は0件", none.fields.length, 0);
+  eq("直近の行は配り直される(冪等なので害はない)", none.fields.length, 2);
+  const after = post(ctx, { type: "pull", team: TEAM, since: new Date().toISOString() });
+  eq("今より後を求めれば0件", after.fields.length, 0);
 
   const other = post(ctx, { type: "pull", team: "team-b", since: "" });
   eq("別チームには配らない", other.fields.length, 0);
@@ -433,7 +437,9 @@ const F2 = {
   post(ctx, { type: "pushWorks", team: TEAM, items: [W] });
 
   const sh = ctx.SHEET_STATE.getSheetByName("作業");
-  ok("シート側では日付になっている", sh.getRange(2, 3).getValue() instanceof Date);
+  // 作業日の列は "@"(文字列)書式に固定してあるので、シートは日付として解釈しない。
+  // 書式を当てていない列では実際に Date になる(下の「防除記録の散布日」で確認)。
+  eq("書式を固定した列は文字列のまま", sh.getRange(2, 3).getValue(), "2026-08-26");
 
   const all = post(ctx, { type: "pull", team: TEAM, since: "" });
   eq("pull の作業日は yyyy-MM-dd", all.works[0].workDate, "2026-08-26");
@@ -465,6 +471,150 @@ const F2 = {
   ok("features に pushChems が入る", g.features.indexOf("pushChems") >= 0);
   ok("features に workPlan が入る", g.features.indexOf("workPlan") >= 0);
   ok("features に unreport が入る", g.features.indexOf("unreport") >= 0);
+}
+
+// ── 17. 防除記録シートのチーム分離(v8.85) ──
+{
+  const ctx = makeContext({});
+  // 作業IDは「日付＋圃場ID」で決まるので、別チームでも同じ記録IDになりうる
+  const rec = {
+    id: "2026-08-20:1001", date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
+    chems: [{ name: "薬剤A", ratio: 1000, ml: 100 }],
+    totalL: 100, waterMl: 99900, memo: "",
+  };
+  const sh = ctx.SHEET_STATE.getSheetByName.bind(ctx.SHEET_STATE);
+  post(ctx, { type: "record", team: "team-a", recorder: "藤本", record: rec });
+  const r = post(ctx, { type: "record", team: "team-b", recorder: "田中",
+                        record: Object.assign({}, rec, { field: "南の田" }) });
+  const s17 = sh("防除記録");
+  eq("同じ記録IDでもチームが違えば別の行になる", [r.ok, r.added, s17.getLastRow()], [true, 1, 3]);
+  eq("チームコード列に書かれる",
+     [s17.getRange(2, 16).getValue(), s17.getRange(3, 16).getValue()], ["team-a", "team-b"]);
+  eq("見出しの末尾はチームコード", s17.getRange(1, 16).getValue(), "チームコード");
+
+  // 報告は自分のチームの行だけを更新する
+  post(ctx, { type: "report", team: "team-b", recorder: "田中",
+              record: Object.assign({}, rec, { sprayedL: 95, reportDate: "2026-08-20" }) });
+  eq("team-a の行は触られない", s17.getRange(2, 13).getValue(), "調合済");
+  eq("team-b の行だけ散布済になる", s17.getRange(3, 13).getValue(), "散布済");
+  eq("行は増えない", s17.getLastRow(), 3);
+}
+
+// ── 18. チーム欄が空の既存行(v8.84以前)の扱い ──
+{
+  const ctx = makeContext({});
+  const rec = {
+    id: 9002, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
+    chems: [{ name: "薬剤A", ratio: 1000, ml: 100 }],
+    totalL: 100, waterMl: 99900, memo: "",
+  };
+  // team を送らない旧アプリからの記録 = チーム欄が空の行になる
+  post(ctx, { type: "record", recorder: "藤本", record: rec });
+  const sh = ctx.SHEET_STATE.getSheetByName("防除記録");
+  eq("旧アプリの行はチーム欄が空", sh.getRange(2, 16).getValue(), "");
+
+  // 新アプリから報告すると、その行を拾って更新し、チームを書き戻す
+  const r = post(ctx, { type: "report", team: "team-a", recorder: "藤本",
+                        record: Object.assign({}, rec, { sprayedL: 95, reportDate: "2026-08-20" }) });
+  eq("空の行を拾って更新する(二重行にしない)", [r.ok, r.updated, sh.getLastRow()], [true, 1, 2]);
+  eq("拾った行にチームが書き戻される", sh.getRange(2, 16).getValue(), "team-a");
+  eq("状態が散布済になる", sh.getRange(2, 13).getValue(), "散布済");
+
+  // 書き戻した後は、別チームからは見えない
+  const r2 = post(ctx, { type: "report", team: "team-b", recorder: "田中",
+                         record: Object.assign({}, rec, { sprayedL: 80, reportDate: "2026-08-21" }) });
+  eq("移行後は別チームには拾われず新規行になる", [r2.ok, r2.added, sh.getLastRow()], [true, 1, 3]);
+}
+
+// ── 19. 旧アプリ(team なし)は従来どおり動く ──
+{
+  const ctx = makeContext({});
+  const rec = {
+    id: 9003, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
+    chems: [{ name: "薬剤A", ratio: 1000, ml: 100 }],
+    totalL: 100, waterMl: 99900, memo: "",
+  };
+  post(ctx, { type: "record", recorder: "藤本", record: rec });
+  const r = post(ctx, { type: "report", recorder: "藤本",
+                        record: Object.assign({}, rec, { sprayedL: 95, reportDate: "2026-08-20" }) });
+  const sh = ctx.SHEET_STATE.getSheetByName("防除記録");
+  eq("team なしでも既存行を更新する", [r.ok, r.updated, sh.getLastRow()], [true, 1, 2]);
+  const u = post(ctx, { type: "unreport", recorder: "藤本", record: rec });
+  eq("team なしでも取り消せる", [u.ok, u.updated], [true, 1]);
+}
+
+// ── 20. 更新日時が Date に化けても since が効く(v8.85) ──
+{
+  const ctx = makeContext({});
+  post(ctx, { type: "pushFields", team: TEAM, items: [F1, F2] });
+  const sh = ctx.SHEET_STATE.getSheetByName("圃場マスタ");
+
+  // 書式を固定していない版で書かれた既存シートを模す。更新日時が Date で入っている。
+  // String() すると "Wed Aug 26 2026 ..." になり、ISO との辞書順比較が壊れる。
+  const at = new Date("2026-08-01T00:00:00.000Z");
+  sh.rows[1][10] = at;               // 2行目の更新日時(0始まりで列10)
+  ok("張りぼてで Date に化けている", sh.getRange(2, 11).getValue() instanceof Date);
+
+  const after = post(ctx, { type: "pull", team: TEAM, since: "2026-08-02T00:00:00.000Z" });
+  const ids = after.fields.map(f => String(f.id));
+  eq("化けた行も since より古ければ配らない", ids.indexOf("1001"), -1);
+
+  const before = post(ctx, { type: "pull", team: TEAM, since: "2026-07-01T00:00:00.000Z" });
+  ok("since より新しければ配る", before.fields.map(f => String(f.id)).indexOf("1001") >= 0);
+  eq("serverAt も ISO に戻して返す",
+     before.fields.filter(f => String(f.id) === "1001")[0].serverAt, at.toISOString());
+}
+
+// ── 21. 更新日時の列は文字列書式に固定されている(v8.85) ──
+{
+  const ctx = makeContext({});
+  post(ctx, { type: "pushFields", team: TEAM, items: [F1] });
+  post(ctx, { type: "pushChems", team: TEAM, items: [
+    { id: "薬剤A", name: "薬剤A", use: "殺菌剤", form: "フロアブル", maxUse: 3,
+      updatedAt: "2026-08-01T00:00:00.000Z", by: "藤本", deviceId: "dev-1" },
+  ] });
+  const f = ctx.SHEET_STATE.getSheetByName("圃場マスタ");
+  const c = ctx.SHEET_STATE.getSheetByName("薬剤マスタ");
+  eq("圃場マスタの更新日時は文字列のまま",
+     typeof f.getRange(2, 11).getValue(), "string");
+  eq("薬剤マスタの更新日時は文字列のまま",
+     typeof c.getRange(2, 8).getValue(), "string");
+  // 書式を当てていない列は、実物どおり Date になる(張りぼてが手加減していない証拠)
+  const rec = {
+    id: 9101, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12,
+    chems: [], totalL: 10, waterMl: 0, memo: "",
+  };
+  post(ctx, { type: "record", team: TEAM, recorder: "藤本", record: rec });
+  ok("防除記録の散布日は Date になる",
+     ctx.SHEET_STATE.getSheetByName("防除記録").getRange(2, 3).getValue() instanceof Date);
+}
+
+// ── 22. pull の基準時刻はずらして返す(v8.85) ──
+{
+  const ctx = makeContext({});
+  const lag = ctx.read("PULL_LAG_MS");
+  eq("ずらし幅は2分", lag, 120000);
+
+  post(ctx, { type: "pushFields", team: TEAM, items: [F1] });
+  const before = Date.now();
+  const r = post(ctx, { type: "pull", team: TEAM, since: "" });
+  const st = new Date(r.serverTime).getTime();
+  ok("serverTime は今より前", st <= before);
+  ok("ずらし幅ぶん手前になっている", before - st >= lag - 2000);
+  ok("ずらしすぎていない", before - st <= lag + 5000);
+
+  // 押し込みと pull が重なったときに取りこぼさないこと。
+  // 「pull が基準時刻を採った後に、それより古い更新日時で行が載る」状況を作る。
+  const sh = ctx.SHEET_STATE.getSheetByName("圃場マスタ");
+  const lateAt = new Date(Date.now() - 30000).toISOString();  // 30秒前 = 基準時刻より後
+  sh.getRange(2, 11).setValue(lateAt);
+  const next = post(ctx, { type: "pull", team: TEAM, since: r.serverTime });
+  eq("基準時刻より後に載った行は次回配られる", next.fields.length, 1);
+
+  // 幅を超えて古い行は、既に配り終えたものとして配らない
+  sh.getRange(2, 11).setValue(new Date(Date.now() - lag - 60000).toISOString());
+  const old = post(ctx, { type: "pull", team: TEAM, since: r.serverTime });
+  eq("幅より古い行は配り直さない", old.fields.length, 0);
 }
 
 // ─────────── 結果 ───────────

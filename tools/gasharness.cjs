@@ -18,7 +18,20 @@ const SRC = path.join(__dirname, "..", "Code.gs");
 // Googleスプレッドシートは "2026-08-26" のような日付に見える文字列を、
 // セルに入れた時点で Date として解釈する。読み戻すと文字列ではなく Date が返る。
 // これを再現しないと、日付がずれる不具合をテストで捕まえられない。
-const coerce = v => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v)) ? new Date(v + "T00:00:00+09:00") : v;
+// 日付だけでなく ISO の日時("2026-08-26T01:02:03.456Z")も同じく Date になる。
+// 更新日時の列はここに当たる。ISO で書いたつもりが読み戻すと Date で返り、
+// String() すると "Wed Aug 26 2026 ..." になって辞書順の比較が壊れる。
+// 列を "@"(文字列)書式に固定してあれば、実物は解釈せず文字列のまま返す。
+// この2つを模していなかったので、since の比較が壊れる不具合を捕まえられなかった。
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$/;
+function coerceIn(v, isText) {
+  if (isText) return v;
+  if (typeof v !== "string") return v;
+  if (DATE_RE.test(v)) return new Date(v + "T00:00:00+09:00");
+  if (ISO_RE.test(v)) return new Date(v);
+  return v;
+}
 
 class FakeSheet {
   constructor(name) {
@@ -29,7 +42,10 @@ class FakeSheet {
     // 張りぼてが黙って伸びていたので、行数上限に当たる不具合を
     // テストで捕まえられなかった(実データは999行で上限に張り付いていた)。
     this.maxRows = 1000;
+    // 列番号(1始まり) → 表示形式。"@" は文字列固定。
+    this.formats = {};
   }
+  _isText(col0) { return this.formats[col0 + 1] === "@"; }
   getName() { return this.name; }
   getMaxRows() { return this.maxRows; }
   insertRowsAfter(after, count) {
@@ -76,19 +92,25 @@ class FakeSheet {
       setValues(vals) {
         for (let i = 0; i < nr; i++) {
           if (!sh.rows[r0 + i]) sh.rows[r0 + i] = [];
-          for (let j = 0; j < nc; j++) sh.rows[r0 + i][c0 + j] = coerce(vals[i][j]);
+          for (let j = 0; j < nc; j++) sh.rows[r0 + i][c0 + j] = coerceIn(vals[i][j], sh._isText(c0 + j));
         }
         return range;
       },
       getValue() { return sh._cell(r0, c0); },
       setValue(v) {
         if (!sh.rows[r0]) sh.rows[r0] = [];
-        sh.rows[r0][c0] = coerce(v);
+        sh.rows[r0][c0] = coerceIn(v, sh._isText(c0));
         return range;
       },
       setFontWeight() { return range; },
-      setNumberFormat() { return range; },
-      setNumberFormats() { return range; },
+      setNumberFormat(f) {
+        for (let j = 0; j < nc; j++) sh.formats[c0 + j + 1] = f;
+        return range;
+      },
+      setNumberFormats(fs) {
+        for (let j = 0; j < nc; j++) sh.formats[c0 + j + 1] = fs[0] && fs[0][j];
+        return range;
+      },
       setBackground() { return range; },
       setBackgrounds() { return range; },
       clearContent() {
@@ -104,7 +126,7 @@ class FakeSheet {
   appendRow(values) {
     const at = this.getLastRow();
     if (at + 1 > this.maxRows) this.insertRowsAfter(this.maxRows, 1);
-    this.rows[at] = values.map(coerce);
+    this.rows[at] = values.map((v, j) => coerceIn(v, this._isText(j)));
   }
   setFrozenRows(n) { this.frozen = n; }
   deleteRows(start, count) {
@@ -125,6 +147,13 @@ function makeContext(props) {
   const scriptProps = Object.assign({}, props);
   const ctx = {
     console,
+    // vm は独自の Date を持つ。張りぼてが作った Date(こちらの realm)を
+    // Code.gs 側で `v instanceof Date` と判定すると、別の realm のコンストラクタ
+    // なので false になる。ymd_ / atIso_ / 掃除の Date 分岐が、張りぼての上では
+    // 一度も通っていなかった(フォールバックの文字列パースが拾っていたため
+    // テストは通り、分岐が死んでいることに気づけなかった)。
+    // こちらの Date を渡して realm を揃える。
+    Date,
     SHEET_STATE: ss,          // テスト側から中身を覗くための参照
     LOCK_FREE: true,          // false にするとロックが取れない状況を再現する
     SpreadsheetApp: { getActiveSpreadsheet: () => ss },
