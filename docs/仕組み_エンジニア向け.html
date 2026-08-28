@@ -163,9 +163,9 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <h1>薬液調合ノート<br>内部構造</h1>
   <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
   <dl class="facts">
-    <div class="fact"><dt>app.js</dt><dd class="num">12,537<small>行</small></dd></div>
+    <div class="fact"><dt>app.js</dt><dd class="num">12,583<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,194<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">243<small>件</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">249<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">127<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
@@ -416,6 +416,19 @@ flowchart TD
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
 
   <div class="fail">
+    <h3>全画面の操作ボタンが、実機でだけ押せない場所に回る</h3>
+    <p class="ver">v8.90 で修正 / エミュレータでは再現しなかった</p>
+    <dl>
+      <dt>機構</dt><dd>v8.89 は右上に <code>position:fixed</code> で縦積みし、上端を <code>env(safe-area-inset-top)</code> から測っていた。実機(iPhone)では覆い(<code>mapWrapFull</code>, zIndex 900)が見出しとタブバーを隠しきれず、<strong>上の2つが見出しの裏に回って押せなくなった</strong>。</dd>
+      <dt>再現できな<br>かった理由</dt><dd>手元のエミュレータ(Chromium・375x812)では <code>env(safe-area-inset-top)</code> が <strong>0</strong> で、4つとも画面内に収まり <code>vis:true</code> だった。<strong>実機の画面写真で初めて分かった。</strong>上端は端末ごとの差が大きく、手元で確かめられない。</dd>
+      <dt>対処</dt><dd><strong>上端をやめた。</strong>作図の全画面で既に使っている下の帯(<code>drawBarFull</code>)と同じ形にする。ノッチも覆いの効き方も関係なくなり、親指も届く。</dd>
+      <dt>詰まった<br>ところ</dt><dd><code>justify-content: center</code> のままだと、幅が足りないときに<strong>左側へはみ出してスクロールでも届かない</strong>(375pxで先頭が <code>-27px</code> になった)。<code>safe center</code> にすると、収まらないときだけ先頭寄せに落ちる。</dd>
+      <dt>寸法の<br>決め方</dt><dd>文字と余白は<strong>ブラウザで実測して詰めた</strong>。絵文字の幅は環境で変わるので机上の計算が当てにならない。360px幅に1行で収まるまで縮め、さらに <code>flex-shrink:1</code> + <code>min-width:0</code> で「はみ出す前に縮む」安全網を足した。iOSの絵文字はこの実測(Chromium)より広いため。</dd>
+      <dt>検証</dt><dd>360x780 / 375x812 / 375x390(横向き) / 768x1024 / 1280x720 の5つで、帯が下端にあり4つとも画面内、ボタンの高さ45pxを確かめた。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>札が、思っているより2桁高い</h3>
     <p class="ver">v8.89 で逃げ道を用意(消せるようにした) / 実測あり</p>
     <dl>
@@ -584,7 +597,7 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">243</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">249</td></tr>
       <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">127</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
@@ -627,7 +640,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.89 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.90 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>

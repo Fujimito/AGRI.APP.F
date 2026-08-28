@@ -610,17 +610,28 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 // ── 全画面でも現在地ボタンが出るか(ソースの形) ────────
 {
   const tab = src.slice(src.indexOf("function ProgressMapTab"), src.indexOf("const S = {"));
-  const seg = tab.slice(tab.indexOf("mapFullBtnAt(0)"));
-  eq("全画面のときに現在地ボタンを出す",
-    seg.includes("mapFullBtnAt(1)") && seg.includes("apiRef.current.locate"), true);
+  const seg = tab.slice(tab.indexOf("S.mapFullBar"));
+  eq("全画面のときに現在地ボタンを出す", seg.includes("apiRef.current.locate"), true);
   eq("全画面のボタンは fullMap のときだけ",
-    /fullMap && [\s\S]{0,1200}mapFullBtnAt\(1\)/.test(tab), true);
-  eq("全画面に札の切替もある", seg.includes("mapFullBtnAt(3)") && seg.includes("setShowLabels"), true);
+    /fullMap && [\s\S]{0,1400}S\.mapFullBar/.test(tab), true);
+  eq("全画面に札の切替もある", seg.includes("setShowLabels"), true);
   eq("全画面のボタンは4つ",
-    (seg.match(/mapFullBtnAt\(\d\)/g) || []).length, 4);
-  eq("mapFullBtnAt で位置を決めている", src.includes("const mapFullBtnAt = i =>"), true);
-  eq("上端は safe-area から測る(ノッチに被らない)",
-    src.includes('"calc(" + (10 + i * 46) + "px + env(safe-area-inset-top))"'), true);
+    (seg.match(/S\.mapFullBarBtn(?!Off)/g) || []).length, 4);
+  // ── 上端に置かない(v8.90) ──
+  // env(safe-area-inset-top) は端末で違い、実機では覆いが見出しを隠しきれず
+  // 上のボタンが裏に回って押せなかった。下端なら機種差に振り回されない。
+  eq("上端に固定していない", /mapFullBtnAt|inset-top/.test(seg), false);
+  eq("下端に置いている", src.includes("mapFullBar: {") && /mapFullBar: \{[\s\S]{0,400}bottom: 0/.test(src), true);
+  eq("下の余白は safe-area を足す",
+    /mapFullBar: \{[\s\S]{0,700}calc\(8px \+ env\(safe-area-inset-bottom\)\)/.test(src), true);
+  eq("入りきらなければ横に流す(2段にして地図を削らない)",
+    /mapFullBar: \{[\s\S]{0,500}flexWrap: "nowrap"[\s\S]{0,120}overflowX: "auto"/.test(src), true);
+  eq("タブバー(850)より前に出す",
+    /mapFullBar: \{[\s\S]{0,200}zIndex: 920/.test(src), true);
+  eq("はみ出す前に縮む(絵文字の幅は環境で変わる)",
+    /mapFullBarBtn: \{[\s\S]{0,700}flexShrink: 1[\s\S]{0,120}minWidth: 0/.test(src), true);
+  eq("指で押す的が44pxを下回らない",
+    /mapFullBarBtn: \{[\s\S]{0,700}minHeight: 44/.test(src), true);
 }
 
 // ── 札(圃場名・面積)の出し分け(v8.89) ────────────────
@@ -643,8 +654,11 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("端末に残す", tab.includes('"tankmix:proglabels"'), true);
   eq("既定は出す(更新で急に消えない)", tab.includes('!== "0"'), true);
   eq("キャンバスへ渡している", /showLabels,/.test(tab), true);
+  // 上のツールバーにも、全画面の帯にも切替がある(押す場所が1か所だと、
+  // 全画面をやめてから戻る手間になる)
   eq("ツールバーにも切替がある",
-    tab.indexOf("setShowLabels") < tab.indexOf("mapFullBtnAt(0)"), true);
+    tab.indexOf("setShowLabels") < tab.indexOf("S.mapFullBar"), true);
+  eq("切替は2か所ある", (tab.match(/setShowLabels\(!showLabels\)/g) || []).length, 2);
   const canvases = [
     src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas")),
     src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab")),
