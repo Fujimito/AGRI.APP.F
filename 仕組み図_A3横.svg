@@ -14,7 +14,7 @@
 <rect x="45" y="34" width="1497" height="72" rx="10" fill="#2F6B45"/>
 <text x="70" y="72" font-size="30" font-weight="800" fill="#FFFFFF">薬液調合ノート（農薬散布防除記録）</text>
 <text x="70" y="97" font-size="17" fill="#CFE4D8">オフライン対応PWA ─ アプリの仕組み</text>
-<text x="1517" y="68" font-size="22" font-weight="800" fill="#FFFFFF" text-anchor="end">v8.68</text>
+<text x="1517" y="68" font-size="22" font-weight="800" fill="#FFFFFF" text-anchor="end">v8.82</text>
 <text x="1517" y="94" font-size="14" fill="#CFE4D8" text-anchor="end">2026-08 時点</text>
 
 <!-- ROW1 -->
@@ -79,8 +79,9 @@
 <text x="78" y="593" font-size="13" fill="#5B6B60">農薬データ（約940KB）</text>
 <rect x="65" y="612" width="260" height="42" rx="8" fill="#E6F2EA" stroke="#BFDDCB"/>
 <text x="78" y="639" font-size="14" font-weight="700" fill="#1F6B43">📶 圏外でも記録できます</text>
-<text x="65" y="678" font-size="13" fill="#5B6B60">電波が戻ると、未送信ぶんが自動で</text>
-<text x="65" y="698" font-size="13" fill="#5B6B60">送られます（共有オンのとき）</text>
+<text x="65" y="678" font-size="13" fill="#5B6B60">電波が戻ると、圃場・薬剤・予定・</text>
+<text x="65" y="698" font-size="13" fill="#5B6B60">進捗は自動で送られます。</text>
+<text x="65" y="718" font-size="13" font-weight="700" fill="#9A3B26">台帳への送信だけは手動です</text>
 
 <rect x="1242" y="386" width="300" height="330" rx="12" fill="#FFFFFF" stroke="#2A5F80" stroke-width="2.5"/>
 <path d="M1254 386 h276 a12 12 0 0 1 12 12 v24 h-300 v-24 a12 12 0 0 1 12 -12 z" fill="#2A5F80"/>
@@ -170,7 +171,7 @@
 <text x="895" y="866" font-size="17" font-weight="800" fill="#9A3B26" text-anchor="middle">🚫 共有オフ</text>
 <text x="575" y="912" font-size="14" font-weight="800" fill="#3E5147">オフの間は、この端末は送りも受け取りもしません。</text>
 <text x="575" y="936" font-size="14" fill="#3E5147">記録は今までどおり端末に残ります。</text>
-<text x="575" y="962" font-size="14" fill="#3E5147">オンに戻すと、たまっていた未送信ぶんを自動で送り、</text>
+<text x="575" y="962" font-size="14" fill="#3E5147">オンに戻すと、圃場・薬剤・予定・進捗を送り直し、</text>
 <text x="575" y="984" font-size="14" fill="#3E5147">最新を取り直します。</text>
 <rect x="575" y="1000" width="440" height="62" rx="8" fill="#F1F5F2" stroke="#D8E0D2"/>
 <text x="590" y="1024" font-size="13" font-weight="700" fill="#3E5147">アプリを閉じても「切断」されません</text>
