@@ -621,13 +621,24 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   // env(safe-area-inset-top) は端末で違い、実機では覆いが見出しを隠しきれず
   // 上のボタンが裏に回って押せなかった。下端なら機種差に振り回されない。
   eq("上端に固定していない", /mapFullBtnAt|inset-top/.test(seg), false);
-  eq("下端に置いている", src.includes("mapFullBar: {") && /mapFullBar: \{[\s\S]{0,400}bottom: 0/.test(src), true);
-  eq("下の余白は safe-area を足す",
-    /mapFullBar: \{[\s\S]{0,700}calc\(8px \+ env\(safe-area-inset-bottom\)\)/.test(src), true);
+  // ── fixed に頼らない(v8.92) ──
+  // iPhone15 では、上端(v8.89)でも下端(v8.90)でも fixed が期待どおりに
+  // 効かなかった。覆い(mapWrapFull)は display:flex / column なので、
+  // 一番下の子として置けば fixed も z-index も要らない。
+  eq("帯は fixed ではない", /mapFullBar: \{[\s\S]{0,900}position: "fixed"/.test(src), false);
+  eq("z-index に頼っていない", /mapFullBar: \{[\s\S]{0,900}zIndex:/.test(src), false);
+  eq("縮まずに残る(地図に押し潰されない)",
+    /mapFullBar: \{[\s\S]{0,900}flexShrink: 0/.test(src), true);
+  eq("覆いは縦並びで、地図が残りを取る",
+    /mapWrapFull: \{[\s\S]{0,400}flexDirection: "column"/.test(src) &&
+    /mapBox: \{[\s\S]{0,200}flex: 1/.test(src), true);
+  eq("下の余白は覆い側が safe-area で持つ(二重にしない)",
+    /mapWrapFull: \{[\s\S]{0,400}env\(safe-area-inset-bottom\)/.test(src) &&
+    !/mapFullBar: \{[\s\S]{0,900}safe-area-inset-bottom/.test(src), true);
+  eq("帯は覆いの中に置く(外に出すと fixed が要る)",
+    /style: fullMap \? S\.mapWrapFull : S\.mapWrap[\s\S]{0,3000}S\.mapFullBar/.test(src), true);
   eq("入りきらなければ横に流す(2段にして地図を削らない)",
-    /mapFullBar: \{[\s\S]{0,500}flexWrap: "nowrap"[\s\S]{0,120}overflowX: "auto"/.test(src), true);
-  eq("タブバー(850)より前に出す",
-    /mapFullBar: \{[\s\S]{0,200}zIndex: 920/.test(src), true);
+    /mapFullBar: \{[\s\S]{0,700}flexWrap: "nowrap"[\s\S]{0,120}overflowX: "auto"/.test(src), true);
   eq("はみ出す前に縮む(絵文字の幅は環境で変わる)",
     /mapFullBarBtn: \{[\s\S]{0,700}flexShrink: 1[\s\S]{0,120}minWidth: 0/.test(src), true);
   eq("指で押す的が44pxを下回らない",

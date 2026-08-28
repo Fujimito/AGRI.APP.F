@@ -163,9 +163,9 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <h1>薬液調合ノート<br>内部構造</h1>
   <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
   <dl class="facts">
-    <div class="fact"><dt>app.js</dt><dd class="num">12,730<small>行</small></dd></div>
+    <div class="fact"><dt>app.js</dt><dd class="num">12,744<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,194<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">282<small>件</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">285<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">127<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
@@ -437,6 +437,19 @@ flowchart TD
       <dt>詰まった<br>ところ</dt><dd><code>justify-content: center</code> のままだと、幅が足りないときに<strong>左側へはみ出してスクロールでも届かない</strong>(375pxで先頭が <code>-27px</code> になった)。<code>safe center</code> にすると、収まらないときだけ先頭寄せに落ちる。</dd>
       <dt>寸法の<br>決め方</dt><dd>文字と余白は<strong>ブラウザで実測して詰めた</strong>。絵文字の幅は環境で変わるので机上の計算が当てにならない。360px幅に1行で収まるまで縮め、さらに <code>flex-shrink:1</code> + <code>min-width:0</code> で「はみ出す前に縮む」安全網を足した。iOSの絵文字はこの実測(Chromium)より広いため。</dd>
       <dt>検証</dt><dd>360x780 / 375x812 / 375x390(横向き) / 768x1024 / 1280x720 の5つで、帯が下端にあり4つとも画面内、ボタンの高さ45pxを確かめた。</dd>
+      <dt>続き</dt><dd><strong>これでも直らなかった</strong>。iPhone15 では帯そのものが出なくなった(すぐ下)。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>fixed が当てにならない端末がある</h3>
+    <p class="ver">v8.92 で fixed をやめた / <strong>再現できていない</strong></p>
+    <dl>
+      <dt>症状</dt><dd>iPhone15 の全画面で、下の帯(v8.90)が<strong>まったく出ない</strong>。その前の版(v8.89)では、上端に置いたボタンのうち上の2つが見出しの裏に回っていた。覆い(<code>mapWrapFull</code>, <code>position:fixed; inset:0</code>)自体も見出しとタブバーを隠しきれていない。</dd>
+      <dt>調べた<br>こと</dt><dd>祖先に <code>transform</code> があると <code>fixed</code> の基準が画面でなくなる。これを当てて再現を試みると、<strong>覆いが縮む症状(v8.89の画面写真そのもの)は再現できた</strong>が、<strong>帯が消える症状は再現できなかった</strong>(旧方式の帯も覆いの下端に出た)。<code>index.html</code> の <code>.app-shell</code> 側にも <code>transform</code>・<code>filter</code>・<code>contain</code> は無い。<strong>原因は未特定。</strong></dd>
+      <dt>対処</dt><dd>原因を突き止める代わりに、<strong>原因になりうる仕組みそのものをやめた</strong>。帯は覆いの子で、覆いは <code>display:flex; flex-direction:column</code>。ならば「一番下の子」として普通に置けばよく、<code>position:fixed</code> も <code>z-index</code> も要らない。<strong>レイアウト上の場所を実際に占める</strong>ので、画面外や何かの裏へ押し出されようがない。地図(<code>flex:1</code>)がそのぶん縮む。</dd>
+      <dt>効果の<br>確かめ方</dt><dd>祖先に <code>transform</code> を当てて覆いを縮ませた状態(107〜791px)でも、帯は覆いの下端(729〜791px)に付いて回り、4つとも画面内に残った。<strong>覆いが画面を覆えなくても帯は出る</strong>。</dd>
+      <dt>残る<br>不確かさ</dt><dd>元の症状を再現できていない以上、<strong>これで直ったとは言えない</strong>。実機で確かめるまでは未解決として扱う。</dd>
     </dl>
   </div>
 
@@ -609,7 +622,7 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">282</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">285</td></tr>
       <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">127</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
@@ -652,7 +665,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.91 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.92 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>
