@@ -1,0 +1,543 @@
+<title>薬液調合ノート 内部構造</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Zen+Kaku+Gothic+New:wght@500;700;900&family=Noto+Sans+JP:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap">
+
+<style>
+:root{
+  --ground:#F5F8F1; --surface:#FFFFFF; --sunk:#EDF2E7;
+  --ink:#16211A; --ink-2:#3E5147; --ink-3:#6E8073;
+  --rule:#D6E0CE; --rule-2:#E7EDE1;
+  --accent:#2F6B45; --accent-soft:#E4EFE6;
+  --done:#1E7A47; --todo:#C21212; --skip:#A98600;
+  --warn-bg:#FDECEC;
+  --code-bg:#EEF3E9;
+  --shadow:0 1px 2px rgba(22,33,26,.05), 0 8px 24px rgba(22,33,26,.05);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --ground:#10160F; --surface:#181F16; --sunk:#1E2619;
+    --ink:#E6EDE2; --ink-2:#B4C2AE; --ink-3:#879382;
+    --rule:#2C3728; --rule-2:#232C20;
+    --accent:#7FBE93; --accent-soft:#1F2E24;
+    --done:#5FC489; --todo:#FF7B7B; --skip:#E3B505;
+    --warn-bg:#2A1A1A;
+    --code-bg:#1C241A;
+    --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#10160F; --surface:#181F16; --sunk:#1E2619;
+  --ink:#E6EDE2; --ink-2:#B4C2AE; --ink-3:#879382;
+  --rule:#2C3728; --rule-2:#232C20;
+  --accent:#7FBE93; --accent-soft:#1F2E24;
+  --done:#5FC489; --todo:#FF7B7B; --skip:#E3B505;
+  --warn-bg:#2A1A1A;
+  --code-bg:#1C241A;
+  --shadow:0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.25);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:"Noto Sans JP",system-ui,sans-serif;
+  font-size:16px; line-height:1.85; -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px; margin:0 auto; padding:0 24px 96px}
+.col{max-width:70ch}
+
+header.top{border-bottom:1px solid var(--rule); padding:72px 0 40px; margin-bottom:56px}
+.eyebrow{
+  font-family:"JetBrains Mono",monospace; font-size:11px; letter-spacing:.18em;
+  text-transform:uppercase; color:var(--accent); margin:0 0 18px;
+}
+h1{
+  font-family:"Zen Kaku Gothic New",sans-serif; font-weight:900;
+  font-size:clamp(30px,5.2vw,52px); line-height:1.18; letter-spacing:-.01em;
+  margin:0 0 18px; text-wrap:balance;
+}
+.lede{font-size:17px; color:var(--ink-2); margin:0; max-width:62ch}
+
+.facts{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(132px,1fr));
+  gap:1px; background:var(--rule); border:1px solid var(--rule);
+  border-radius:10px; overflow:hidden; margin-top:36px;
+}
+.fact{background:var(--surface); padding:16px 18px}
+.fact dt{
+  font-family:"JetBrains Mono",monospace; font-size:10.5px; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink-3); margin:0 0 6px;
+}
+.fact dd{
+  margin:0; font-family:"Zen Kaku Gothic New",sans-serif; font-weight:700;
+  font-size:22px; line-height:1.2; font-variant-numeric:tabular-nums;
+}
+.fact dd small{font-size:12px; font-weight:500; color:var(--ink-3); margin-left:3px}
+
+section{margin:0 0 72px}
+h2{
+  font-family:"Zen Kaku Gothic New",sans-serif; font-weight:700;
+  font-size:clamp(21px,2.6vw,28px); line-height:1.35; margin:0 0 8px;
+  text-wrap:balance; display:flex; gap:14px; align-items:baseline;
+}
+h2 .no{
+  font-family:"JetBrains Mono",monospace; font-size:13px; font-weight:700;
+  color:var(--accent); flex:none; padding-top:2px;
+}
+h2 + .sub{color:var(--ink-3); margin:0 0 26px; padding-left:34px; font-size:14.5px}
+h3{font-family:"Zen Kaku Gothic New",sans-serif; font-weight:700; font-size:17px; margin:38px 0 10px}
+p{margin:0 0 16px}
+ul{margin:0 0 16px; padding-left:1.25em}
+li{margin:0 0 7px}
+code{
+  font-family:"JetBrains Mono",monospace; font-size:.87em;
+  background:var(--code-bg); padding:.12em .38em; border-radius:4px; word-break:break-word;
+}
+
+.fig{
+  background:var(--surface); border:1px solid var(--rule); border-radius:12px;
+  margin:0 0 20px; box-shadow:var(--shadow); overflow:hidden;
+}
+.fig .cap{
+  font-family:"JetBrains Mono",monospace; font-size:11px; letter-spacing:.06em;
+  color:var(--ink-3); padding:11px 18px; border-bottom:1px solid var(--rule-2);
+  background:var(--sunk);
+}
+.fig .body{padding:22px 18px; overflow-x:auto}
+.fig pre.mermaid{margin:0; min-width:min-content; background:none}
+
+.tbl{overflow-x:auto; margin:0 0 20px; border:1px solid var(--rule); border-radius:10px; background:var(--surface)}
+table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:520px}
+th,td{text-align:left; padding:10px 14px; border-bottom:1px solid var(--rule-2); vertical-align:top}
+thead th{
+  font-family:"JetBrains Mono",monospace; font-size:10.5px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--ink-3); background:var(--sunk);
+  border-bottom:1px solid var(--rule); white-space:nowrap;
+}
+tbody tr:last-child td{border-bottom:none}
+td code{background:transparent; padding:0; color:var(--accent); font-weight:700}
+.num{font-variant-numeric:tabular-nums; white-space:nowrap}
+
+.note{
+  border-left:3px solid var(--accent); background:var(--accent-soft);
+  padding:16px 20px; border-radius:0 8px 8px 0; margin:0 0 20px; font-size:14.5px;
+}
+.note.warn{border-left-color:var(--todo); background:var(--warn-bg)}
+.note .t{font-family:"Zen Kaku Gothic New",sans-serif; font-weight:700; display:block; margin-bottom:6px}
+.note p:last-child{margin-bottom:0}
+
+.chip{display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:700; white-space:nowrap}
+.chip::before{content:""; width:11px; height:11px; border-radius:3px; background:currentColor; flex:none}
+.c-done{color:var(--done)} .c-todo{color:var(--todo)} .c-skip{color:var(--skip)}
+
+.fail{
+  border:1px solid var(--rule); border-radius:12px; background:var(--surface);
+  padding:20px 22px; margin:0 0 16px; box-shadow:var(--shadow);
+}
+.fail h3{margin:0 0 4px; font-size:16.5px}
+.fail .ver{
+  font-family:"JetBrains Mono",monospace; font-size:11px; color:var(--ink-3);
+  letter-spacing:.05em; margin:0 0 12px;
+}
+.fail dl{display:grid; grid-template-columns:auto 1fr; gap:6px 16px; margin:0; font-size:14px}
+.fail dt{
+  font-family:"JetBrains Mono",monospace; font-size:10.5px; letter-spacing:.08em;
+  text-transform:uppercase; color:var(--ink-3); padding-top:5px; white-space:nowrap;
+}
+.fail dd{margin:0}
+
+footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); font-size:13px}
+
+@media (max-width:640px){
+  h2{gap:10px} h2 + .sub{padding-left:0}
+  .fail dl{grid-template-columns:1fr; gap:2px 0}
+  .fail dt{padding-top:10px}
+}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important}}
+</style>
+
+<div class="wrap">
+
+<header class="top">
+  <p class="eyebrow">Tank Mix Note / internals</p>
+  <h1>薬液調合ノート<br>内部構造</h1>
+  <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
+  <dl class="facts">
+    <div class="fact"><dt>app.js</dt><dd class="num">12,033<small>行</small></dd></div>
+    <div class="fact"><dt>Code.gs</dt><dd class="num">1,086<small>行</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">155<small>件</small></dd></div>
+    <div class="fact"><dt>GAS側テスト</dt><dd class="num">100<small>件</small></dd></div>
+    <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
+  </dl>
+</header>
+
+<section>
+  <h2><span class="no">01</span><span>全体像</span></h2>
+  <p class="sub">app.js は <code>React.createElement</code> に展開済みのプレーンJS。ブラウザがそのまま読む。</p>
+  <div class="col">
+  <p>端末は<strong>それぞれが完全な記録を持つ</strong>。サーバーは同期の待ち合わせ場所であって、正本ではない。圏外で1日中作業しても、端末だけで予定・計算・実績入力が完結する。</p>
+  </div>
+  <div class="fig">
+    <div class="cap">図1 — 構成要素と通信</div>
+    <div class="body">
+<pre class="mermaid">
+flowchart LR
+  subgraph D1["端末A (PWA)"]
+    UI1["React UI / 5タブ"] --- LS1[("localStorage<br/>tankmix:*")]
+  end
+  subgraph D2["端末B (PWA)"]
+    UI2["React UI"] --- LS2[("localStorage")]
+  end
+  SW["Service Worker<br/>tankmix-v8.81"]
+  GAS["Apps Script<br/>doGet / doPost"]
+  SS[("スプレッドシート<br/>5シート")]
+  MAP["地図タイル<br/>国土地理院 / Google"]
+
+  UI1 -. "初回のみ取得" .-> SW
+  UI1 -->|"HTTPS POST (JSON)"| GAS
+  UI2 -->|"HTTPS POST"| GAS
+  GAS --> SS
+  SS --> GAS
+  UI1 -.->|"通信必須"| MAP
+  UI2 -.->|"通信必須"| MAP
+</pre>
+    </div>
+  </div>
+  <div class="note">
+    <span class="t">常時接続は持たない</span>
+    <p>WebSocket も常駐ポーリングもない。<strong>送るときだけ HTTPS で1往復</strong>する。アプリを閉じている間は同期が動かないだけで、次に開けば未送信ぶんから再開する。進捗地図を開いている間だけ、既定45秒間隔で取り直す。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">02</span><span>端末に置くもの</span></h2>
+  <p class="sub">すべて localStorage。IndexedDB は農薬データ(chemdb)だけに使う。</p>
+  <div class="tbl">
+  <table>
+    <thead><tr><th>キー</th><th>中身</th><th>同期</th></tr></thead>
+    <tbody>
+      <tr><td><code>tankmix:fields</code></td><td>圃場マスタ。名前・作物・面積・ポリゴン・重心</td><td>する</td></tr>
+      <tr><td><code>tankmix:works</code></td><td>作業。日付×圃場に1件。予定薬液量・薬剤・実績</td><td>する</td></tr>
+      <tr><td><code>tankmix:chemmaster</code></td><td>薬剤マスタ。IDは正規化した薬剤名</td><td>する</td></tr>
+      <tr><td><code>tankmix:tombs</code></td><td>墓標。削除したIDと時刻。上限500件</td><td>する</td></tr>
+      <tr><td><code>tankmix:pullat</code></td><td>どこまで受け取ったか(サーバー時刻)</td><td>—</td></tr>
+      <tr><td><code>tankmix:progresssnap</code></td><td>進捗地図の最後の取得結果</td><td>—</td></tr>
+      <tr><td><code>tankmix:deviceid</code></td><td>端末の識別子。初回に生成</td><td>—</td></tr>
+      <tr><td><code>tankmix:teamcode</code></td><td>チームコード。<strong>大文字小文字を区別</strong></td><td>—</td></tr>
+      <tr><td><code>tankmix:gasurl</code> ほか</td><td>設定(GAS URL・APIキー・単位・タンク容量)</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="col">
+  <p>レコードは3つの時刻を持つ。この3つの関係が同期の全部といっていい。</p>
+  <ul>
+    <li><code>updatedAt</code> — <strong>端末</strong>が中身を変えた時刻。端末の時計</li>
+    <li><code>pushedAt</code> — 送信に成功した時点の <code>updatedAt</code></li>
+    <li>「更新日時」— <strong>サーバー</strong>が行を書いた時刻。差分取得の物差し</li>
+  </ul>
+  <p><code>updatedAt &gt; pushedAt</code> なら未送信。これを拾うのが <code>pendingOf(list)</code>。端末の時計と物差しを分けてあるので、圏外で溜めた古い <code>updatedAt</code> のレコードもちゃんと差分に乗る。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">03</span><span>IDの決まり方</span></h2>
+  <p class="sub">作業IDだけ、内容から計算する。二重登録を消すための設計。</p>
+  <div class="col">
+  <p>2台が圏外で同じ日の同じ圃場を登録すると、以前は別IDになって同期後に2件並んだ。v8.73 から作業IDを<strong>「日付＋圃場ID」のハッシュ</strong>にしてある。両方の端末が同じIDを出すので、サーバーで自然に1件へ収束する。</p>
+  </div>
+  <div class="fig">
+    <div class="cap">図2 — IDの生成規則</div>
+    <div class="body">
+<pre class="mermaid">
+flowchart TD
+  A["作業日 2026-08-27<br/>圃場ID 1787714776884"] --> B["文字列を連結<br/>nth が2以上なら nth を足す"]
+  B --> C["FNV系ハッシュ 2本 (h1 / h2)"]
+  C --> D["(h1 % 0x200000) * 2^32 + h2 + 1"]
+  D --> E["1676867858698189 (16桁)"]
+  E --> F{"同じIDが<br/>既に手元にある?"}
+  F -->|"はい"| G["nth を +1 してやり直す"]
+  G --> B
+  F -->|"いいえ"| H["確定"]
+</pre>
+    </div>
+  </div>
+  <div class="note warn">
+    <span class="t">既知の穴 — nth は端末ローカル</span>
+    <p>2回目以降(同じ日・同じ圃場をもう一度入れる)の <code>nth</code> は、<strong>その端末が持っている作業だけ</strong>を見て決めている。未同期の2台が両方「2回目」を入れるとどちらも <code>nth=2</code> になり、別の作業なのにIDが衝突する。1回目が収束するのは設計どおりだが、2回目以降は決定論になっていない。<strong>未修正。</strong></p>
+  </div>
+  <div class="tbl">
+  <table>
+    <thead><tr><th>種類</th><th>IDの作り方</th><th>再利用</th></tr></thead>
+    <tbody>
+      <tr><td>圃場</td><td><code>newId()</code>(Date.now系・単調増加)</td><td>されない</td></tr>
+      <tr><td>作業</td><td><code>workIdFor(日付, 圃場ID, nth)</code></td><td><strong>される</strong></td></tr>
+      <tr><td>薬剤</td><td>正規化した薬剤名</td><td><strong>される</strong></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="col">
+  <p>右の列が肝で、<strong>IDが再利用される種類は「削除→作り直し」で同じIDに戻る</strong>。受信側で日時を比べずに削除を適用すると、古い墓標が新しいレコードを消す。実際にその不具合があった(08節)。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">04</span><span>差分同期</span></h2>
+  <p class="sub">全件ではなく、変わったレコードだけを送る。送る順と受け取る順に意味がある。</p>
+  <div class="fig">
+    <div class="cap">図3 — 1回の同期(送ってから受け取る)</div>
+    <div class="body">
+<pre class="mermaid">
+sequenceDiagram
+  participant A as 端末A
+  participant G as Apps Script
+  participant S as シート
+  participant B as 端末B
+
+  Note over A: pendingOf(works)
+  A->>G: pushWorks { team, items(最大300) }
+  G->>S: 30日超の削除済み行を捨てる
+  G->>S: 行数を確保 ensureRows_
+  Note over G,S: 鍵は チーム＋ID
+  G->>S: setValues(全行)
+  G-->>A: ok, added, updated, purged, serverTime
+  Note over A: 送れた分だけ pushedAt を進める
+  Note over A: 墓標は送ったIDだけ引く
+
+  Note over B: since = tankmix:pullat
+  B->>G: pull { team, since }
+  G->>S: 更新日時が since より後の行だけ
+  G-->>B: fields, works, chems, serverTime
+  Note over B: 送信状態と実績メモは上書きしない
+  Note over B: pullat = serverTime
+</pre>
+    </div>
+  </div>
+  <div class="col">
+  <p>順番は<strong>必ず「送ってから受け取る」</strong>。逆にすると、手元の未送信の変更が受信データに埋もれる。共有をオフからオンに戻したときの経路だけこの順が守られておらず、<code>await</code> していない。<strong>未修正。</strong></p>
+  <p><code>pullat</code> は<strong>チームに紐付いていない</strong>。チームコードを変えたら捨てる(v8.78)。残すと、新しいチームに前からあるデータが <code>since</code> で弾かれて一生届かない。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">05</span><span>削除の伝わり方</span></h2>
+  <p class="sub">行は消さない。「削除」列を立てて墓標として残し、30日で捨てる。</p>
+  <div class="fig">
+    <div class="cap">図4 — 削除の一生</div>
+    <div class="body">
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> 端末にある
+  端末にある --> 墓標: 外す / addTomb
+  墓標 --> 送信中: pushProgress
+  送信中 --> 墓標: 失敗(圏外) 墓標は残す
+  送信中 --> 送信済: 成功 送ったIDだけ引く
+  送信済 --> シートで削除済: 削除列 = 1
+  シートで削除済 --> 他端末へ: pull で配る
+  シートで削除済 --> [*]: 30日経過 行ごと捨てる
+</pre>
+    </div>
+  </div>
+  <div class="note warn">
+    <span class="t">端末から消えた作業は、アプリから触れない</span>
+    <p>墓標を失うと(送信中に全消ししていた不具合など)、シートの行は生きたまま残り、<code>removeWork</code> はもう届かない。<strong>進捗地図が赤いまま永久に戻らない。</strong></p>
+    <p>v8.80 で <code>progressItems_</code> が作業IDを返すようにし、進捗地図に「この端末にない作業が n件」と「サーバーから外す」を足した。それまで、残骸を片付ける道がどこにもなかった。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">06</span><span>進捗地図の色</span></h2>
+  <p class="sub"><span class="chip c-done">実施済</span>　<span class="chip c-todo">未実施</span>　<span class="chip c-skip">対象外</span></p>
+  <div class="col">
+  <p>色は<strong>サーバーのスナップショットと手元の作業を重ねて</strong>決める。同じ圃場に複数の作業がぶら下がることがある(午前と午後で分けた等)ので、「いちばん進んでいる状態」を採る。</p>
+  </div>
+  <div class="fig">
+    <div class="cap">図5 — statusByField の合成</div>
+    <div class="body">
+<pre class="mermaid">
+flowchart TD
+  S["サーバーの進捗 snap.items"] --> P["put(fieldId, 状態)"]
+  W["手元の works (その日のぶん)"] --> P
+  P --> R{"PROGRESS_RANK が<br/>今より大きい?"}
+  R -->|"はい"| M["Map を更新"]
+  R -->|"いいえ"| K["据え置き"]
+  M --> C["ポリゴンを塗る"]
+  K --> C
+  N["どちらにも無い圃場"] --> O["対象外"]
+  O --> C
+</pre>
+    </div>
+  </div>
+  <div class="tbl">
+  <table>
+    <thead><tr><th>状態</th><th>rank</th><th>意味</th><th>色</th></tr></thead>
+    <tbody>
+      <tr><td><code>none</code></td><td class="num">0</td><td>その日の作業に入っていない</td><td><span class="chip c-skip">対象外</span></td></tr>
+      <tr><td><code>planned</code></td><td class="num">1</td><td>予定に入っているが未散布</td><td><span class="chip c-todo">未実施</span></td></tr>
+      <tr><td><code>done</code></td><td class="num">2</td><td>散布済</td><td><span class="chip c-done">実施済</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="note warn">
+    <span class="t">既知の穴 — 「大きい方を採る」は取り消しに弱い</span>
+    <p>散布済のチェックを<strong>外す</strong>と、ローカルは <code>planned</code> になるが、サーバーのスナップショットに残る <code>done</code>(rank 2)が勝ち続ける。次の自動取得(既定45秒)まで緑のまま戻らない。圏外なら戻らない。<strong>未修正。</strong></p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">07</span><span>シートの構成</span></h2>
+  <p class="sub">スプレッドシート1枚に5シート。行の鍵は「チームコード＋ID」。</p>
+  <div class="tbl">
+  <table>
+    <thead><tr><th>シート</th><th>列数</th><th>役割</th><th>鍵</th></tr></thead>
+    <tbody>
+      <tr><td>作業</td><td class="num">24</td><td>予定と実績。進捗地図の元</td><td>チーム＋作業ID</td></tr>
+      <tr><td>圃場マスタ</td><td class="num">14</td><td>名前・作物・面積・ポリゴン</td><td>チーム＋圃場ID</td></tr>
+      <tr><td>薬剤マスタ</td><td class="num">11</td><td>薬剤名・剤型・希釈倍率</td><td>チーム＋薬剤名</td></tr>
+      <tr><td>防除記録</td><td class="num">—</td><td>確定した台帳。追記のみ</td><td><strong>記録IDのみ</strong></td></tr>
+      <tr><td>_共有データ</td><td class="num">4</td><td>上書き前の値を残す履歴。200行で打ち切り</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="col">
+  <p>防除記録シートだけチームコード列がなく、記録IDだけで行を探す。作業IDが内容から決まるようになったので、別チームが同じ日に同じ圃場を入れると理屈の上では衝突する。<strong>未修正。</strong></p>
+  <h3>日付が化ける</h3>
+  <p>スプレッドシートは <code>"2026-08-27"</code> をセルに入れた時点で <code>Date</code> と解釈する。読み戻すと <code>Date</code> オブジェクトになり、テキスト書式の列へ書き戻すと <code>"Mon Jul 13 2026 00:00:00 GMT+0900"</code> になる。<code>WORK_TEXT_COLS</code> で書式を固定しつつ、<code>ymd_()</code> が <code>Date</code>・ISO文字列・化けた文字列のどれでも <code>yyyy-MM-dd</code> に戻す。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">08</span><span>詰まる所</span></h2>
+  <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
+
+  <div class="fail">
+    <h3>シートの行数上限で、送信が丸ごと落ちる</h3>
+    <p class="ver">v8.80 で修正 / 実データ 999行 : 上限1000行 で発生</p>
+    <dl>
+      <dt>機構</dt><dd>シートは新規作成時1000行。<code>getRange</code> でその外を掴むと <code>Those rows are out of bounds</code> で例外になり、<strong>その送信が丸ごと落ちる</strong>。</dd>
+      <dt>波及</dt><dd><code>pushProgress</code> は「新しい作業＋削除の墓標」を1回で送る。満杯になると<strong>削除まで道連れで失敗</strong>する。</dd>
+      <dt>症状</dt><dd>進捗地図の未実施が何度直しても消えない。アプリ側をいくら直しても届いていなかった。</dd>
+      <dt>見逃した<br>理由</dt><dd>テストの張りぼて(<code>FakeSheet</code>)が黙って行を伸ばしていた。実物と同じ上限を持たせて、初めて再現できた。</dd>
+      <dt>対処</dt><dd><code>ensureRows_()</code> で <code>setValues</code> の前に必ず伸ばす。削除済みの行は30日で捨てる(実データは999行中354行が空の墓標だった)。</dd>
+    </dl>
+  </div>
+
+  <div class="fig">
+    <div class="cap">図6 — 満杯のときに起きること</div>
+    <div class="body">
+<pre class="mermaid">
+flowchart TD
+  A["pushProgress<br/>新規1件 + 墓標1件"] --> B["upsertRows_"]
+  B --> C{"rows.length + 1 が<br/>シートの行数を超える?"}
+  C -->|"v8.79まで : 確認なし"| X["getRange 例外 / ok:false"]
+  X --> Y["新規も墓標も適用されない"]
+  Y --> Z["地図が赤いまま"]
+  C -->|"v8.80 : 伸ばす"| D["ensureRows_ (+500行)"]
+  D --> E["setValues 成功"]
+  E --> F["削除が効く"]
+</pre>
+    </div>
+  </div>
+
+  <div class="fail">
+    <h3>墓標を全消しして、削除が永久に伝わらない</h3>
+    <p class="ver">v8.78 で修正</p>
+    <dl>
+      <dt>機構</dt><dd>送信前に読んだ墓標を送り、成功後に <code>t.works = []</code> と全消ししていた。<code>await</code> をまたぐ read-modify-write。</dd>
+      <dt>症状</dt><dd>送信中(数秒)に外した圃場の削除が一緒に捨てられ、他端末に残り続ける。手元からは消えているので再送のきっかけもない。</dd>
+      <dt>対処</dt><dd>送ったIDだけを引く。すぐ上の <code>pendingOf</code> 側は <code>done</code> マップで正しく書けていたのに、墓標だけ配慮が抜けていた。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>古い墓標が、入れ直した作業を消す</h3>
+    <p class="ver">v8.78 で修正</p>
+    <dl>
+      <dt>機構</dt><dd>受信マージの<strong>更新</strong>の枝には <code>old.updatedAt &gt; inc.updatedAt</code> の比較があるのに、<strong>削除</strong>の枝にはなかった。</dd>
+      <dt>症状</dt><dd>作業IDと薬剤IDは内容から決まる、つまり再利用される。外して入れ直すと同じIDになり、古い削除が追いかけてきて消す。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>固形剤の量が、画面と転記で単位が食い違う</h3>
+    <p class="ver">v8.78 で修正 / 現場で用量を誤りうる</p>
+    <dl>
+      <dt>機構</dt><dd>計算は <code>ml = 総量 ÷ 希釈倍数</code> の1本で剤型を見ていない(1 mL = 1 g)。単位の判定関数はアグリノート転記の1か所でしか呼ばれず、画面側4か所は <code>" mL"</code> の直書きだった。</dd>
+      <dt>症状</dt><dd>水和剤が画面「100 mL」・転記「0.1 kg」。数値は同じだが、<strong>粉を体積で量ると用量を外す</strong>。</dd>
+      <dt>対処</dt><dd>固形剤は「g」で表示。4か所目は <code>&lt;small&gt;</code> タグで書かれていて grep から漏れ、ブラウザで表示させて気づいた。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>チームコードを変えても、前のチームのデータが残る</h3>
+    <p class="ver">v8.78 で一部対処(消さずに警告)</p>
+    <dl>
+      <dt>機構</dt><dd><code>setTeamCode</code> は localStorage のコードを書くだけ。圃場・作業・薬剤はそのまま残る。</dd>
+      <dt>症状</dt><dd>残るだけなら害はないが、<strong>そのあと編集すると自動送信で新チームへ流れる</strong>。</dd>
+      <dt>方針</dt><dd>勝手に消さない。設定タブに警告を出して、判断は使う人に渡す。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>useEffect の依存漏れで、地図が白いまま</h3>
+    <p class="ver">v8.40 と v8.75 で2度発生</p>
+    <dl>
+      <dt>機構</dt><dd>地図を作る effect の依存が <code>[]</code>。最初の1回で読み込みに失敗すると二度と走らない。</dd>
+      <dt>症状</dt><dd>「圃場タブを一度開かないと進捗地図が出ない」。地図タブ側のリトライで <code>window.google</code> が入り、戻ったとき作り直されて初めて映っていた。</dd>
+      <dt>対処</dt><dd><code>loadAttempt</code> を依存に入れてやり直す。<strong>同じ形を v8.40 で一度直していた。</strong>履歴を確認せず v8.62 で別の原因(ResizeObserver)と誤診している。</dd>
+    </dl>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">09</span><span>テスト</span></h2>
+  <p class="sub">ブラウザも Google も要らない。node だけで両方走る。</p>
+  <div class="tbl">
+  <table>
+    <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
+    <tbody>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">155</td></tr>
+      <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">100</td></tr>
+      <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
+      <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <div class="col">
+  <p>app.js は <code>ReactDOM.createRoot(...)</code> の行を差し替えて評価し、トップレベルの関数を <code>globalThis</code> へ吐き出す。UIを動かさずに計算だけ試せる。</p>
+  <p>張りぼては<strong>実物の嫌なところを模す</strong>のが仕事。<code>"2026-08-27"</code> を <code>Date</code> に化かす、1000行で例外にする、<code>deleteRows</code> で行数が減る。ここを手加減すると、08節のような不具合がすり抜ける。</p>
+  <h3>直したことの確かめ方</h3>
+  <p>テストを足したら<strong>必ず対照を取る</strong>。修正を戻して、足したテストが実際に落ちることを見る。落ちないテストは何も守っていない。戻したあとはハッシュで元通りを確認する。</p>
+  </div>
+</section>
+
+<section>
+  <h2><span class="no">10</span><span>配り方</span></h2>
+  <p class="sub">アプリと GAS は別々に配る。片方だけ更新しても直らないことがある。</p>
+  <div class="fig">
+    <div class="cap">図7 — リリース</div>
+    <div class="body">
+<pre class="mermaid">
+flowchart LR
+  A["Dev で作業<br/>APP_VERSION と CACHE_VERSION を上げる"] --> B["selftest / gastest"]
+  B --> C["main へ ff-only<br/>futureA も揃える"]
+  C --> D["push"]
+  D --> E["Pages ビルド"]
+  E --> F["端末 : SW が新キャッシュを作る"]
+  A --> G["Code.gs を貼り替え"]
+  G --> H["デプロイを管理 → 編集<br/>→ 新バージョン"]
+  H --> I["同じURLのまま更新"]
+</pre>
+    </div>
+  </div>
+  <div class="note warn">
+    <span class="t">GAS は「新規デプロイ」にしない</span>
+    <p>新規デプロイにすると URL が変わり、全端末の設定を直すことになる。必ず<strong>既存デプロイの「編集」から バージョン「新バージョン」</strong>で更新する。</p>
+    <p><code>APP_VERSION</code>(app.js)と <code>CACHE_VERSION</code>(sw.js)は必ず一緒に上げる。ずれていると selftest が落ちる。</p>
+  </div>
+</section>
+
+<footer>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.81 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+</footer>
+
+</div>
