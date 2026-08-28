@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "toMapStatus", "workIdFor", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM",
+  "PROGRESS_ORDER", "toMapStatus", "workIdFor", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -632,6 +632,85 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     /mapFullBarBtn: \{[\s\S]{0,700}flexShrink: 1[\s\S]{0,120}minWidth: 0/.test(src), true);
   eq("指で押す的が44pxを下回らない",
     /mapFullBarBtn: \{[\s\S]{0,700}minHeight: 44/.test(src), true);
+}
+
+// ── 差分描画の署名(v8.91) ────────────────────────────
+// ここに入れ忘れたものは「サーバーには届いているのに地図が変わらない」
+// という形で出る。利用者からは共有が壊れたのと見分けが付かない。
+{
+  const sig = t.fieldDrawSig;
+  const F = { id: 1, name: "北の田", areaA: 12.5, updatedAt: "2026-08-01T00:00:00.000Z",
+              polygon: [[33,130],[33,131],[34,131]] };
+  const ST = { status: "planned", by: "藤本", at: "2026-08-20", sprayedL: 0, areaA: 12.5, pending: false };
+  const base = sig(F, ST, true, "a");
+
+  eq("同じ材料なら同じ署名", sig(F, ST, true, "a"), base);
+  // 色が変わるもの
+  eq("状態が変われば変わる", sig(F, { ...ST, status: "done" }, true, "a") !== base, true);
+  eq("作業から外れれば変わる(対象外へ)", sig(F, null, true, "a") !== base, true);
+  // 色は変えないが吹き出しに出るもの。落とすと吹き出しだけ古くなる
+  eq("実散布量が変われば変わる", sig(F, { ...ST, sprayedL: 95 }, true, "a") !== base, true);
+  eq("記録者が変われば変わる", sig(F, { ...ST, by: "田中" }, true, "a") !== base, true);
+  eq("入力日が変われば変わる", sig(F, { ...ST, at: "2026-08-21" }, true, "a") !== base, true);
+  eq("報告面積が変われば変わる", sig(F, { ...ST, areaA: 11 }, true, "a") !== base, true);
+  eq("未送信の印が変われば変わる", sig(F, { ...ST, pending: true }, true, "a") !== base, true);
+  // 札まわり
+  eq("札の出し分けが変われば変わる", sig(F, ST, false, "a") !== base, true);
+  eq("面積の単位が変われば変わる", sig(F, ST, true, "ha") !== base, true);
+  eq("圃場名が変われば変わる", sig({ ...F, name: "南の田" }, ST, true, "a") !== base, true);
+  eq("面積が変われば変わる", sig({ ...F, areaA: 20 }, ST, true, "a") !== base, true);
+  // 形
+  eq("囲み直せば変わる(編集時刻)",
+    sig({ ...F, updatedAt: "2026-08-02T00:00:00.000Z" }, ST, true, "a") !== base, true);
+  eq("頂点の数が変われば変わる(編集時刻が無い古いデータ向け)",
+    sig({ ...F, updatedAt: "", polygon: [[33,130],[33,131],[34,131],[34,130]] }, null, true, "a") !==
+    sig({ ...F, updatedAt: "", polygon: [[33,130],[33,131],[34,131]] }, null, true, "a"), true);
+  // 区切りの取り違えが起きないこと(隣の項目へ食い込まない)
+  eq("項目の境目が混ざらない",
+    sig({ ...F, name: "あ", areaA: "" }, null, true, "a") !==
+    sig({ ...F, name: "", areaA: "あ" }, null, true, "a"), true);
+}
+
+// ── 差分の出し方(v8.91) ──────────────────────────────
+{
+  const d = t.diffDraw;
+  const m = o => new Map(Object.entries(o));
+  eq("何も変わっていなければ何もしない",
+    d(m({ a: "1", b: "2" }), m({ a: "1", b: "2" })), { draw: [], drop: [] });
+  eq("増えたものは作る",
+    d(m({ a: "1" }), m({ a: "1", b: "2" })), { draw: ["b"], drop: [] });
+  eq("消えたものは消す",
+    d(m({ a: "1", b: "2" }), m({ a: "1" })), { draw: [], drop: ["b"] });
+  eq("変わったものは消してから作り直す",
+    d(m({ a: "1" }), m({ a: "9" })), { draw: ["a"], drop: ["a"] });
+  eq("初回は全部作る", d(new Map(), m({ a: "1", b: "2" })), { draw: ["a", "b"], drop: [] });
+  eq("全部消えたら全部消す", d(m({ a: "1", b: "2" }), new Map()), { draw: [], drop: ["a", "b"] });
+}
+
+// ── 差分描画が両方の地図に入っているか(ソースの形) ────
+// 全消しに戻ると、45秒ごとに全部作り直す元の重さに戻る。
+// 逆に記憶の捨て忘れがあると、地図を作り直したとき空のままになる。
+{
+  const L = src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas"));
+  const G = src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab"));
+  [["Leaflet", L], ["Google", G]].forEach(([name, body]) => {
+    eq(name + " は署名で比べる", body.includes("fieldDrawSig(f, st, showLabel, p.areaUnitKey)"), true);
+    eq(name + " は差分を取る", body.includes("diffDraw(prevSig, nextSig)"), true);
+    eq(name + " は消すぶんと作るぶんを分けて当てる",
+      body.includes("d.drop.forEach") && body.includes("d.draw.forEach"), true);
+    eq(name + " は地図を作り直したら記憶を捨てる",
+      (body.match(/drawnRef\.current = new Map\(\)/g) || []).length >= 2, true);
+  });
+  // 描画の effect の中で全消ししていないこと
+  const drawEffectOf = body => {
+    const i = body.indexOf("const showLabel = labelsVisible");
+    const j = body.indexOf("fitRef.current = targetBounds;", i);
+    return i > 0 && j > i ? body.slice(i, j) : "";
+  };
+  eq("Leaflet は描き直しで全消ししない", /clearLayers\(\)/.test(drawEffectOf(L)), false);
+  eq("Google は描き直しで全消ししない", /overlaysRef/.test(drawEffectOf(G)), false);
+  eq("Google の重ね物は圃場ごとにまとめている", G.includes("cur.overlays.forEach"), true);
+  eq("使わなくなった overlaysRef が残っていない", src.includes("overlaysRef"), false);
 }
 
 // ── 札(圃場名・面積)の出し分け(v8.89) ────────────────

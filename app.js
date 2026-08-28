@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.90";
+const APP_VERSION = "v8.91";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -9110,9 +9110,18 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.90",
+    ver: "v8.91",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "⚡ 進捗地図の45秒ごとの取り直しで、変わった圃場だけを描き直すようにしました。これまでは中身が1つも変わっていなくても全部作り直しており、そのたびに画面が止まっていました",
+      "⚡ 実測で200圃場のとき、1回あたり 173.7ms → 0.40ms(何も変わっていないとき)になります。1枚だけ散布済になった場合でもその1枚しか触りません",
+      "🏷 これで札を出したままでも引っかかりにくくなります。「🏷 札なし」はこれまでどおり使えます",
+      "※ 色・吹き出しの中身(実散布量・記録者・入力日)・圃場の出入り・面積の単位・札の切替は、すべて変化として拾います。拾い漏らすと「届いているのに地図が変わらない」になるため、検査を21件足しました"
+    ]
+  }, {
+    ver: "v8.90",
+    date: "2026-08",
     notes: [
       "📱 全画面のときの操作ボタンを、右上から下の帯に移しました。スマホで上の2つが見出しの裏に回って押せなくなっていました",
       "📐 360px幅(狭い部類のスマホ)・375px・タブレット(768px)・PC(1280px)・横向き(375x390)の5つで、4つとも画面内に収まることを確かめています",
@@ -9851,6 +9860,68 @@ const PROGRESS_LABEL_MIN_ZOOM = 15;
 // 手で消せるようにする(既定は従来どおり出す)。
 const labelsVisible = (on, zoom) => on !== false && zoom >= PROGRESS_LABEL_MIN_ZOOM;
 
+// ── 差分描画 ──
+//
+// 進捗地図は45秒ごとに取り直し、そのたびに全部の形と札を作り直していた。
+// 中身が1つも変わっていなくても作り直す。statusByField が毎回別の Map に
+// なるためで、実測で200圃場・札ありなら1回 173.7ms 画面が止まる。
+//
+// そこで「圃場1枚を描くのに要る材料」を1本の文字列にまとめ、前回と同じなら
+// 触らない。違うものだけ消して作り直す。1枚を作り直すのは安いので、
+// 部分的に塗り替えるような細工はしない(そこを間違えると、色だけ古いまま
+// といった直しにくい不具合になる)。
+//
+// 材料に何を入れるかが全部で、入れ忘れると
+// 「サーバーには届いているのに地図が変わらない」という形で出る。
+// 利用者からは共有が壊れたのと見分けが付かないので、描画が読むものは
+// 漏れなく入れる。実績・記録者・入力日は色を変えないが、圃場をタップした
+// ときの吹き出しに出るので、これも入れる(落とすと吹き出しだけ古くなる)。
+const fieldDrawSig = (f, st, showLabel, areaUnitKey) => {
+  const U = "␟";
+  return [
+    st ? st.status : "none",
+    st ? st.by || "" : "",
+    st ? st.at || "" : "",
+    st ? st.sprayedL || 0 : "",
+    st ? st.areaA || "" : "",
+    st && st.pending ? "1" : "",
+    showLabel ? "L" : "-",
+    areaUnitKey || "",
+    f.name || "",
+    f.areaA == null ? "" : f.areaA,
+    // 形を変えたとき(頂点を動かした・囲み直した)に気づくため。
+    // 編集時刻が入らない古いデータのために、頂点の数も併せて見る
+    f.updatedAt || "",
+    (f.polygon || []).length
+  ].join(U);
+};
+
+// 前回と今回の署名表を比べ、作り直す圃場と消す圃場を返す。
+// 変わったものは「消してから作り直す」に寄せる(draw に入れる)。
+//
+// 45秒ごとに必ず走るので、ここ自体が高いと意味がない。node で実測(中央値)。
+//   圃場数   変化なし(署名を作って比べるだけ)   1枚だけ変わったとき
+//     50       0.17ms / 作り直し 0枚            0.11ms / 1枚
+//    100       0.14ms / 0枚                     0.21ms / 1枚
+//    200       0.40ms / 0枚                     0.32ms / 1枚
+//    400       0.74ms / 0枚                     0.47ms / 1枚
+// 全部作り直していた頃は 200圃場・札ありで 173.7ms だった(v8.89 の実測)。
+const diffDraw = (prev, next) => {
+  const draw = [],
+    drop = [];
+  next.forEach((sig, key) => {
+    if (prev.get(key) !== sig) draw.push(key);
+  });
+  prev.forEach((sig, key) => {
+    // 今回いないものは消す。変わったものも一度消してから作り直す
+    if (!next.has(key) || next.get(key) !== sig) drop.push(key);
+  });
+  return {
+    draw,
+    drop
+  };
+};
+
 // ── 進捗地図の中身(Leaflet版) ──
 // 見出し・凡例・件数は親(ProgressMapTab)が持ち、ここは地図そのものだけを描く。
 // 地図タブと同じく、無料地図(Leaflet)とGoogleマップを設定で切り替えられる。
@@ -9862,6 +9933,8 @@ function ProgressLeafletCanvas(p) {
   const layerRef = React.useRef(null);
   const fitRef = React.useRef([]); // 直近に描いた「その日の圃場」のポリゴン
   const fittedRef = React.useRef(false); // 最初の1回だけ自動で寄せる
+  // 描いてある圃場。キー(圃場ID) → { layer, sig }。差分描画に使う
+  const drawnRef = React.useRef(new Map());
   const [ready, setReady] = React.useState(false);
   const [zoom, setZoom] = React.useState(15);
 
@@ -9906,6 +9979,9 @@ function ProgressLeafletCanvas(p) {
       maxNativeZoom: 18
     }).addTo(map);
     layerRef.current = L.layerGroup().addTo(map);
+    // 入れ物が新しくなったので、前の地図に描いたという記憶は捨てる。
+    // 残すと差分が「もう描いてある」と判断して、新しい地図が空のままになる
+    drawnRef.current = new Map();
     map.on("zoomend", () => setZoom(map.getZoom()));
     mapRef.current = map;
     setZoom(map.getZoom());
@@ -9919,6 +9995,7 @@ function ProgressLeafletCanvas(p) {
     return () => {
       map.remove();
       mapRef.current = null;
+      drawnRef.current = new Map();
       if (p.apiRef) p.apiRef.current = null;
     };
   }, [loadAttempt]);
@@ -10027,19 +10104,49 @@ function ProgressLeafletCanvas(p) {
     if (!ready || !window.L || !layerRef.current) return;
     const L = window.L;
     const grp = layerRef.current;
-    grp.clearLayers();
     const showLabel = labelsVisible(p.showLabels, zoom);
     // 寄せる範囲は「その日の作業に入っている圃場」だけにする。登録済みの
     // 全圃場で寄せると、遠くに1枚でも登録があるだけで地図が県単位まで
     // 引いてしまい、今日の圃場が点にしか見えなくなる。
     const targetBounds = [];
+    // まず「今回描くべきもの」を作る。ここではまだ地図に触らない
+    const want = new Map();  // キー → { f, st, sig }
+    const nextSig = new Map();
     (p.fields || []).forEach(f => {
       if (!f.polygon || f.polygon.length < 3) return;
       // キーは文字列で統一(statusByField 側と揃える)。数値と文字列が混ざると
       // 突き合わせに失敗して、作業に入っている圃場まで対象外(灰)になる
-      const st = p.statusByField.get(String(f.id));
+      const id = String(f.id);
+      const st = p.statusByField.get(id);
       const key = st ? st.status : "none";
       if (p.onlyTarget && key === "none") return;
+      if (key !== "none") targetBounds.push(f.polygon);
+      const sig = fieldDrawSig(f, st, showLabel, p.areaUnitKey);
+      nextSig.set(id, sig);
+      want.set(id, {
+        f,
+        st,
+        key
+      });
+    });
+
+    // 前回との差だけを地図に当てる。45秒ごとの取り直しで中身が変わって
+    // いなければ、ここは1つも動かない(v8.91)
+    const drawn = drawnRef.current;
+    const prevSig = new Map();
+    drawn.forEach((v, k) => prevSig.set(k, v.sig));
+    const d = diffDraw(prevSig, nextSig);
+    d.drop.forEach(id => {
+      const cur = drawn.get(id);
+      if (cur) grp.removeLayer(cur.layer);
+      drawn.delete(id);
+    });
+    d.draw.forEach(id => {
+      const w = want.get(id);
+      if (!w) return;
+      const f = w.f,
+        st = w.st,
+        key = w.key;
       const c = PROGRESS_STATES[key] || PROGRESS_STATES.none;
       const poly = L.polygon(f.polygon, {
         color: c.stroke,
@@ -10047,7 +10154,6 @@ function ProgressLeafletCanvas(p) {
         fillColor: c.fill,
         fillOpacity: key === "none" ? 0.3 : 0.55
       }).addTo(grp);
-      if (key !== "none") targetBounds.push(f.polygon);
       if (showLabel) {
         // 圃場名は他の端末から受け取った文字列でもあるので、必ずエスケープしてから
         // 札のHTMLに入れる(そのまま入れるとXSSになる)
@@ -10063,6 +10169,10 @@ function ProgressLeafletCanvas(p) {
         field: f,
         st: st || null
       }));
+      drawn.set(id, {
+        layer: poly,
+        sig: nextSig.get(id)
+      });
     });
     fitRef.current = targetBounds;
     // 初回だけ自動で寄せる。以後は動かさない(見ている場所が勝手に飛ぶため)。
@@ -10117,7 +10227,8 @@ function ProgressLeafletCanvas(p) {
 function ProgressGoogleCanvas(p) {
   const containerRef = React.useRef(null);
   const mapRef = React.useRef(null);
-  const overlaysRef = React.useRef([]);
+  // 描いてある圃場。キー(圃場ID) → { overlays, sig }。差分描画に使う
+  const drawnRef = React.useRef(new Map());
   const fitRef = React.useRef([]);
   const fittedRef = React.useRef(false);
   const [ready, setReady] = React.useState(false);
@@ -10182,6 +10293,9 @@ function ProgressGoogleCanvas(p) {
       });
       map.addListener("zoom_changed", () => setZoom(map.getZoom()));
       mapRef.current = map;
+      // 新しい地図には何も描いていない。前の記憶を残すと、差分が
+      // 「もう描いてある」と判断して空のままになる(Leaflet版と同じ)
+      drawnRef.current = new Map();
       setZoom(map.getZoom());
       setReady(true);
       if (p.apiRef) p.apiRef.current = {
@@ -10196,8 +10310,10 @@ function ProgressGoogleCanvas(p) {
     });
     return () => {
       cancelled = true;
-      overlaysRef.current.forEach(o => o.setMap && o.setMap(null));
-      overlaysRef.current = [];
+      drawnRef.current.forEach(v => v.overlays.forEach(o => o.setMap && o.setMap(null)));
+      // 入れ物が新しくなるので、前の地図に描いたという記憶は捨てる。
+      // 残すと差分が「もう描いてある」と判断して、新しい地図が空のままになる
+      drawnRef.current = new Map();
       mapRef.current = null;
       if (p.apiRef) p.apiRef.current = null;
     };
@@ -10330,15 +10446,43 @@ function ProgressGoogleCanvas(p) {
   React.useEffect(() => {
     if (!ready || !mapRef.current || !window.google) return;
     const g = window.google.maps;
-    overlaysRef.current.forEach(o => o.setMap && o.setMap(null));
-    overlaysRef.current = [];
     const showLabel = labelsVisible(p.showLabels, zoom);
     const targetBounds = [];
+    // Leaflet版と同じ差分描画。45秒ごとの取り直しで中身が変わって
+    // いなければ、地図に1つも触らない(v8.91)
+    const want = new Map();
+    const nextSig = new Map();
     (p.fields || []).forEach(f => {
       if (!f.polygon || f.polygon.length < 3) return;
-      const st = p.statusByField.get(String(f.id));
+      const id = String(f.id);
+      const st = p.statusByField.get(id);
       const key = st ? st.status : "none";
       if (p.onlyTarget && key === "none") return;
+      if (key !== "none") targetBounds.push(f.polygon);
+      nextSig.set(id, fieldDrawSig(f, st, showLabel, p.areaUnitKey));
+      want.set(id, {
+        f,
+        st,
+        key
+      });
+    });
+    const drawn = drawnRef.current;
+    const prevSig = new Map();
+    drawn.forEach((v, k) => prevSig.set(k, v.sig));
+    const d = diffDraw(prevSig, nextSig);
+    d.drop.forEach(id => {
+      const cur = drawn.get(id);
+      // 1圃場ぶんの重ね物(形・名前の札・面積の札)をまとめて外す
+      if (cur) cur.overlays.forEach(o => o.setMap && o.setMap(null));
+      drawn.delete(id);
+    });
+    d.draw.forEach(id => {
+      const w = want.get(id);
+      if (!w) return;
+      const f = w.f,
+        st = w.st,
+        key = w.key;
+      const mine = [];
       const c = PROGRESS_STATES[key] || PROGRESS_STATES.none;
       const poly = new g.Polygon({
         paths: f.polygon.map(pt => ({
@@ -10356,8 +10500,7 @@ function ProgressGoogleCanvas(p) {
         field: f,
         st: st || null
       }));
-      overlaysRef.current.push(poly);
-      if (key !== "none") targetBounds.push(f.polygon);
+      mine.push(poly);
       if (showLabel) {
         const ctr = f.center || polygonCenter(f.polygon);
         // 透明アイコン+ラベルだけのマーカー。Googleマップ側は文字列として
@@ -10380,7 +10523,7 @@ function ProgressGoogleCanvas(p) {
             className: "gm-field-label"
           }
         });
-        overlaysRef.current.push(label);
+        mine.push(label);
         // Googleの札はHTMLも改行も入れられないので、面積は別の札にして
         // CSS(gm-field-area)で名前の下へずらす。地図タブと同じやり方。
         const areaLabel = new g.Marker({
@@ -10401,8 +10544,12 @@ function ProgressGoogleCanvas(p) {
             className: "gm-field-area"
           }
         });
-        overlaysRef.current.push(areaLabel);
+        mine.push(areaLabel);
       }
+      drawn.set(id, {
+        overlays: mine,
+        sig: nextSig.get(id)
+      });
     });
     fitRef.current = targetBounds;
     if (!fittedRef.current && targetBounds.length) {

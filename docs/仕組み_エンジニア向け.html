@@ -163,9 +163,9 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <h1>薬液調合ノート<br>内部構造</h1>
   <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
   <dl class="facts">
-    <div class="fact"><dt>app.js</dt><dd class="num">12,583<small>行</small></dd></div>
+    <div class="fact"><dt>app.js</dt><dd class="num">12,730<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,194<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">249<small>件</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">282<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">127<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
@@ -416,6 +416,18 @@ flowchart TD
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
 
   <div class="fail">
+    <h3>45秒ごとに、変わっていないものまで作り直していた</h3>
+    <p class="ver">v8.91 で差分描画に / 実測あり</p>
+    <dl>
+      <dt>機構</dt><dd>描画の effect は <code>p.statusByField</code> に依存している。これは取得のたびに<strong>別の <code>Map</code></strong> になるので、中身が1つも変わっていなくても effect が走り、<code>clearLayers()</code> して全部作り直していた。札があると 200圃場で 173.7ms(すぐ上)。</dd>
+      <dt>対処</dt><dd>圃場1枚を描くのに要る材料を1本の文字列にまとめ(<code>fieldDrawSig</code>)、前回と違うものだけ消して作り直す(<code>diffDraw</code>)。<strong>部分的に塗り替えるような細工はしない。</strong>1枚を作り直すのは安く、そこを間違えると「色だけ古いまま」という直しにくい不具合になる。</dd>
+      <dt>実測</dt><dd>node での中央値。変化なしのとき 50圃場 <strong>0.17ms</strong>、100圃場 <strong>0.14ms</strong>、200圃場 <strong>0.40ms</strong>、400圃場 <strong>0.74ms</strong>(いずれも作り直し0枚)。1枚だけ変わったときは 0.11〜0.47ms で、触るのはその1枚だけ。<strong>200圃場で 173.7ms → 0.40ms。</strong></dd>
+      <dt>危ないところ</dt><dd>署名に入れ忘れたものは<strong>「サーバーには届いているのに地図が変わらない」</strong>という形で出る。利用者からは共有が壊れたのと見分けが付かず、原因を探す場所を間違える。実績・記録者・入力日・報告面積・未送信の印は色を変えないが、圃場をタップした吹き出しに出るので署名に入れてある(落とすと吹き出しだけ古くなる)。<strong>検査を21件足し、落とすと落ちることを確かめた。</strong></dd>
+      <dt>もう一つの<br>落とし穴</dt><dd>地図を作り直したとき(<code>loadAttempt</code> でのやり直し・エンジン切替)に<strong>描いたという記憶を捨てる</strong>こと。残すと差分が「もう描いてある」と判断し、新しい地図が空のままになる。作った直後と後片付けの両方で捨てている。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>全画面の操作ボタンが、実機でだけ押せない場所に回る</h3>
     <p class="ver">v8.90 で修正 / エミュレータでは再現しなかった</p>
     <dl>
@@ -436,7 +448,7 @@ flowchart TD
       <dt>実測</dt><dd>Leaflet 1.9.4 / PC(Chromium・1280x720)・中央値。作り直し(札なし→札あり)は 50圃場 <strong>1.4→28.2ms</strong>、100圃場 <strong>2.3→74.5ms</strong>、200圃場 <strong>3.5→173.7ms</strong>、400圃場 <strong>7.6→537.5ms</strong>。1回のパンは 0.5→0.7ms 〜 1.3→1.7ms で、こちらの差は小さい。<strong>圃場数に対して加速度的に増える。</strong>スマホはこれより数倍遅い。</dd>
       <dt>対処</dt><dd>倍率のしきい値(<code>PROGRESS_LABEL_MIN_ZOOM</code>)だけでは、寄った状態で圃場が密なときに逃げ道がない。<code>labelsVisible(on, zoom)</code> を足して手で消せるようにした。全画面でも切り替えられる。</dd>
       <dt>測り方の<br>落とし穴</dt><dd>最初の計測は<strong>2倍に膨らんでいた</strong>。Leaflet は札をフェードさせてから消すので、<code>clearLayers()</code> の直後に数えると前の札がまだDOMに残っている。同期のループで測ると <code>setTimeout</code> が走らず、古い札を抱えたまま最後まで測ることになる。作り直しのあと待ってから測る。<strong>これをリークだと誤診しかけた。</strong></dd>
-      <dt>残件</dt><dd>45秒ごとの取得で中身が変わっていなくても全部作り直している(<code>statusByField</code> が毎回別の <code>Map</code> になるため)。差分だけ描き直せば札があっても止まらなくなるはず。<strong>未着手。</strong></dd>
+      <dt>残件</dt><dd>45秒ごとの取得で中身が変わっていなくても全部作り直していた(<code>statusByField</code> が毎回別の <code>Map</code> になるため)。<strong>v8.91 で差分描画にした</strong>(すぐ下)。</dd>
     </dl>
   </div>
 
@@ -597,7 +609,7 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">249</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">282</td></tr>
       <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">127</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
@@ -640,7 +652,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.90 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.91 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>
