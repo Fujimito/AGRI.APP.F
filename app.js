@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.87";
+const APP_VERSION = "v8.88";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -702,6 +702,47 @@ const keepLocalEdit = (oldAt, incAt) => {
 //
 // 既存データは作り直さない。IDは作業に保存されていて、ここで作り直すのは
 // 新しく作る作業だけ。過去の作業も台帳の行もそのまま結び付く。
+// ── 現在地の監視 ──
+// nav を引数で受けるのは、テストで navigator を差し替えるため。
+// 返り値は「止める関数」。呼ばないと watch が残り、地図を閉じても
+// 測位が続いて電池を食う。必ず後片付けで呼ぶこと。
+//
+// 権限を断られた(code 1)ときは、その場で止めて一度だけ知らせる。
+// 断った人に何度も同じ知らせを出しても、できることが増えない。
+// 測位できない・時間切れ(code 2/3)は黙って続ける。屋内から屋外へ出る、
+// 木の下から出る、といった理由で普通に起きて、放っておけば復帰する。
+// ここで止めると、一度失敗した端末は二度と現在地が出なくなる。
+const GEO_DENIED = 1;
+const geoWatch = (nav, onPos, onDenied) => {
+  const geo = nav && nav.geolocation;
+  if (!geo || typeof geo.watchPosition !== "function") {
+    onDenied && onDenied("この端末は位置情報に対応していません");
+    return () => {};
+  }
+  let stopped = false,
+    id = null;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    if (id !== null && typeof geo.clearWatch === "function") geo.clearWatch(id);
+  };
+  id = geo.watchPosition(pos => {
+    if (!stopped) onPos(pos);
+  }, err => {
+    if (stopped) return;
+    if (err && err.code === GEO_DENIED) {
+      stop();
+      onDenied && onDenied("位置情報が許可されていないため、現在地を出せません(端末の設定で許可してください)");
+    }
+    // それ以外は続ける。次の測位で戻ることがある
+  }, {
+    enableHighAccuracy: true,
+    timeout: 15000,
+    // 少し古い値でも即座に出す。真っさらだと最初の1点まで印が出ない
+    maximumAge: 5000
+  });
+  return stop;
+};
 const workIdFor = (workDate, fieldId, nth, device) => {
   const s = String(workDate) + ":" + String(fieldId) +
     (nth > 1 ? "#" + nth + (device ? "@" + String(device) : "") : "");
@@ -9033,7 +9074,7 @@ function SettingsTab(p) {
     desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、「🧪 薬剤・プリセット」に登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。このタブはタンク1杯分を計算するための電卓です。圃場への薬剤の適用は作業タブの「この日に使用した薬剤」で行います。何度も使う組み合わせは「⭐プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます。上限は薬剤ごとに調合タブの「🧪 薬剤・プリセット」で登録でき、未登録の薬剤は既定3回です。設定タブの「農薬の使用回数」で作期の開始日を設定すると、その日以降の実績だけを数えます(作期が変わったら日付を更新するとカウントがやり直しになります)。"
   }, {
     title: "🚁 作業予定・進捗確認タブ(以下「作業タブ」)",
-    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。登録済みの圃場が一覧で出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。計算式は圃場ごとに「面積÷10×投下量」で、調合タブの「面積から計算」とまったく同じ式・同じ端数処理(0.01L単位)です。投下量の欄の下に出る「対象◯圃場 ／ 合計◯a → ◯L」は、実際に書き換わる圃場だけを、書き換わる値そのもので合計した予告なので、押した結果と必ず一致します(実績を入力済みの圃場は上書きされません)。集計バーの「合計薬液量」は、実績を入力した圃場だけ実散布量に切り替わるため、まだ実績のない状態の予定合計とは差が出ます。実績が何圃場ぶん混ざっているかは「実績 ◯/◯圃場」で分かります。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(圃場マスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ ○月○日の未送信 ○件を送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。進捗地図で圃場をタップしたときの吹き出しからも、同じナビを開けます(吹き出しの先頭にあります)。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
+    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。登録済みの圃場が一覧で出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。計算式は圃場ごとに「面積÷10×投下量」で、調合タブの「面積から計算」とまったく同じ式・同じ端数処理(0.01L単位)です。投下量の欄の下に出る「対象◯圃場 ／ 合計◯a → ◯L」は、実際に書き換わる圃場だけを、書き換わる値そのもので合計した予告なので、押した結果と必ず一致します(実績を入力済みの圃場は上書きされません)。集計バーの「合計薬液量」は、実績を入力した圃場だけ実散布量に切り替わるため、まだ実績のない状態の予定合計とは差が出ます。実績が何圃場ぶん混ざっているかは「実績 ◯/◯圃場」で分かります。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(圃場マスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ ○月○日の未送信 ○件を送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。進捗地図で圃場をタップしたときの吹き出しからも、同じナビを開けます(吹き出しの先頭にあります)。進捗地図には現在地が常に青い丸で出ます(まわりの薄い円は測位の精度で、大きいときは位置がずれている可能性があります)。地図が現在地を追いかけて動くことはないので、「📍 現在地」を押したときだけ寄ります。「⛶ 地図を全画面で見る」にすると上のツールバーは隠れますが、右上に「📍 現在地」「⊙ 今日の圃場へ」が残ります。位置情報は地図に出すためだけに使い、スプレッドシートにも他の端末にも送信しません。進捗地図を閉じると測位も止まります。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 圃場登録・圃場一覧タブ(以下「地図タブ」)",
     desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。作図パネルの「頂点を追加」をOFFにすると、地図をタップしても頂点が増えません。形を整えている最中に地図を触って離れた場所に点ができるのを防げます(登録済みの圃場をタップして編集を始めたときは最初からOFFです)。頂点を消すときは「🗑 頂点を消す」をONにしてから頂点をタップします。ONの間は全部の頂点が✕になり、タップしたものがその場で消えます(ONの間は「頂点を追加」は自動でOFFになります)。頂点と頂点の間に出る小さな丸をドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます(触れただけでは増えません。形を確かめたいときに誤って頂点が増えないようにしてあります)。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存すると圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真と国土地理院の標準地図(道路・地名)を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。「🔍 住所・地名を入力して地図を移動」に住所や地名を入れると、その場所へ地図がジャンプします(国土地理院の住所検索を使うためAPIキー不要で、無料地図・Googleマップの両方で使えます)。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。登録済みの圃場は赤い輪郭で表示されます。衛星写真は緑や茶が大半なので、赤が最も輪郭を追いやすいためです。中の作物の様子が見えるよう、塗りは薄く輪郭は濃くしてあります。拡大すると圃場名・作物名・面積の札が出ます。地図は画面の縦幅いっぱいに自動で広がるので、スクロールせずに全体を見られます。「⛶」を押すと見出しやタブバーも隠して完全な全画面になります。全画面で作図していないときは下の帯に「✏ 圃場を囲む」と「✕ 全画面」が出るので、全画面のまま次の圃場を囲めます(登録した圃場をタップすれば、全画面のまま形を直せます)。作図中は右上の「✕ 全画面をやめる」で戻ります。圃場の一覧は上の「📋 一覧」に切り替えると出ます。一覧は地区ごとに折りたためて検索もでき、見出しの「👁 表示中」を押すとその地区を地図から一時的に消せます(端末には保存されないので、アプリを開き直すと元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
@@ -9069,9 +9110,46 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.84",
+    ver: "v8.88",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "📍 進捗地図に現在地を出しっぱなしにしました。これまでは「📍 現在地」を押した瞬間だけ測っていましたが、散布中に見たいのは「自分がいま、どの圃場にいるか」で、それは歩いている間ずっと要ります",
+      "📍 印のまわりの薄い円は測位の精度です。円が大きいときは位置がずれている可能性があります",
+      "📍 追いかけて地図を動かすことはしません。少し先の圃場を見ようとするたびに引き戻されると使えないためです。寄せたいときは「📍 現在地」を押してください",
+      "📍 全画面でも「📍 現在地」と「⊙ 今日の圃場へ」を押せるようにしました。全画面にすると上のツールバーごと隠れて、押したい場面なのに手が届きませんでした",
+      "🔋 進捗地図を閉じると測位を止めます。開いている間だけ動きます",
+      "📍 位置情報はこれまでどおり地図に出すためだけに使い、スプレッドシートにも他の端末にも送信しません"
+    ]
+  }, {
+    ver: "v8.87",
+    date: "2026-08",
+    notes: [
+      "☁ 共有をオフからオンに戻したとき、送信より先に受信が走っていたのを直しました。押し込みは1.5秒待つ作りで、受け取りだけ即座に走っていたためです",
+      "※ オフの間にためた変更が消えることはありませんが、送信のきっかけを失って次の編集まで残っていました"
+    ]
+  }, {
+    ver: "v8.86",
+    date: "2026-08",
+    notes: [
+      "🆔 同じ日・同じ圃場の2件目(午前と午後で分けた等)を、2台が同時に作ると片方が消えていたのを直しました。連番をその端末の中だけで数えていたため、どちらも「2件目」になってIDが衝突していました",
+      "※ 1件目はこれまでどおり端末をまたいで1件にまとまります。2件目以降だけ端末で分かれます",
+      "※ 既にある作業のIDは変わりません。過去の記録も台帳もそのままです"
+    ]
+  }, {
+    ver: "v8.85",
+    date: "2026-08",
+    notes: [
+      "👥 「防除記録」シートを記録IDだけで探していたため、別チームが同じ日に同じ圃場を入れると互いの行を書き換えていたのを直しました。チームコードの列が増えます",
+      "※ スプレッドシート側の Code.gs を差し替えて再デプロイしてください",
+      "※ これまでに書かれた行はチーム欄が空のまま出ます。散布済にする・取り消すたびに1行ずつ埋まります",
+      "☁ 受信の取りこぼしを塞ぎました。他の端末が送っている最中にこちらが受け取ると、その1件が二度と配られないことがありました。受信の基準時刻を少し手前に取り、書き込み中だったものを次回もう一度配ります",
+      "※ 送信が2分を超えて長引く場合は、それでも取りこぼす余地が残ります(完全ではありません)",
+      "🧪 検査を 178件 → 199件、GAS側を 100件 → 127件 に増やしました"
+    ]
+  }, {
+    ver: "v8.84",
+    date: "2026-08",
     notes: [
       "⚠ 端末の保存領域がいっぱいで保存できなかったときに、赤い帯を出すようにしました。これまでは黙って失敗しており、画面には入ったように見えて、アプリを開き直して初めて消えているのに気づく状態でした",
       "※ 帯は自分で閉じるまで消えません。失うのがその日の作業なので、一瞬の表示だと見逃します",
@@ -9806,36 +9884,93 @@ function ProgressLeafletCanvas(p) {
     };
   }, [loadAttempt]);
 
-  // 「📍 現在地」。測って印を置き、そこへ寄せる。
-  // 地図タブの現在地は押すたび出し入れするが、こちらは飛ぶだけにする。
-  // 散布中に押すのは自分の場所を見失ったときで、消したい場面がない。
-  const gpsRef = React.useRef(null);
+  // ── 現在地を常に出す ──
+  // 押したときだけでなく、進捗地図を開いている間ずっと印を出す。
+  // 散布中に見たいのは「自分がいま、どの圃場にいるか」で、
+  // それは押した瞬間ではなく歩いている間ずっと要る。
+  //
+  // 地図は動かさない。追いかけて中心を変えると、少し先の圃場を
+  // 見ようとしても引き戻されて、見たい場所を見ていられない。
+  // 寄せたいときは「📍 現在地」を押す。
+  const gpsRef = React.useRef(null);     // 現在地の印
+  const gpsAccRef = React.useRef(null);  // 測位の精度を表す円
+  const lastPosRef = React.useRef(null); // 直近の位置。寄せるときに使い回す
+  const drawGps = pos => {
+    const L = window.L,
+      m = mapRef.current;
+    if (!L || !m) return;
+    const ll = [pos.coords.latitude, pos.coords.longitude];
+    lastPosRef.current = ll;
+    // 精度の円。半径が小さいと点に埋もれるので、印より大きいときだけ出す。
+    // 精度を出さないと、大きくずれているのか正確なのかが画面から分からない
+    const acc = Number(pos.coords.accuracy) || 0;
+    if (!gpsRef.current) {
+      gpsAccRef.current = L.circle(ll, {
+        radius: acc,
+        color: "#3B7EA1",
+        weight: 1,
+        opacity: 0.5,
+        fillColor: "#3B7EA1",
+        fillOpacity: 0.12,
+        interactive: false
+      }).addTo(m);
+      gpsRef.current = L.circleMarker(ll, {
+        radius: 8,
+        color: "#fff",
+        weight: 3,
+        fillColor: "#3B7EA1",
+        fillOpacity: 1,
+        interactive: false
+      }).addTo(m).bindTooltip("現在地", {
+        permanent: false,
+        direction: "top"
+      });
+      return;
+    }
+    // 2回目以降は作り直さず動かすだけ。作り直すと点滅する
+    gpsRef.current.setLatLng(ll);
+    if (gpsAccRef.current) {
+      gpsAccRef.current.setLatLng(ll);
+      gpsAccRef.current.setRadius(acc);
+    }
+  };
+  const geoStopRef = React.useRef(null);
+  React.useEffect(() => {
+    if (!ready) return;
+    geoStopRef.current = geoWatch(navigator, drawGps, msg => p.flash && p.flash(msg));
+    return () => {
+      // 止め忘れると、地図を閉じても測位が続いて電池を食う
+      geoStopRef.current && geoStopRef.current();
+      geoStopRef.current = null;
+      const m = mapRef.current;
+      if (m) {
+        if (gpsRef.current) m.removeLayer(gpsRef.current);
+        if (gpsAccRef.current) m.removeLayer(gpsAccRef.current);
+      }
+      gpsRef.current = null;
+      gpsAccRef.current = null;
+    };
+  }, [ready]);
+
+  // 「📍 現在地」。印は監視が出しているので、ここは寄せるだけ。
+  // 直近の位置があればその場で寄せる(測り直しを待たせない)。
   const locate = () => {
-    const L = window.L;
-    if (!L || !mapRef.current) return;
+    const m = mapRef.current;
+    if (!m) return;
+    if (lastPosRef.current) {
+      m.setView(lastPosRef.current, 17);
+      return;
+    }
+    // まだ一度も取れていない(権限待ち・測位中・監視が止まっている)。
+    // ここだけは押した人を待たせないよう、その場で1回測る
     if (!navigator.geolocation) {
       p.flash && p.flash("この端末は位置情報に対応していません");
       return;
     }
     navigator.geolocation.getCurrentPosition(pos => {
-      const m = mapRef.current;
-      if (!m) return;
-      const ll = [pos.coords.latitude, pos.coords.longitude];
-      if (gpsRef.current) {
-        m.removeLayer(gpsRef.current);
-        gpsRef.current = null;
-      }
-      gpsRef.current = L.circleMarker(ll, {
-        radius: 9,
-        color: "#fff",
-        weight: 3,
-        fillColor: "#3B7EA1",
-        fillOpacity: 1
-      }).addTo(m).bindTooltip("現在地", {
-        permanent: true,
-        direction: "top"
-      });
-      m.setView(ll, 17);
+      if (!mapRef.current) return;
+      drawGps(pos);
+      mapRef.current.setView([pos.coords.latitude, pos.coords.longitude], 17);
     }, () => {
       p.flash && p.flash("位置情報を取得できませんでした(権限を確認してください)");
     }, {
@@ -10052,45 +10187,94 @@ function ProgressGoogleCanvas(p) {
     return () => clearTimeout(t);
   }, [ready, loadAttempt]);
 
-  // 「📍 現在地」。Leaflet版と同じく、飛ぶだけ。
-  const gpsRef = React.useRef(null);
-  const locate = () => {
-    if (!mapRef.current || !window.google) return;
-    if (!navigator.geolocation) {
-      p.flash && p.flash("この端末は位置情報に対応していません");
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(pos => {
-      const m = mapRef.current;
-      if (!m || !window.google) return;
-      const g = window.google.maps;
-      const ll = {
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude
-      };
-      if (gpsRef.current) {
-        gpsRef.current.setMap(null);
-        gpsRef.current = null;
-      }
+  // ── 現在地を常に出す(Leaflet版と同じ方針) ──
+  // 地図は動かさない。寄せたいときは「📍 現在地」を押す。
+  const gpsRef = React.useRef(null);     // 現在地の印
+  const gpsAccRef = React.useRef(null);  // 測位の精度を表す円
+  const lastPosRef = React.useRef(null);
+  const drawGps = pos => {
+    const m = mapRef.current;
+    if (!m || !window.google) return;
+    const g = window.google.maps;
+    const ll = {
+      lat: pos.coords.latitude,
+      lng: pos.coords.longitude
+    };
+    lastPosRef.current = ll;
+    const acc = Number(pos.coords.accuracy) || 0;
+    if (!gpsRef.current) {
+      gpsAccRef.current = new g.Circle({
+        map: m,
+        center: ll,
+        radius: acc,
+        strokeColor: "#3B7EA1",
+        strokeOpacity: 0.5,
+        strokeWeight: 1,
+        fillColor: "#3B7EA1",
+        fillOpacity: 0.12,
+        clickable: false
+      });
       gpsRef.current = new g.Marker({
         position: ll,
         map: m,
-        label: {
-          text: "現在地",
-          color: "#fff",
-          fontWeight: "700"
-        },
+        title: "現在地",
+        clickable: false,
+        // 圃場のポリゴンより前に出す。埋もれると探すことになる
+        zIndex: 9999,
         icon: {
           path: g.SymbolPath.CIRCLE,
-          scale: 10,
+          scale: 9,
           fillColor: "#3B7EA1",
           fillOpacity: 1,
           strokeColor: "#fff",
           strokeWeight: 3
         }
       });
-      m.setCenter(ll);
+      return;
+    }
+    // 2回目以降は作り直さず動かすだけ。作り直すと点滅する
+    gpsRef.current.setPosition(ll);
+    if (gpsAccRef.current) {
+      gpsAccRef.current.setCenter(ll);
+      gpsAccRef.current.setRadius(acc);
+    }
+  };
+  const geoStopRef = React.useRef(null);
+  React.useEffect(() => {
+    if (!ready) return;
+    geoStopRef.current = geoWatch(navigator, drawGps, msg => p.flash && p.flash(msg));
+    return () => {
+      // 止め忘れると、地図を閉じても測位が続いて電池を食う
+      geoStopRef.current && geoStopRef.current();
+      geoStopRef.current = null;
+      if (gpsRef.current) gpsRef.current.setMap(null);
+      if (gpsAccRef.current) gpsAccRef.current.setMap(null);
+      gpsRef.current = null;
+      gpsAccRef.current = null;
+    };
+  }, [ready]);
+
+  // 「📍 現在地」。印は監視が出しているので、ここは寄せるだけ。
+  const locate = () => {
+    const m = mapRef.current;
+    if (!m || !window.google) return;
+    if (lastPosRef.current) {
+      m.setCenter(lastPosRef.current);
       m.setZoom(17);
+      return;
+    }
+    if (!navigator.geolocation) {
+      p.flash && p.flash("この端末は位置情報に対応していません");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(pos => {
+      if (!mapRef.current) return;
+      drawGps(pos);
+      mapRef.current.setCenter({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude
+      });
+      mapRef.current.setZoom(17);
     }, () => {
       p.flash && p.flash("位置情報を取得できませんでした(権限を確認してください)");
     }, {
@@ -10563,7 +10747,17 @@ function ProgressMapTab(p) {
     }), fullMap ? /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(false),
     style: S.mapFullExit
-  }, "✕ 全画面をやめる") : null), !fullMap && /*#__PURE__*/React.createElement("button", {
+  }, "✕ 全画面をやめる") : null, fullMap ? /*#__PURE__*/React.createElement("button", {
+    // 全画面にすると上のツールバーごと隠れて「📍 現在地」に手が届かない。
+    // 散布中に押したいのはまさに全画面のときなので、ここにも出す。
+    onClick: () => apiRef.current && apiRef.current.locate && apiRef.current.locate(),
+    style: S.mapFullLocate,
+    title: "今いる場所へ地図を寄せる"
+  }, "📍 現在地") : null, fullMap ? /*#__PURE__*/React.createElement("button", {
+    onClick: fitToTargets,
+    style: S.mapFullFit,
+    title: "その日の作業に入っている圃場が全部入るまで寄せ直す"
+  }, "⊙ 今日の圃場へ") : null), !fullMap && /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(true),
     style: {
       ...S.smallSecondary,
@@ -12067,6 +12261,39 @@ const S = {
   mapFullExit: {
     position: "fixed",
     top: "calc(10px + env(safe-area-inset-top))",
+    right: 12,
+    zIndex: 910,
+    background: "rgba(255,255,255,0.94)",
+    border: "1.5px solid #D8E0D2",
+    borderRadius: 10,
+    padding: "8px 12px",
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#1C2B21",
+    boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+    cursor: "pointer"
+  },
+  // 全画面のときだけ出す操作ボタン。「✕ 全画面をやめる」(mapFullExit)の
+  // 下に縦に並べる。地図の覆い(mapWrapFull, zIndex 900)より前に出す。
+  // 右上に寄せているのは、地図を見ながら片手の親指で届く位置のため。
+  mapFullLocate: {
+    position: "fixed",
+    top: "calc(58px + env(safe-area-inset-top))",
+    right: 12,
+    zIndex: 910,
+    background: "rgba(255,255,255,0.94)",
+    border: "1.5px solid #D8E0D2",
+    borderRadius: 10,
+    padding: "8px 12px",
+    fontSize: 14,
+    fontWeight: 700,
+    color: "#1C2B21",
+    boxShadow: "0 2px 8px rgba(0,0,0,0.2)",
+    cursor: "pointer"
+  },
+  mapFullFit: {
+    position: "fixed",
+    top: "calc(104px + env(safe-area-inset-top))",
     right: 12,
     zIndex: 910,
     background: "rgba(255,255,255,0.94)",

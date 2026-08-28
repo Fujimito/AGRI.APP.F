@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "toMapStatus", "workIdFor", "keepLocalEdit",
+  "PROGRESS_ORDER", "toMapStatus", "workIdFor", "keepLocalEdit", "geoWatch",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -526,6 +526,98 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     k("2026-08-01T00:00:00.000Z", ""), true);
   eq("両方とも空なら適用する(初期データを取りこぼさない)", k("", ""), false);
   eq("undefined も空として扱う", [k(undefined, undefined), k(undefined, "x")], [false, false]);
+}
+
+// ── 現在地の監視(v8.88) ──────────────────────────────
+{
+  const g = t.geoWatch;
+  // 対応していない端末
+  {
+    let msg = null;
+    const stop = g({}, () => {}, m => { msg = m; });
+    eq("位置情報に対応していなければ知らせる", typeof msg === "string" && msg.length > 0, true);
+    eq("止める関数は必ず返る", typeof stop, "function");
+    stop(); // 落ちないこと
+  }
+  // 通常の監視
+  {
+    const calls = [];
+    let cleared = null, watchId = 77, cb = null, errCb = null, opts = null;
+    const nav = { geolocation: {
+      watchPosition: (ok, ng, o) => { cb = ok; errCb = ng; opts = o; return watchId; },
+      clearWatch: id => { cleared = id; },
+    } };
+    const stop = g(nav, pos => calls.push(pos), () => {});
+    eq("高精度で測る", opts.enableHighAccuracy, true);
+    eq("少し古い値も使う(最初の1点を待たせない)", opts.maximumAge > 0, true);
+    cb({ coords: { latitude: 33, longitude: 130 } });
+    cb({ coords: { latitude: 34, longitude: 131 } });
+    eq("測るたびに呼ばれる", calls.length, 2);
+    // 権限以外の失敗は続ける
+    errCb({ code: 2 });
+    errCb({ code: 3 });
+    cb({ coords: { latitude: 35, longitude: 132 } });
+    eq("測位失敗・時間切れでは止めない", [calls.length, cleared], [3, null]);
+    stop();
+    eq("止めると clearWatch する", cleared, watchId);
+    cb({ coords: { latitude: 36, longitude: 133 } });
+    eq("止めたあとは呼ばれない", calls.length, 3);
+    cleared = null;
+    stop();
+    eq("二度止めても clearWatch は1回だけ", cleared, null);
+  }
+  // 権限を断られたら、その場で止めて一度だけ知らせる
+  {
+    const msgs = [];
+    let cleared = null, errCb = null;
+    const nav = { geolocation: {
+      watchPosition: (ok, ng) => { errCb = ng; return 5; },
+      clearWatch: id => { cleared = id; },
+    } };
+    g(nav, () => {}, m => msgs.push(m));
+    errCb({ code: 1 });
+    eq("権限を断られたら止める", cleared, 5);
+    eq("知らせは1回", msgs.length, 1);
+    errCb({ code: 1 });
+    eq("止まったあとは何も知らせない", msgs.length, 1);
+  }
+}
+
+// ── 進捗地図が現在地を出し続けるか(ソースの形) ────────
+// 押したときだけ測る形に戻っていないか、後片付けを忘れていないかを見る。
+// watch を止め忘れると、地図を閉じても測位が続いて電池を食う。
+{
+  const canvases = [
+    ["ProgressLeafletCanvas", src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas"))],
+    ["ProgressGoogleCanvas", src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab"))],
+  ];
+  canvases.forEach(([name, body]) => {
+    eq(name + " は geoWatch で監視する", body.includes("geoWatch(navigator"), true);
+    eq(name + " は止める関数を後片付けで呼ぶ", /geoStopRef\.current\(\)/.test(body), true);
+    eq(name + " は精度の円も出す", body.includes("gpsAccRef"), true);
+    // drawGps(印を描く)の中で地図を動かしていないこと。
+    // 追いかけて中心を変えると、少し先の圃場を見ようとしても引き戻される。
+    const a = body.indexOf("const drawGps = pos => {");
+    const b = body.indexOf("const geoStopRef");
+    eq(name + " の drawGps が見つかる", a > 0 && b > a, true);
+    const draw = a > 0 && b > a ? body.slice(a, b) : "";
+    eq(name + " は追従で地図を動かさない",
+      // gpsAccRef(精度の円)の setCenter は地図ではないので、地図の変数 m に限る
+      /m\.(setView|setCenter|setZoom)\(/.test(draw), false);
+  });
+}
+
+// ── 全画面でも現在地ボタンが出るか(ソースの形) ────────
+{
+  const tab = src.slice(src.indexOf("function ProgressMapTab"), src.indexOf("const S = {"));
+  const seg = tab.slice(tab.indexOf("S.mapFullExit"));
+  eq("全画面のときに現在地ボタンを出す",
+    seg.includes("S.mapFullLocate") && seg.includes("apiRef.current.locate"), true);
+  eq("全画面の現在地ボタンは fullMap のときだけ",
+    /fullMap \? [\s\S]{0,400}S\.mapFullLocate/.test(seg), true);
+  eq("mapFullLocate のスタイルがある", src.includes("mapFullLocate: {"), true);
+  eq("全画面のボタンは重ならない位置にある",
+    src.includes('top: "calc(58px + env(safe-area-inset-top))"'), true);
 }
 
 // ── 共有オフ→オンの順序(v8.87) ───────────────────────
