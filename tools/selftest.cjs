@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "toMapStatus", "workIdFor", "keepLocalEdit", "geoWatch",
+  "PROGRESS_ORDER", "toMapStatus", "workIdFor", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -610,14 +610,54 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 // ── 全画面でも現在地ボタンが出るか(ソースの形) ────────
 {
   const tab = src.slice(src.indexOf("function ProgressMapTab"), src.indexOf("const S = {"));
-  const seg = tab.slice(tab.indexOf("S.mapFullExit"));
+  const seg = tab.slice(tab.indexOf("mapFullBtnAt(0)"));
   eq("全画面のときに現在地ボタンを出す",
-    seg.includes("S.mapFullLocate") && seg.includes("apiRef.current.locate"), true);
-  eq("全画面の現在地ボタンは fullMap のときだけ",
-    /fullMap \? [\s\S]{0,400}S\.mapFullLocate/.test(seg), true);
-  eq("mapFullLocate のスタイルがある", src.includes("mapFullLocate: {"), true);
-  eq("全画面のボタンは重ならない位置にある",
-    src.includes('top: "calc(58px + env(safe-area-inset-top))"'), true);
+    seg.includes("mapFullBtnAt(1)") && seg.includes("apiRef.current.locate"), true);
+  eq("全画面のボタンは fullMap のときだけ",
+    /fullMap && [\s\S]{0,1200}mapFullBtnAt\(1\)/.test(tab), true);
+  eq("全画面に札の切替もある", seg.includes("mapFullBtnAt(3)") && seg.includes("setShowLabels"), true);
+  eq("全画面のボタンは4つ",
+    (seg.match(/mapFullBtnAt\(\d\)/g) || []).length, 4);
+  eq("mapFullBtnAt で位置を決めている", src.includes("const mapFullBtnAt = i =>"), true);
+  eq("上端は safe-area から測る(ノッチに被らない)",
+    src.includes('"calc(" + (10 + i * 46) + "px + env(safe-area-inset-top))"'), true);
+}
+
+// ── 札(圃場名・面積)の出し分け(v8.89) ────────────────
+// 札は圃場1枚につきDOMを1つ(Leaflet)ないし2つ(Google)作り、パン・ズームの
+// たびに全部の位置が計算し直される。倍率だけでは、寄った状態で圃場が密な
+// ときに逃げ道がないので、手で消せるようにした。
+{
+  const v = t.labelsVisible, Z = t.PROGRESS_LABEL_MIN_ZOOM;
+  eq("しきい値は15", Z, 15);
+  eq("ONかつ倍率が足りていれば出す", v(true, Z), true);
+  eq("ONでも倍率が足りなければ出さない", v(true, Z - 1), false);
+  eq("OFFなら倍率が足りていても出さない", v(false, Z + 5), false);
+  eq("未設定(undefined)は従来どおり出す", v(undefined, Z), true);
+  eq("未設定でも倍率が足りなければ出さない", v(undefined, Z - 1), false);
+}
+
+// ── 札の切替が地図まで届いているか(ソースの形) ────────
+{
+  const tab = src.slice(src.indexOf("function ProgressMapTab"), src.indexOf("const S = {"));
+  eq("端末に残す", tab.includes('"tankmix:proglabels"'), true);
+  eq("既定は出す(更新で急に消えない)", tab.includes('!== "0"'), true);
+  eq("キャンバスへ渡している", /showLabels,/.test(tab), true);
+  eq("ツールバーにも切替がある",
+    tab.indexOf("setShowLabels") < tab.indexOf("mapFullBtnAt(0)"), true);
+  const canvases = [
+    src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas")),
+    src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab")),
+  ];
+  canvases.forEach((body, i) => {
+    const name = i === 0 ? "Leaflet" : "Google";
+    eq(name + " が labelsVisible で判定する",
+      body.includes("labelsVisible(p.showLabels, zoom)"), true);
+    eq(name + " の描き直しの条件にも入っている",
+      /\}, \[ready, p\.fields, p\.statusByField, labelsVisible\(p\.showLabels, zoom\)/.test(body), true);
+    eq(name + " に倍率だけの判定が残っていない",
+      /showLabel = zoom >= PROGRESS_LABEL_MIN_ZOOM/.test(body), false);
+  });
 }
 
 // ── 共有オフ→オンの順序(v8.87) ───────────────────────
