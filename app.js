@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.85";
+const APP_VERSION = "v8.86";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -684,8 +684,27 @@ const keepLocalEdit = (oldAt, incAt) => {
   if (a && b) return a >= b;
   return a > b;
 };
-const workIdFor = (workDate, fieldId, nth) => {
-  const s = String(workDate) + ":" + String(fieldId) + (nth > 1 ? "#" + nth : "");
+// 2件目以降にだけ端末IDを混ぜる理由。
+//
+// nth は「この端末が持っている作業」だけを見て空き番号を探す(makeWork)。
+// 別々の端末が同じ日・同じ圃場の2件目を同時に作ると、どちらも nth=2 に
+// たどり着き、同じIDになる。台帳は「チーム＋ID」で上書きするので、
+// 後から送ったほうが相手の2件目を書き換える。独立に作った別の作業なのに、
+// 片方が黙って消える。
+//
+// 1件目(nth=1)は端末IDを混ぜない。ここが端末をまたいで一致するのは
+// 設計意図で、同じ圃場の同じ日の作業を1件に合流させている。
+// 混ぜると合流しなくなり、進捗地図に同じ圃場が二重に出る。
+//
+// 2件目以降は「午前と午後で分けた」のような、その端末の都合で増やしたもの。
+// 別の端末が独立に作った2件目と同じものだと見なす根拠がないので、
+// 分けておくほうが正しい。
+//
+// 既存データは作り直さない。IDは作業に保存されていて、ここで作り直すのは
+// 新しく作る作業だけ。過去の作業も台帳の行もそのまま結び付く。
+const workIdFor = (workDate, fieldId, nth, device) => {
+  const s = String(workDate) + ":" + String(fieldId) +
+    (nth > 1 ? "#" + nth + (device ? "@" + String(device) : "") : "");
   let h1 = 0x811c9dc5,
     h2 = 0x01000193;
   for (let i = 0; i < s.length; i++) {
@@ -1309,10 +1328,10 @@ function App() {
     id: (() => {
       const used = new Set(works.map(w => String(w.id)));
       let nth = 1,
-        id = workIdFor(workDate, f.id, 1);
+        id = workIdFor(workDate, f.id, 1, deviceId);
       while (used.has(String(id)) && nth < 50) {
         nth++;
-        id = workIdFor(workDate, f.id, nth);
+        id = workIdFor(workDate, f.id, nth, deviceId);
       }
       return id;
     })(),

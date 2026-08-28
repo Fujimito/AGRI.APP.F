@@ -163,9 +163,9 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <h1>薬液調合ノート<br>内部構造</h1>
   <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
   <dl class="facts">
-    <div class="fact"><dt>app.js</dt><dd class="num">12,206<small>行</small></dd></div>
+    <div class="fact"><dt>app.js</dt><dd class="num">12,225<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,194<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">185<small>件</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">194<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">127<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
@@ -250,7 +250,7 @@ flowchart LR
     <div class="body">
 <pre class="mermaid">
 flowchart TD
-  A["作業日 2026-08-27<br/>圃場ID 1787714776884"] --> B["文字列を連結<br/>nth が2以上なら nth を足す"]
+  A["作業日 2026-08-27<br/>圃場ID 1787714776884"] --> B["文字列を連結<br/>nth が2以上なら<br/>nth と端末IDを足す"]
   B --> C["FNV系ハッシュ 2本 (h1 / h2)"]
   C --> D["(h1 % 0x200000) * 2^32 + h2 + 1"]
   D --> E["1676867858698189 (16桁)"]
@@ -261,16 +261,17 @@ flowchart TD
 </pre>
     </div>
   </div>
-  <div class="note warn">
-    <span class="t">既知の穴 — nth は端末ローカル</span>
-    <p>2回目以降(同じ日・同じ圃場をもう一度入れる)の <code>nth</code> は、<strong>その端末が持っている作業だけ</strong>を見て決めている。未同期の2台が両方「2回目」を入れるとどちらも <code>nth=2</code> になり、別の作業なのにIDが衝突する。1回目が収束するのは設計どおりだが、2回目以降は決定論になっていない。<strong>未修正。</strong></p>
+  <div class="note">
+    <span class="t">2回目以降は端末で分ける(v8.86)</span>
+    <p><code>nth</code> は<strong>その端末が持っている作業だけ</strong>を見て決めるので、未同期の2台が両方「2回目」を入れるとどちらも <code>nth=2</code> になり、別の作業なのにIDが衝突していた。<code>nth</code> が2以上のときだけ端末IDを混ぜる。<strong>1回目は混ぜない</strong> — ここが端末をまたいで一致するのは設計意図で、混ぜると合流しなくなり進捗地図に同じ圃場が二重に出る。2回目以降は「午前と午後で分けた」のようなその端末の都合なので、別端末のそれと同じものだと見なす根拠がない。</p>
+    <p>既存データは作り直していない。IDは作業に保存されていて、<code>workIdFor</code> の呼び出しは <code>makeWork</code> の1か所だけ。過去の作業も台帳の行もそのまま結び付く。</p>
   </div>
   <div class="tbl">
   <table>
     <thead><tr><th>種類</th><th>IDの作り方</th><th>再利用</th></tr></thead>
     <tbody>
       <tr><td>圃場</td><td><code>newId()</code>(Date.now系・単調増加)</td><td>されない</td></tr>
-      <tr><td>作業</td><td><code>workIdFor(日付, 圃場ID, nth)</code></td><td><strong>される</strong></td></tr>
+      <tr><td>作業</td><td><code>workIdFor(日付, 圃場ID, nth, 端末ID)</code><br>端末IDは nth≥2 のときだけ効く</td><td><strong>される</strong></td></tr>
       <tr><td>薬剤</td><td>正規化した薬剤名</td><td><strong>される</strong></td></tr>
     </tbody>
   </table>
@@ -415,6 +416,18 @@ flowchart TD
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
 
   <div class="fail">
+    <h3>2台が同時に「2回目」を入れると、片方が消える</h3>
+    <p class="ver">v8.86 で修正 / 移行なし</p>
+    <dl>
+      <dt>機構</dt><dd><code>makeWork</code> は空き番号 <code>nth</code> を<strong>その端末が持っている作業だけ</strong>から探す。未同期の2台が同じ日・同じ圃場の2件目を作ると、どちらも <code>nth=2</code> にたどり着いて同じIDになる。</dd>
+      <dt>症状</dt><dd>台帳は「チーム＋ID」で上書きするので、<strong>後から送ったほうが相手の2件目を書き換える</strong>。独立に作った別の作業なのに片方が黙って消える。</dd>
+      <dt>対処</dt><dd><code>nth</code> が2以上のときだけ端末IDを混ぜる。<strong>1件目には混ぜない</strong> — 端末をまたいで一致させ1件に合流させるのが v8.73 からの設計意図で、混ぜると進捗地図に同じ圃場が二重に出る。</dd>
+      <dt>移行</dt><dd><strong>不要。</strong>IDは作業に保存されていて、<code>workIdFor</code> を呼ぶのは <code>makeWork</code> の1か所だけ。作り直すのは新しく作る作業のIDだけで、過去の作業も台帳の行もそのまま結び付く。</dd>
+      <dt>残る差</dt><dd><code>localStorage</code> が使えない端末は起動のたびに端末IDが変わる(<code>d-tmp-</code>)。その端末では2件目のIDが起動をまたいで安定しない。元から degrade している経路なので、これ以上は詰めていない。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>受信の基準時刻が、書き込み中の行を追い越す</h3>
     <p class="ver">v8.85 で緩和(上限つき) / 実測はしていない</p>
     <dl>
@@ -548,7 +561,7 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">185</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">194</td></tr>
       <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">127</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
@@ -591,7 +604,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.85 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.86 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>
