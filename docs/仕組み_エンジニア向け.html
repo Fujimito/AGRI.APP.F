@@ -163,7 +163,7 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <h1>薬液調合ノート<br>内部構造</h1>
   <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
   <dl class="facts">
-    <div class="fact"><dt>app.js</dt><dd class="num">13,084<small>行</small></dd></div>
+    <div class="fact"><dt>app.js</dt><dd class="num">13,101<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,194<small>行</small></dd></div>
     <div class="fact"><dt>端末側テスト</dt><dd class="num">366<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">127<small>件</small></dd></div>
@@ -464,6 +464,7 @@ flowchart TD
       <dt>引き継ぎ</dt><dd><code>carryOverFieldIds</code> が「(1)期間内に未実施の作業がある (2)期間内に済んだ作業が1件も無い (3)今日のリストに無い」圃場を返す。<strong>(2) が要る</strong> — 前日の作業は残す方針なので、これが無いと今日済ませた圃場が翌日もまた候補に出続ける。</dd>
       <dt>持って<br>こないもの</dt><dd>圃場だけ。<strong>薬剤と投下量は引き継がない。</strong>希釈倍率はその日の投下量で決まる作りなので、前日の値をそのまま使うと用量を外す。</dd>
       <dt>割り切り</dt><dd>同じ日に同じ圃場を2件入れて片方だけ済んだ場合、(2) に当たるので引き継がない。地図はその日を未実施(赤)で出すので食い違うが、「一度は撒いた圃場」を毎日蒸し返すほうが困る。</dd>
+      <dt>広げた<br>費用</dt><dd>実測(170圃場・1日あたり170件・作業シート510行)。<strong>サーバーが読むセル数は 12,264 で1日でも3日でも同じ</strong> — <code>progressItems_</code> が範囲に関係なく全行を読んでから絞るため。増えるのは応答だけで、生 26.5KB→79.2KB、gzip 1.2KB→2.7KB。端末で畳む時間は 0.26ms→0.50ms。0.3Mbps でも 0.07秒。45秒ごとの通信量は gzip で1時間あたり約0.2MB(効かなければ約6MB)。<strong>gzip が実際に効くかと、GASの実行時間・往復そのものは未検証。</strong></dd>
       <dt>踏んだ穴</dt><dd>差分描画の署名(<code>fieldDrawSig</code>)に <code>prevDate</code> を入れ忘れていた。色は <code>donePrev</code> のまま変わらないので気づきにくいが、吹き出しの日付だけ古くなる。<strong>v8.91 で自分が書いた警告そのものを踏んだ。</strong>検査が捕まえた。</dd>
     </dl>
   </div>
