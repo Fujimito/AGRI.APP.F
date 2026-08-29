@@ -163,9 +163,9 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <h1>薬液調合ノート<br>内部構造</h1>
   <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
   <dl class="facts">
-    <div class="fact"><dt>app.js</dt><dd class="num">12,749<small>行</small></dd></div>
+    <div class="fact"><dt>app.js</dt><dd class="num">12,896<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,194<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">236<small>件</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">308<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">127<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
@@ -454,6 +454,19 @@ flowchart TD
   </div>
 
   <div class="fail">
+    <h3>一度断られると、許可し直しても現在地が出ない</h3>
+    <p class="ver">v8.94 で修正</p>
+    <dl>
+      <dt>機構</dt><dd><code>geoWatch</code> は権限を断られた(<code>code 1</code>)時点で <code>clearWatch</code> して止まる。止めるのは正しい(断った人に何度も知らせても仕方がない)が、<strong>始め直す道が無かった</strong>。測位を始める effect の依存は <code>[ready]</code> だけで、<code>ready</code> は地図を作り直さない限り変わらない。</dd>
+      <dt>症状</dt><dd>端末の設定で位置情報を許可し直しても、<strong>アプリを開き直すまで青い丸が出ない</strong>。しかも画面には何も出ていないので、許可の問題なのか壊れているのかが分からない。</dd>
+      <dt>対処</dt><dd>親が <code>geoAttempt</code> を持ち、増やすと測位をやり直す。増やすのは(1)案内を押して許可が取れたとき、(2)<code>Permissions API</code> の <code>onchange</code> が <code>granted</code> を知らせたとき。</dd>
+      <dt>案内</dt><dd>現在地が出ていないときだけ「📍 位置情報を使う」を出す(<code>geoHintFor</code>)。出ているときは何も出さない — 青い丸が出ていることが答えなので。<strong>すでに拒否されている場合、ブラウザは二度と確認を出さない</strong>ので、押しても無駄なことを画面で言い、端末の設定へ案内する。</dd>
+      <dt>測る<br>タイミング</dt><dd>確認は<strong>操作の直後に測らないと出さない</strong>端末がある。読み込みのついでではなく、押したその場で <code>getCurrentPosition</code> を呼ぶ。</dd>
+      <dt>「許可済み<br>なのに出ない」</dt><dd>この場合も案内を出す。測位中・空が見えない・時間切れのいずれでも、<strong>画面に何も出ないのが一番困る</strong>。押せば測り直せる。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>見出しとタブバーが、全画面の覆いより手前に描かれる</h3>
     <p class="ver">v8.93 で解決 / 3回外して4回目</p>
     <dl>
@@ -463,6 +476,7 @@ flowchart TD
       <dt>対処</dt><dd><strong>画面の上下を使わない。</strong>地図の右わきに縦一列(<code>position:absolute</code> で覆いを基準)。上下の端から離れているので、見出し・タブバー・ノッチ・ホームバーのどれにも当たらない。絵文字だけの44px角にして幅も取らない。</dd>
       <dt>検証</dt><dd>見出しとタブバーを手前に出した状態、さらに覆いが縮んだ状態(107〜791px)を重ねても、<strong>4つとも <code>elementFromPoint</code> が自分を返す</strong>(＝最前面で押せる)。393x852(iPhone15相当)・360x780・852x393(横向き)・1280x720 で確認。</dd>
       <dt>教訓</dt><dd>重なりの不具合は<strong>座標では捕まらない</strong>。「見えているか」は <code>elementFromPoint</code> で聞く。</dd>
+      <dt>ついでに<br>やらかした</dt><dd>この版でテストを書き換えたとき、範囲を広く取りすぎて<strong>差分描画(v8.91)と札(v8.89)の検査を丸ごと消していた</strong>。285件→236件と減っていたのに「置き換えたから」と説明して見過ごした。<strong>件数が減ったら理由を数字で確かめること。</strong>v8.94 で git から復元した。</dd>
     </dl>
   </div>
 
@@ -635,7 +649,7 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">236</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">308</td></tr>
       <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">127</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
@@ -678,7 +692,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.93 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.94 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>

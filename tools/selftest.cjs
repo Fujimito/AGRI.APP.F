@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "toMapStatus", "workIdFor", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw",
+  "PROGRESS_ORDER", "toMapStatus", "workIdFor", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -617,7 +617,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("全画面のボタンは fullMap のときだけ",
     /fullMap && [\s\S]{0,1600}S\.mapSideBtns/.test(tab), true);
   eq("全画面に札の切替もある", seg.includes("setShowLabels"), true);
-  eq("全画面のボタンは4つ", (seg.match(/S\.mapSideBtn(?!s|Off)/g) || []).length, 4);
+  eq("全画面のボタンは4つ", (seg.match(/S\.mapSideBtn(?!s|Off|Warn)/g) || []).length, 4);
 
   // ── 画面の上下を使わない(v8.93) ──
   eq("上端にも下端にも貼り付けていない",
@@ -644,6 +644,174 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     (seg.match(/title:/g) || []).length >= 4, true);
   eq("札OFFのときの見た目がある", src.includes("mapSideBtnOff: {"), true);
   eq("使わなくなった帯の定義が残っていない", src.includes("mapFullBar"), false);
+}
+
+// ── 位置情報の案内(v8.94) ────────────────────────────
+// 現在地が出ないときに画面へ何も出していなかった。断られたのか、測っている
+// 途中なのか、端末が非対応なのかが分からず、直しようがなかった。
+{
+  const h = t.geoHintFor;
+  eq("位置が出ていれば何も出さない", h("granted", true), null);
+  eq("出ていれば、拒否の記録が残っていても出さない", h("denied", true), null);
+  eq("まだ聞かれていなければ入口を出す", h("prompt", false).guide, false);
+  eq("入口の文言", h("prompt", false).text.indexOf("位置情報を使う") >= 0, true);
+  eq("状態が分からなくても入口を出す(押せば確認が出るかもしれない)",
+    h("unknown", false).guide, false);
+  eq("許可済みなのにまだ出ていないときも入口を出す(測位中・失敗)",
+    h("granted", false) !== null, true);
+  eq("拒否されていたら設定へ案内する(押しても確認は出ない)",
+    h("denied", false).guide, true);
+  eq("拒否の文言は警告", h("denied", false).text.indexOf("⚠") >= 0, true);
+  eq("非対応も設定へ案内する側", h("unsupported", false).guide, true);
+  eq("非対応の文言", h("unsupported", false).text.indexOf("対応していません") >= 0, true);
+}
+
+// ── 位置情報の案内が画面まで届いているか(ソースの形) ──
+{
+  const tab = src.slice(src.indexOf("function ProgressMapTab"), src.indexOf("const S = {"));
+  eq("権限の状態を読む", tab.includes('name: "geolocation"'), true);
+  eq("設定で許可し直したときに気づく(onchange)", /x\.onchange = \(\) =>/.test(tab), true);
+  eq("押したときに測る(操作の直後でないと確認を出さない端末がある)",
+    /askGeo = \(\) => \{[\s\S]{0,1200}getCurrentPosition/.test(tab), true);
+  eq("拒否済みなら測らずに設定へ案内する",
+    /geoState === "denied"[\s\S]{0,400}return;/.test(tab), true);
+  eq("許可が取れたら測位をやり直す",
+    /setGeoState\("granted"\);[\s\S]{0,200}setGeoAttempt\(n => n \+ 1\)/.test(tab), true);
+  eq("案内はツールバーに出す", tab.includes("geoHint && ") && tab.includes("S.geoHintBtn"), true);
+  eq("全画面の📍も、出ていなければ許可を求める側に回る",
+    /if \(geoHint\) \{[\s\S]{0,80}askGeo\(\);/.test(tab), true);
+  eq("キャンバスへ渡している",
+    /geoAttempt,/.test(tab) && /onGeoFix: \(\) => setGeoFix\(true\)/.test(tab), true);
+
+  const canvases = [
+    src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas")),
+    src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab")),
+  ];
+  canvases.forEach((body, i) => {
+    const name = i === 0 ? "Leaflet" : "Google";
+    eq(name + " は geoAttempt で測位をやり直す",
+      /\}, \[ready, p\.geoAttempt\]\);/.test(body), true);
+    eq(name + " は位置が取れたことを親に伝える", body.includes("p.onGeoFix && p.onGeoFix()"), true);
+  });
+}
+
+// ── 差分描画の署名(v8.91) ────────────────────────────
+// ここに入れ忘れたものは「サーバーには届いているのに地図が変わらない」
+// という形で出る。利用者からは共有が壊れたのと見分けが付かない。
+{
+  const sig = t.fieldDrawSig;
+  const F = { id: 1, name: "北の田", areaA: 12.5, updatedAt: "2026-08-01T00:00:00.000Z",
+              polygon: [[33,130],[33,131],[34,131]] };
+  const ST = { status: "planned", by: "藤本", at: "2026-08-20", sprayedL: 0, areaA: 12.5, pending: false };
+  const base = sig(F, ST, true, "a");
+
+  eq("同じ材料なら同じ署名", sig(F, ST, true, "a"), base);
+  // 色が変わるもの
+  eq("状態が変われば変わる", sig(F, { ...ST, status: "done" }, true, "a") !== base, true);
+  eq("作業から外れれば変わる(対象外へ)", sig(F, null, true, "a") !== base, true);
+  // 色は変えないが吹き出しに出るもの。落とすと吹き出しだけ古くなる
+  eq("実散布量が変われば変わる", sig(F, { ...ST, sprayedL: 95 }, true, "a") !== base, true);
+  eq("記録者が変われば変わる", sig(F, { ...ST, by: "田中" }, true, "a") !== base, true);
+  eq("入力日が変われば変わる", sig(F, { ...ST, at: "2026-08-21" }, true, "a") !== base, true);
+  eq("報告面積が変われば変わる", sig(F, { ...ST, areaA: 11 }, true, "a") !== base, true);
+  eq("未送信の印が変われば変わる", sig(F, { ...ST, pending: true }, true, "a") !== base, true);
+  // 札まわり
+  eq("札の出し分けが変われば変わる", sig(F, ST, false, "a") !== base, true);
+  eq("面積の単位が変われば変わる", sig(F, ST, true, "ha") !== base, true);
+  eq("圃場名が変われば変わる", sig({ ...F, name: "南の田" }, ST, true, "a") !== base, true);
+  eq("面積が変われば変わる", sig({ ...F, areaA: 20 }, ST, true, "a") !== base, true);
+  // 形
+  eq("囲み直せば変わる(編集時刻)",
+    sig({ ...F, updatedAt: "2026-08-02T00:00:00.000Z" }, ST, true, "a") !== base, true);
+  eq("頂点の数が変われば変わる(編集時刻が無い古いデータ向け)",
+    sig({ ...F, updatedAt: "", polygon: [[33,130],[33,131],[34,131],[34,130]] }, null, true, "a") !==
+    sig({ ...F, updatedAt: "", polygon: [[33,130],[33,131],[34,131]] }, null, true, "a"), true);
+  // 区切りの取り違えが起きないこと(隣の項目へ食い込まない)
+  eq("項目の境目が混ざらない",
+    sig({ ...F, name: "あ", areaA: "" }, null, true, "a") !==
+    sig({ ...F, name: "", areaA: "あ" }, null, true, "a"), true);
+}
+
+// ── 差分の出し方(v8.91) ──────────────────────────────
+{
+  const d = t.diffDraw;
+  const m = o => new Map(Object.entries(o));
+  eq("何も変わっていなければ何もしない",
+    d(m({ a: "1", b: "2" }), m({ a: "1", b: "2" })), { draw: [], drop: [] });
+  eq("増えたものは作る",
+    d(m({ a: "1" }), m({ a: "1", b: "2" })), { draw: ["b"], drop: [] });
+  eq("消えたものは消す",
+    d(m({ a: "1", b: "2" }), m({ a: "1" })), { draw: [], drop: ["b"] });
+  eq("変わったものは消してから作り直す",
+    d(m({ a: "1" }), m({ a: "9" })), { draw: ["a"], drop: ["a"] });
+  eq("初回は全部作る", d(new Map(), m({ a: "1", b: "2" })), { draw: ["a", "b"], drop: [] });
+  eq("全部消えたら全部消す", d(m({ a: "1", b: "2" }), new Map()), { draw: [], drop: ["a", "b"] });
+}
+
+// ── 差分描画が両方の地図に入っているか(ソースの形) ────
+// 全消しに戻ると、45秒ごとに全部作り直す元の重さに戻る。
+// 逆に記憶の捨て忘れがあると、地図を作り直したとき空のままになる。
+{
+  const L = src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas"));
+  const G = src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab"));
+  [["Leaflet", L], ["Google", G]].forEach(([name, body]) => {
+    eq(name + " は署名で比べる", body.includes("fieldDrawSig(f, st, showLabel, p.areaUnitKey)"), true);
+    eq(name + " は差分を取る", body.includes("diffDraw(prevSig, nextSig)"), true);
+    eq(name + " は消すぶんと作るぶんを分けて当てる",
+      body.includes("d.drop.forEach") && body.includes("d.draw.forEach"), true);
+    eq(name + " は地図を作り直したら記憶を捨てる",
+      (body.match(/drawnRef\.current = new Map\(\)/g) || []).length >= 2, true);
+  });
+  // 描画の effect の中で全消ししていないこと
+  const drawEffectOf = body => {
+    const i = body.indexOf("const showLabel = labelsVisible");
+    const j = body.indexOf("fitRef.current = targetBounds;", i);
+    return i > 0 && j > i ? body.slice(i, j) : "";
+  };
+  eq("Leaflet は描き直しで全消ししない", /clearLayers\(\)/.test(drawEffectOf(L)), false);
+  eq("Google は描き直しで全消ししない", /overlaysRef/.test(drawEffectOf(G)), false);
+  eq("Google の重ね物は圃場ごとにまとめている", G.includes("cur.overlays.forEach"), true);
+  eq("使わなくなった overlaysRef が残っていない", src.includes("overlaysRef"), false);
+}
+
+// ── 札(圃場名・面積)の出し分け(v8.89) ────────────────
+// 札は圃場1枚につきDOMを1つ(Leaflet)ないし2つ(Google)作り、パン・ズームの
+// たびに全部の位置が計算し直される。倍率だけでは、寄った状態で圃場が密な
+// ときに逃げ道がないので、手で消せるようにした。
+{
+  const v = t.labelsVisible, Z = t.PROGRESS_LABEL_MIN_ZOOM;
+  eq("しきい値は15", Z, 15);
+  eq("ONかつ倍率が足りていれば出す", v(true, Z), true);
+  eq("ONでも倍率が足りなければ出さない", v(true, Z - 1), false);
+  eq("OFFなら倍率が足りていても出さない", v(false, Z + 5), false);
+  eq("未設定(undefined)は従来どおり出す", v(undefined, Z), true);
+  eq("未設定でも倍率が足りなければ出さない", v(undefined, Z - 1), false);
+}
+
+// ── 札の切替が地図まで届いているか(ソースの形) ────────
+{
+  const tab = src.slice(src.indexOf("function ProgressMapTab"), src.indexOf("const S = {"));
+  eq("端末に残す", tab.includes('"tankmix:proglabels"'), true);
+  eq("既定は出す(更新で急に消えない)", tab.includes('!== "0"'), true);
+  eq("キャンバスへ渡している", /showLabels,/.test(tab), true);
+  // 上のツールバーにも、全画面の帯にも切替がある(押す場所が1か所だと、
+  // 全画面をやめてから戻る手間になる)
+  eq("ツールバーにも切替がある",
+    tab.indexOf("setShowLabels") < tab.indexOf("S.mapSideBtns"), true);
+  eq("切替は2か所ある", (tab.match(/setShowLabels\(!showLabels\)/g) || []).length, 2);
+  const canvases = [
+    src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas")),
+    src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab")),
+  ];
+  canvases.forEach((body, i) => {
+    const name = i === 0 ? "Leaflet" : "Google";
+    eq(name + " が labelsVisible で判定する",
+      body.includes("labelsVisible(p.showLabels, zoom)"), true);
+    eq(name + " の描き直しの条件にも入っている",
+      /\}, \[ready, p\.fields, p\.statusByField, labelsVisible\(p\.showLabels, zoom\)/.test(body), true);
+    eq(name + " に倍率だけの判定が残っていない",
+      /showLabel = zoom >= PROGRESS_LABEL_MIN_ZOOM/.test(body), false);
+  });
 }
 
 // ── 共有オフ→オンの順序(v8.87) ───────────────────────
