@@ -163,9 +163,9 @@ footer{border-top:1px solid var(--rule); padding-top:22px; color:var(--ink-3); f
   <h1>薬液調合ノート<br>内部構造</h1>
   <p class="lede">農薬散布の予定と実績を、圏外でも記録して、あとから複数端末で突き合わせるPWA。バックエンドは Google Apps Script とスプレッドシート1枚。データがどこに置かれ、どう送られ、どこで詰まるかを書く。</p>
   <dl class="facts">
-    <div class="fact"><dt>app.js</dt><dd class="num">12,896<small>行</small></dd></div>
+    <div class="fact"><dt>app.js</dt><dd class="num">13,084<small>行</small></dd></div>
     <div class="fact"><dt>Code.gs</dt><dd class="num">1,194<small>行</small></dd></div>
-    <div class="fact"><dt>端末側テスト</dt><dd class="num">308<small>件</small></dd></div>
+    <div class="fact"><dt>端末側テスト</dt><dd class="num">366<small>件</small></dd></div>
     <div class="fact"><dt>GAS側テスト</dt><dd class="num">127<small>件</small></dd></div>
     <div class="fact"><dt>ビルド工程</dt><dd class="num">なし</dd></div>
   </dl>
@@ -454,6 +454,21 @@ flowchart TD
   </div>
 
   <div class="fail">
+    <h3>数日かけて回ると、済んだ圃場が対象外に埋もれる</h3>
+    <p class="ver">v8.95 で対応 / Code.gs の差し替えは不要</p>
+    <dl>
+      <dt>困りごと</dt><dd>170圃場を1日で回りきれないとき、翌日は「まだ済んでいない圃場だけ」を見て回りたい。ところが今日の作業に入れていない圃場は、前の日に散布し終えていても<strong>対象外(黄)</strong>になる。赤(今日やる)との区別しか付かず、済んだ場所へまた向かうことになる。</dd>
+      <dt>気づき</dt><dd>サーバー(<code>progress</code>)は<strong>元から <code>from</code>/<code>to</code> の範囲で返す</strong>。アプリが <code>from = to = 作業日</code> と1日に固定していただけだった。<code>progressItems_</code> は <code>workDate</code> も返している。<strong>GAS は1行も変えていない。</strong></dd>
+      <dt>作り</dt><dd>取得を「選んだ日を含む直近 <code>PROGRESS_CARRY_DAYS</code>(3)日」に広げ、圃場ごとの色を <code>foldProgress</code> で畳む。今日の作業があればその日の状態(緑/赤)、無くて前の日に済んでいれば <strong>donePrev(青)</strong>、どちらでもなければ地図に出さない(黄)。</dd>
+      <dt>色</dt><dd>青(<code>#2F6FA8</code>)。衛星写真は緑と茶で埋まっているので、緑(実施済)と同系色にすると少し離れただけで見分けられない。</dd>
+      <dt>引き継ぎ</dt><dd><code>carryOverFieldIds</code> が「(1)期間内に未実施の作業がある (2)期間内に済んだ作業が1件も無い (3)今日のリストに無い」圃場を返す。<strong>(2) が要る</strong> — 前日の作業は残す方針なので、これが無いと今日済ませた圃場が翌日もまた候補に出続ける。</dd>
+      <dt>持って<br>こないもの</dt><dd>圃場だけ。<strong>薬剤と投下量は引き継がない。</strong>希釈倍率はその日の投下量で決まる作りなので、前日の値をそのまま使うと用量を外す。</dd>
+      <dt>割り切り</dt><dd>同じ日に同じ圃場を2件入れて片方だけ済んだ場合、(2) に当たるので引き継がない。地図はその日を未実施(赤)で出すので食い違うが、「一度は撒いた圃場」を毎日蒸し返すほうが困る。</dd>
+      <dt>踏んだ穴</dt><dd>差分描画の署名(<code>fieldDrawSig</code>)に <code>prevDate</code> を入れ忘れていた。色は <code>donePrev</code> のまま変わらないので気づきにくいが、吹き出しの日付だけ古くなる。<strong>v8.91 で自分が書いた警告そのものを踏んだ。</strong>検査が捕まえた。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>一度断られると、許可し直しても現在地が出ない</h3>
     <p class="ver">v8.94 で修正</p>
     <dl>
@@ -649,7 +664,7 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">308</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">366</td></tr>
       <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">127</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
@@ -692,7 +707,7 @@ flowchart LR
 </section>
 
 <footer>
-  <p>薬液調合ノート / 農薬散布防除記録　v8.94 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
+  <p>薬液調合ノート / 農薬散布防除記録　v8.95 時点の内部構造。数値はこの版のソースから引いた実測値。「未修正」と書いた項目は、存在を確かめたうえで直していないもの。</p>
 </footer>
 
 </div>

@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "toMapStatus", "workIdFor", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -306,18 +306,27 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 
 // ── 進捗マップの状態 ───────────────────────────────────
 {
-  // v8.56で3つに絞った。緑=実施済 / 赤=未実施 / 灰=対象外。
+  // v8.56で3つに絞り、v8.95 で「前日までに済」を足して4つ。
+  // 緑=今日やって済 / 赤=今日やる / 青=前の日に済 / 黄=対象外。
   // 中間(調合済・未送信)は色を持たせず、実施済・未実施のどちらかに寄せる。
-  const keys = ["done", "planned", "none"];
+  const keys = ["done", "planned", "donePrev", "none"];
   keys.forEach(k => {
     eq("進捗 " + k + " に色がある", !!(t.PROGRESS_STATES[k] || {}).fill, true);
     eq("進捗 " + k + " に見出しがある", !!(t.PROGRESS_STATES[k] || {}).label, true);
   });
-  eq("進捗 色は3つだけ", Object.keys(t.PROGRESS_STATES).length, 3);
-  eq("進捗 凡例の並びは色の数と一致", t.PROGRESS_ORDER.length, 3);
+  eq("進捗 色は4つだけ", Object.keys(t.PROGRESS_STATES).length, 4);
+  eq("進捗 凡例の並びは色の数と一致", t.PROGRESS_ORDER.length, 4);
+  // 4色が互いに違う色であること。衛星写真の上で見違えると意味がない
+  {
+    const fills = keys.map(k => t.PROGRESS_STATES[k].fill);
+    eq("進捗 4色とも別の色", new Set(fills).size, 4);
+  }
   // 同じ圃場に複数の作業があるとき、いちばん進んだ状態を採るための順序
   eq("進捗 実施済が最上位", t.PROGRESS_RANK.done > t.PROGRESS_RANK.planned, true);
-  eq("進捗 対象外が最下位", t.PROGRESS_RANK.planned > t.PROGRESS_RANK.none, true);
+  eq("進捗 今日の未実施は前日の済より上(今日やることを優先して見せる)",
+    t.PROGRESS_RANK.planned > t.PROGRESS_RANK.donePrev, true);
+  eq("進捗 対象外が最下位", t.PROGRESS_RANK.donePrev > t.PROGRESS_RANK.none, true);
+  eq("さかのぼる日数は3日", t.PROGRESS_CARRY_DAYS, 3);
   // サーバーから来る状態(planned / mixed / done)と、旧版の local を寄せる
   eq("進捗 done は実施済", t.toMapStatus("done"), "done");
   eq("進捗 local(未送信)は実施済", t.toMapStatus("local"), "done");
@@ -475,15 +484,22 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 {
   eq("作業IDで重ねている", src.includes("const byWork = new Map();"), true);
   eq("スナップショットの作業IDを渡している",
-    src.includes("put(it.id, it.fieldId, {"), true);
-  eq("手元の作業IDを渡している", src.includes("put(w.id, w.fieldId, {"), true);
+    src.includes("put(it.id, it.fieldId, it.workDate, {"), true);
+  eq("手元の作業IDを渡している", src.includes("put(w.id, w.fieldId, w.workDate, {"), true);
+  // 畳む処理は v8.95 で foldProgress に切り出した(単体で検査できるように)
+  eq("畳む処理は foldProgress に任せる",
+    src.includes("return foldProgress(Array.from(byWork.values()), p.workDate);"), true);
   eq("1件でも未実施なら未実施",
     src.includes('v.status = v.doneCount === v.total ? "done" : "planned";'), true);
   eq("大きい方を採る古い判定が残っていない",
     src.indexOf("PROGRESS_RANK[st.status] > PROGRESS_RANK[cur.status]"), -1);
-  eq("吹き出しの中身は実績のあるほうを優先",
-    src.includes("if (r > cur.bestRank) {"), true);
-  eq("bestRank は外に出さない", src.includes("delete v.bestRank;"), true);
+  eq("吹き出しの中身は実績のあるほうを優先", src.includes("if (r > cur._rank) {"), true);
+  eq("内部の順位は外に出さない", src.includes("delete v._rank;"), true);
+  // 取得範囲は選んでいる日を含めた直近3日(Code.gs は元から範囲に対応している)
+  eq("取得範囲をさかのぼる",
+    src.includes("daysBefore(p.workDate, PROGRESS_CARRY_DAYS - 1)"), true);
+  eq("1日に固定する書き方が残っていない",
+    src.indexOf("const from = p.workDate;"), -1);
   // 吹き出しは先頭固定ではなく、まだ済んでいない作業を先に取る
   eq("未実施を先に拾う",
     src.includes("swList.find(w => !w.reported) || swList[swList.length - 1]"), true);
@@ -515,6 +531,12 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 // 編集日時が進んでいないものを適用すると、保存と再描画が毎回走る。
 {
   const k = t.keepLocalEdit;
+  eq("前日に済ませた日付も署名に入る", t.fieldDrawSig(
+      { id: 1, name: "北", areaA: 1, updatedAt: "x", polygon: [] },
+      { status: "donePrev", prevDate: "2026-08-28" }, true, "a") !==
+    t.fieldDrawSig(
+      { id: 1, name: "北", areaA: 1, updatedAt: "x", polygon: [] },
+      { status: "donePrev", prevDate: "2026-08-27" }, true, "a"), true);
   eq("同じ編集日時は適用しない",
     k("2026-08-01T00:00:00.000Z", "2026-08-01T00:00:00.000Z"), true);
   eq("手元のほうが新しければ適用しない",
@@ -693,6 +715,152 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
       /\}, \[ready, p\.geoAttempt\]\);/.test(body), true);
     eq(name + " は位置が取れたことを親に伝える", body.includes("p.onGeoFix && p.onGeoFix()"), true);
   });
+}
+
+// ── 日付をさかのぼる(v8.95) ──────────────────────────
+{
+  const d = t.daysBefore;
+  eq("0日前は同じ日", d("2026-08-29", 0), "2026-08-29");
+  eq("2日前", d("2026-08-29", 2), "2026-08-27");
+  eq("月をまたぐ", d("2026-09-01", 2), "2026-08-30");
+  eq("年をまたぐ", d("2026-01-01", 2), "2025-12-30");
+  eq("うるう年の2月29日", d("2024-03-01", 1), "2024-02-29");
+  eq("うるう年でない年の3月1日", d("2026-03-01", 1), "2026-02-28");
+  eq("形が違うものはそのまま返す", d("", 2), "");
+  eq("壊れた日付もそのまま返す(落とさない)", d("2026-8-1", 2), "2026-8-1");
+}
+
+// ── 圃場ごとの色を決める(v8.95) ──────────────────────
+// 170圃場を数日かけて回るとき、前の日に済ませた圃場が対象外(黄)のままだと
+// 今日やる赤と区別が付かず、済んだ場所へまた向かうことになる。
+{
+  const f = t.foldProgress;
+  const E = (fieldKey, workDate, status, extra) => Object.assign(
+    { fieldKey, workDate, status, by: "藤本", at: workDate, sprayedL: 10, areaA: 12, pending: false },
+    extra || {});
+  const day = "2026-08-29";
+  const st = (m, k) => (m.get(String(k)) || {}).status;
+
+  // 今日ぶん(v8.83 の規則は変えない)
+  {
+    const m = f([E(1, day, "done")], day);
+    eq("今日やって済なら実施済", st(m, 1), "done");
+  }
+  {
+    const m = f([E(1, day, "planned")], day);
+    eq("今日の未実施は未実施", st(m, 1), "planned");
+  }
+  {
+    const m = f([E(1, day, "done"), E(1, day, "planned")], day);
+    eq("同じ日に2件あって片方が未実施なら未実施", st(m, 1), "planned");
+    eq("件数も出す", [m.get("1").total, m.get("1").doneCount], [2, 1]);
+  }
+  // 前の日ぶん
+  {
+    const m = f([E(1, "2026-08-28", "done")], day);
+    eq("今日の予定に無く前日に済なら青", st(m, 1), "donePrev");
+    eq("いつ済んだかを出す", m.get("1").prevDate, "2026-08-28");
+    eq("吹き出しの入力日はその日にする", m.get("1").at, "2026-08-28");
+  }
+  {
+    const m = f([E(1, "2026-08-27", "done"), E(1, "2026-08-28", "done")], day);
+    eq("何日か済んでいたら新しいほうを出す", m.get("1").prevDate, "2026-08-28");
+  }
+  {
+    const m = f([E(1, "2026-08-28", "planned")], day);
+    eq("前日の未実施は地図に出さない(今日の予定ではない)", m.has("1"), false);
+  }
+  // 今日と前日が両方ある = 引き継いだ圃場
+  {
+    const m = f([E(1, "2026-08-28", "done"), E(1, day, "planned")], day);
+    eq("引き継いだ圃場は今日の状態が勝つ(赤)", st(m, 1), "planned");
+  }
+  {
+    const m = f([E(1, "2026-08-28", "planned"), E(1, day, "done")], day);
+    eq("前日やり残して今日済ませたら緑", st(m, 1), "done");
+  }
+  // 出さないもの
+  {
+    const m = f([], day);
+    eq("何も無ければ空", m.size, 0);
+  }
+  {
+    const m = f([E(9, "2026-08-20", "done")], day);
+    eq("範囲外は呼び側が渡さない前提だが、渡されれば青になる", st(m, 9), "donePrev");
+  }
+  // 未送信の印
+  {
+    const m = f([E(1, day, "done", { pending: true })], day);
+    eq("未送信の印は今日ぶんだけ拾う", m.get("1").pending, true);
+  }
+  {
+    const m = f([E(1, "2026-08-28", "done", { pending: true })], day);
+    eq("前日ぶんの未送信は今日の印にしない", m.get("1").pending, false);
+  }
+  // 内部の作業用の値を外に出さない
+  {
+    const m = f([E(1, day, "done")], day);
+    eq("_rank は外に出さない", "_rank" in m.get("1"), false);
+  }
+}
+
+// ── 引き継ぐ圃場を選ぶ(v8.95) ────────────────────────
+{
+  const c = t.carryOverFieldIds;
+  const W = (fieldId, workDate, reported) => ({ id: workDate + ":" + fieldId, fieldId, workDate, reported: !!reported });
+  const day = "2026-08-29";
+
+  eq("前日の未実施は引き継ぐ", c([W(1, "2026-08-28", false)], day, 3), [1]);
+  eq("前日に済んでいれば引き継がない", c([W(1, "2026-08-28", true)], day, 3), []);
+  eq("前々日の未実施も引き継ぐ", c([W(1, "2026-08-27", false)], day, 3), [1]);
+  eq("3日より前は見ない", c([W(1, "2026-08-26", false)], day, 3), []);
+  eq("今日ぶんは対象外(もう入っている)", c([W(1, day, false)], day, 3), []);
+  eq("既に今日のリストにあれば引き継がない",
+    c([W(1, "2026-08-28", false), W(1, day, false)], day, 3), []);
+  // 前日やり残して、その後べつの日に済ませた圃場を蒸し返さない
+  eq("期間内に一度でも済んでいれば引き継がない",
+    c([W(1, "2026-08-27", false), W(1, "2026-08-28", true)], day, 3), []);
+  eq("済んだ日が先でも同じ",
+    c([W(1, "2026-08-27", true), W(1, "2026-08-28", false)], day, 3), []);
+  // 同じ圃場で未実施が2件あっても1回だけ返す
+  eq("同じ圃場は1回だけ",
+    c([W(1, "2026-08-27", false), W(1, "2026-08-28", false)], day, 3), [1]);
+  // 複数の圃場
+  eq("残っているものだけ返す",
+    c([W(1, "2026-08-28", false), W(2, "2026-08-28", true), W(3, "2026-08-28", false)], day, 3),
+    [1, 3]);
+  // 未来の日付は見ない
+  eq("先の日付は引き継がない", c([W(1, "2026-08-30", false)], day, 3), []);
+  // 壊れたデータで落ちない
+  eq("作業日が無いものは無視", c([{ fieldId: 1, reported: false }], day, 3), []);
+  eq("空でも落ちない", c([], day, 3), []);
+  eq("works が無くても落ちない", c(null, day, 3), []);
+  // 日数を変えられる
+  eq("2日ぶんなら前々日は見ない", c([W(1, "2026-08-27", false)], day, 2), []);
+  eq("既定は3日", c([W(1, "2026-08-27", false)], day), [1]);
+}
+
+// ── 引き継ぎが画面まで届いているか(ソースの形) ────────
+{
+  eq("引き継ぎの入口がある", src.includes("carryOverWorks"), true);
+  eq("押す前に確認する", /carryOverWorks = \(\) => \{[\s\S]{0,900}confirm\(/.test(src), true);
+  eq("確認に件数と圃場名を出す",
+    /confirm\("直近"[\s\S]{0,300}ids\.length[\s\S]{0,200}head \+ rest/.test(src), true);
+  eq("圃場だけ入れる(薬剤は持ってこない)",
+    /carryOverWorks = \(\) => \{[\s\S]{0,1400}addWorks\(ids\);/.test(src), true);
+  // 引き継ぎの関数の中だけを見る(すぐ下の removeWork は墓標を積むので)
+  eq("前の日の記録は消さない(墓標を積んでいない)", (() => {
+    const a = src.indexOf("const carryOverWorks = () => {");
+    const b = src.indexOf("addWorks(ids);", a);
+    return a > 0 && b > a && src.slice(a, b).indexOf("addTomb") < 0;
+  })(), true);
+  eq("件数が0のときはボタンを出さない", src.includes("p.carryOverCount > 0 &&"), true);
+  eq("差分描画の署名に前日の日付も入っている(青が更新される)",
+    /fieldDrawSig = [\s\S]{0,1200}st\.prevDate/.test(src), true);
+  eq("前日までに済はその日の圃場数に数えない",
+    /if \(v\.status === "donePrev"\) return;[\s\S]{0,60}c\.total\+\+;/.test(src), true);
+  eq("吹き出しに、いつ済んだかを出す",
+    /sel\.st\.status === "donePrev"[\s\S]{0,600}sel\.st\.prevDate/.test(src), true);
 }
 
 // ── 差分描画の署名(v8.91) ────────────────────────────
