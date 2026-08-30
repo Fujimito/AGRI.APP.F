@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.95";
+const APP_VERSION = "v8.96";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -903,6 +903,22 @@ const carryOverFieldIds = (works, day, days) => {
     left.push(w.fieldId);
   });
   return left;
+};
+
+// 進捗地図の吹き出しが対象にする作業を1件選ぶ。
+//
+// 必ず「選んでいる作業日」のものだけを見る。ここを取得範囲(3日)で
+// 絞ってしまい、吹き出しの「✓ 散布済にする」が2日前の作業を掴んだ。
+// 引き継いで今日入れた圃場では2日前の作業が無いのでボタン自体が出ず、
+// 押せた圃場でも2日前の実績が変わるだけで今日の色は動かない。
+// 現場で使えなくなった(v8.96)。
+//
+// まだ済んでいないものを先に取る。同じ日に2件あるとき(午前と午後で
+// 分けた等)、先頭固定だと済んだほうを掴んで2件目に手が届かない。
+// 全部済んでいるなら最後の1件を返す(取り消しの対象になる)。
+const pickWorkOfDay = (works, fieldId, day) => {
+  const list = (works || []).filter(w => String(w.fieldId) === String(fieldId) && String(w.workDate || "") === String(day));
+  return list.find(w => !w.reported) || list[list.length - 1];
 };
 
 const workIdFor = (workDate, fieldId, nth, device) => {
@@ -9306,9 +9322,18 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.95",
+    ver: "v8.96",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "🐞 v8.95 の不具合を修正しました。進捗地図で圃場をタップしても「✓ 散布済にする」が出ない、押しても色が変わらない、という状態でした。現場でご迷惑をおかけしました",
+      "🔍 原因: v8.95 で進捗の取得範囲を3日に広げたとき、吹き出しが対象の作業を探す条件まで3日前になっていました。引き継いで今日入れた圃場は3日前に作業が無いのでボタンが出ず、出た圃場でも3日前の作業の実績が変わるだけで今日の色は動きませんでした",
+      "🧪 見逃した理由: 吹き出しがどの作業を選ぶかを、これまで一度も検査していませんでした。今回その選び方を切り出して検査を12件足しています。壊れた状態に戻すと8件落ちることを確認しました",
+      "🔧 あわせて、この日の作業件数と「サーバーから外す」の確認文も3日前を指していたのを直しました"
+    ]
+  }, {
+    ver: "v8.95",
+    date: "2026-08",
     notes: [
       "🔵 進捗地図に「前日までに済」(青)を足しました。今日の作業に入っていなくても、直近3日のうちに散布し終えた圃場は青で出ます。170圃場を数日かけて回るとき、済んだ場所へまた向かわずに済みます",
       "↩ 作業タブの「圃場を追加」に「↩ 直近3日のやり残し ◯圃場を引き継ぐ」を足しました。前の日に済んでいない圃場だけを、その日のリストに入れます。押す前に件数と圃場名を出します",
@@ -10996,8 +11021,13 @@ function ProgressMapTab(p) {
   // 取得は「選んでいる日を含めた直近 PROGRESS_CARRY_DAYS 日」。
   // サーバー(Code.gs の progress)は元から from/to の範囲で返すので、
   // ここを広げるだけでよい。GAS の差し替えは要らない。
-  const from = daysBefore(p.workDate, PROGRESS_CARRY_DAYS - 1);
-  const to = p.workDate;
+  // 名前を fetchFrom / fetchTo にしてある。v8.95 でここを from = 作業日 から
+  // 「2日前」に変えたとき、from を「今日」のつもりで使っている箇所が5つ
+  // あるのに気づかず、吹き出しの「散布済にする」が2日前の作業を掴んで
+  // 現場で使えなくなった(v8.96)。取得範囲だと名前で分かるようにする。
+  // 「その日」が要るところは p.workDate を直に使うこと。
+  const fetchFrom = daysBefore(p.workDate, PROGRESS_CARRY_DAYS - 1);
+  const fetchTo = p.workDate;
   // 地図エンジンは地図タブと共通の設定を使う。進捗地図だけ別の地図にすると
   // 見え方がタブごとに変わって混乱する。Googleを選んでいてAPIキーがないときは
   // 地図を出せないので、地図タブと同じ案内を出す。
@@ -11007,7 +11037,7 @@ function ProgressMapTab(p) {
     if (loading) return;
     setLoading(true);
     setErr("");
-    const r = await p.fetchProgress(from, to);
+    const r = await p.fetchProgress(fetchFrom, fetchTo);
     setLoading(false);
     if (!r || r.error) {
       const e = r && r.error;
@@ -11017,8 +11047,8 @@ function ProgressMapTab(p) {
     const next = {
       items: r.items || [],
       at: new Date().toISOString(),
-      from,
-      to
+      from: fetchFrom,
+      to: fetchTo
     };
     setSnap(next);
     save("tankmix:progresssnap", next);
@@ -11047,13 +11077,13 @@ function ProgressMapTab(p) {
       clearInterval(id);
       document.removeEventListener("visibilitychange", tick);
     };
-  }, [p.active, from, to, refreshMs]);
+  }, [p.active, fetchFrom, fetchTo, refreshMs]);
 
   // 地図から圃場を出し入れした直後は、その場で取り直す。
   // 送信(pushProgress)は非同期なので、少し待ってから取りに行く。
   // 間に合わなかったときは次の拍子(自動取得の間隔)で揃う。
   // これがないと、「外す」を押しても最大で間隔の分だけ赤いままに見える。
-  const dayWorkCount = (p.works || []).filter(w => w.workDate === from).length;
+  const dayWorkCount = (p.works || []).filter(w => w.workDate === p.workDate).length;
   const firstCountRef = React.useRef(true);
   React.useEffect(() => {
     if (firstCountRef.current) {
@@ -11101,7 +11131,7 @@ function ProgressMapTab(p) {
       pending: false
     }));
     (p.works || []).forEach(w => {
-      if (!w.workDate || w.workDate < from || w.workDate > to) return;
+      if (!w.workDate || w.workDate < fetchFrom || w.workDate > fetchTo) return;
       put(w.id, w.fieldId, w.workDate, {
         status: w.reported ? "done" : "planned",
         by: p.recorder || "",
@@ -11114,7 +11144,7 @@ function ProgressMapTab(p) {
     });
     // 圃場ごとに1色へ畳む。今日ぶんと前の日ぶんの扱いは foldProgress にある
     return foldProgress(Array.from(byWork.values()), p.workDate);
-  }, [snap, p.works, from, to, p.recorder]);
+  }, [snap, p.works, fetchFrom, fetchTo, p.recorder]);
 
   const counts = React.useMemo(() => {
     const c = {
@@ -11150,14 +11180,14 @@ function ProgressMapTab(p) {
   const orphans = React.useMemo(() => {
     const localIds = new Set();
     (p.works || []).forEach(w => {
-      if (!w.workDate || w.workDate < from || w.workDate > to) return;
+      if (!w.workDate || w.workDate < fetchFrom || w.workDate > fetchTo) return;
       localIds.add(String(w.id));
     });
     return (snap.items || []).filter(it => {
       if (it.id === undefined || it.id === null || it.id === "") return false;
       return !localIds.has(String(it.id));
     });
-  }, [snap, p.works, from, to]);
+  }, [snap, p.works, fetchFrom, fetchTo]);
 
   // 地図の初期化・塗り分け・寄せはすべて子(ProgressLeafletCanvas /
   // ProgressGoogleCanvas)が持つ。ここは取得した状態と見出しだけを扱う。
@@ -11387,7 +11417,7 @@ function ProgressMapTab(p) {
       });
       // 別の端末が登録した予定だった場合、そちらからも消える。
       // 記録者を見せてから確かめる。
-      if (!confirm(dateLabel(from) + "の作業 " + orphans.length + "件をサーバーから外します。\n記録者: " + names.join("、") + "\n\n別の端末が登録した予定だった場合、その端末からも消えます。\n(圃場マスタには残ります)\nこの操作は取り消せません。よろしいですか？")) return;
+      if (!confirm("直近" + PROGRESS_CARRY_DAYS + "日の作業 " + orphans.length + "件をサーバーから外します。\n記録者: " + names.join("、") + "\n\n別の端末が登録した予定だった場合、その端末からも消えます。\n(圃場マスタには残ります)\nこの操作は取り消せません。よろしいですか？")) return;
       p.removeServerWorks(orphans.map(o => o.id));
       setTimeout(() => refreshRef.current(), 2500);
     },
@@ -11458,8 +11488,7 @@ function ProgressMapTab(p) {
     // 同じ日に同じ圃場が2件あることがある(午前と午後で分けた等)。
     // 先頭を決め打ちで取ると、済んだほうをつかんで二件目に手が届かない。
     // まだ済んでいないものを先に、全部済んでいれば最後の1件を取る(v8.83)。
-    const swList = (p.works || []).filter(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
-    const sw = swList.find(w => !w.reported) || swList[swList.length - 1];
+    const sw = pickWorkOfDay(p.works, sel.field.id, p.workDate);
     if (!sw) return p.addWork && /*#__PURE__*/React.createElement("button", {
       // 地図を見ながら「ここも撒こう」となったときの道。
       // v8.72 までは「作業一覧で追加してください」と案内するだけだった。
@@ -11493,8 +11522,7 @@ function ProgressMapTab(p) {
     // 同じ日に同じ圃場が2件あることがある(午前と午後で分けた等)。
     // 先頭を決め打ちで取ると、済んだほうをつかんで二件目に手が届かない。
     // まだ済んでいないものを先に、全部済んでいれば最後の1件を取る(v8.83)。
-    const swList = (p.works || []).filter(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
-    const sw = swList.find(w => !w.reported) || swList[swList.length - 1];
+    const sw = pickWorkOfDay(p.works, sel.field.id, p.workDate);
     if (!sw || !p.onReport) return null;
     return /*#__PURE__*/React.createElement("button", {
       onClick: () => {
@@ -11512,8 +11540,7 @@ function ProgressMapTab(p) {
     // 同じ日に同じ圃場が2件あることがある(午前と午後で分けた等)。
     // 先頭を決め打ちで取ると、済んだほうをつかんで二件目に手が届かない。
     // まだ済んでいないものを先に、全部済んでいれば最後の1件を取る(v8.83)。
-    const swList = (p.works || []).filter(w => String(w.fieldId) === String(sel.field.id) && w.workDate === from);
-    const sw = swList.find(w => !w.reported) || swList[swList.length - 1];
+    const sw = pickWorkOfDay(p.works, sel.field.id, p.workDate);
     if (!sw || !p.removeWork) return null;
     return /*#__PURE__*/React.createElement("button", {
       onClick: () => {

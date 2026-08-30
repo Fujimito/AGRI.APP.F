@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -500,11 +500,16 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.includes("daysBefore(p.workDate, PROGRESS_CARRY_DAYS - 1)"), true);
   eq("1日に固定する書き方が残っていない",
     src.indexOf("const from = p.workDate;"), -1);
-  // 吹き出しは先頭固定ではなく、まだ済んでいない作業を先に取る
+  // 吹き出しが選ぶ作業は pickWorkOfDay に切り出した(v8.96)。
+  // ここを取得範囲(3日)で絞ってしまい、現場で使えなくなった。
   eq("未実施を先に拾う",
-    src.includes("swList.find(w => !w.reported) || swList[swList.length - 1]"), true);
+    src.includes("list.find(w => !w.reported) || list[list.length - 1]"), true);
   eq("先頭固定の find が残っていない",
     src.indexOf('const sw = (p.works || []).find(w => String(w.fieldId)'), -1);
+  eq("吹き出しは pickWorkOfDay で選ぶ",
+    (src.match(/pickWorkOfDay\(p\.works, sel\.field\.id, p\.workDate\)/g) || []).length, 3);
+  eq("取得範囲で絞る書き方が残っていない",
+    src.indexOf("w.workDate === from"), -1);
   eq("2件以上のときは件数を出す",
     src.includes('"この日の作業 " + sel.st.total + "件（" + sel.st.doneCount + "件済）"'), true);
 }
@@ -801,6 +806,55 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   {
     const m = f([E(1, day, "done")], day);
     eq("_rank は外に出さない", "_rank" in m.get("1"), false);
+  }
+}
+
+// ── 吹き出しが対象にする作業(v8.96) ──────────────────
+// v8.95 で取得範囲を3日に広げたとき、吹き出しもその範囲で作業を探して
+// いた。引き継いだ圃場では「✓ 散布済にする」が出ず、出た圃場でも
+// 2日前の実績が変わるだけで今日の色が動かなかった。現場で使えなくなった。
+{
+  const pick = t.pickWorkOfDay;
+  const W = (fieldId, workDate, reported, id) => ({ id: id || (workDate + ":" + fieldId), fieldId, workDate, reported: !!reported });
+  const DAY = "2026-08-29", PREV = "2026-08-27";
+
+  // ── 今回の症状そのもの ──
+  {
+    // 引き継いで今日だけ登録した圃場。2日前には作業が無い
+    const works = [W(1, DAY, false)];
+    const sw = pick(works, 1, DAY);
+    eq("引き継いだ圃場でも作業が見つかる(ボタンが出る)", !!sw, true);
+    eq("見つかるのは今日の作業", sw && sw.workDate, DAY);
+  }
+  {
+    // 2日前に済ませ、今日も入っている圃場
+    const works = [W(1, PREV, true), W(1, DAY, false)];
+    const sw = pick(works, 1, DAY);
+    eq("2日前の作業を掴まない", sw && sw.workDate, DAY);
+    eq("掴むのは今日の未実施", sw && sw.reported, false);
+  }
+  {
+    // 2日前だけにある圃場は、今日の吹き出しでは対象にしない
+    const works = [W(1, PREV, false)];
+    eq("2日前だけの圃場は対象にしない(＋本日の作業に追加が出る)",
+      pick(works, 1, DAY), undefined);
+  }
+
+  // ── 従来の規則は変えていない ──
+  {
+    const works = [W(1, DAY, true, "a"), W(1, DAY, false, "b")];
+    eq("同じ日に2件あれば未実施を先に取る", (pick(works, 1, DAY) || {}).id, "b");
+  }
+  {
+    const works = [W(1, DAY, true, "a"), W(1, DAY, true, "b")];
+    eq("全部済んでいれば最後の1件(取り消しの対象)", (pick(works, 1, DAY) || {}).id, "b");
+  }
+  {
+    eq("別の圃場は拾わない", pick([W(2, DAY, false)], 1, DAY), undefined);
+    eq("圃場IDは文字列と数値が混ざっても合う", !!pick([W("1", DAY, false)], 1, DAY), true);
+    eq("作業が無ければ undefined", pick([], 1, DAY), undefined);
+    eq("works が無くても落ちない", pick(null, 1, DAY), undefined);
+    eq("作業日が無いものは拾わない", pick([{ fieldId: 1, reported: false }], 1, DAY), undefined);
   }
 }
 
