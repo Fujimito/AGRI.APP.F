@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.05";
+const APP_VERSION = "v9.06";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2486,6 +2486,7 @@ function App() {
   // 2つのシートが食い違うこともなくなる。
   // 切り替える前に、実物で「同じものが作れるか」を見る。読むだけで書かない。
   // シートを丸ごと2枚読むので、自動では呼ばない(このボタンからだけ)。
+  const [ledgerReport, setLedgerReport] = useState(() => load(LEDGER_CHECK_KEY, null));
   const ledgerCheck = async () => {
     if (!syncReady()) {
       flash(notReadyMsg());
@@ -2510,13 +2511,13 @@ function App() {
         : "照合できません(" + (j.error || "不明") + ")");
       return;
     }
-    const head = "一致 " + j.same + " 件 / 食い違い " + j.differ +
-      " 件 / 台帳に無い " + j.onlyWork + " 件 / 作業に無い " + j.onlyLedger + " 件";
-    const detail = (j.sample || []).slice(0, 5).map(x =>
-      "記録" + x.id + "(" + x.why + (x.made === undefined ? "" :
-        ": 作り直し「" + x.made + "」/ 台帳「" + x.ledger + "」") + ")").join("、");
-    flash((j.differ || j.onlyWork || j.onlyLedger ? "⚠ " : "✅ ") + head +
-      (detail ? " — " + detail : ""));
+    // 中身は設定タブに表で出す。フラッシュに詰め込むと、
+    // 5件の見本で画面が埋まって、肝心の「どの列が何件違うか」が読めない
+    j.at = new Date().toISOString();
+    save(LEDGER_CHECK_KEY, j);
+    setLedgerReport(j);
+    flash((j.differ || j.onlyWork || j.onlyLedger ? "⚠ " : "✅ ") +
+      "照合しました。結果は設定タブの「送信・共有」に出しています");
   };
 
   const testConnection = async () => {
@@ -3663,6 +3664,7 @@ function App() {
     setAuthKey,
     testConnection,
     ledgerCheck,
+    ledgerReport,
     cloudSave,
     cloudLoad,
     syncShared,
@@ -9138,6 +9140,46 @@ function collapsibleHead(title, isOpen, onClick) {
 // その「はず」を実データで確かめるための表示で、地図の見た目には関係しない。
 // 何日か使って「差分 0 回」のままなら、progress を外してよい。
 // 外したら、この表示ごと消すこと。
+// ── 台帳の照合の結果を表で出す(v9.06) ──
+//
+// 件数だけでは直しようがない。「どの列が何件違うか」と、
+// 最初の1件の全列を並べる。ここを見て原因を切り分ける。
+function ledgerReportBlock(j) {
+  if (!j || !j.ok) return null;
+  const row = (k, v) => /*#__PURE__*/React.createElement("tr", { key: k },
+    /*#__PURE__*/React.createElement("td", { style: { padding: "2px 8px 2px 0" } }, k),
+    /*#__PURE__*/React.createElement("td", { style: { padding: "2px 0", textAlign: "right", fontWeight: 700 } }, v));
+  const tally = (title, obj) => {
+    const keys = Object.keys(obj || {});
+    if (!keys.length) return null;
+    return /*#__PURE__*/React.createElement("div", { style: { marginTop: 8 } },
+      /*#__PURE__*/React.createElement("div", { style: { fontWeight: 700 } }, title),
+      /*#__PURE__*/React.createElement("table", { style: { fontSize: 12, borderCollapse: "collapse" } },
+        /*#__PURE__*/React.createElement("tbody", null,
+          keys.sort((a, b) => obj[b] - obj[a]).map(k => row(k, obj[k] + " 件")))));
+  };
+  const pair = j.pair && /*#__PURE__*/React.createElement("div", { style: { marginTop: 8 } },
+    /*#__PURE__*/React.createElement("div", { style: { fontWeight: 700 } }, "食い違った1件目(記録" + j.pair.id + ")"),
+    /*#__PURE__*/React.createElement("table", { style: { fontSize: 12, borderCollapse: "collapse" } },
+      /*#__PURE__*/React.createElement("tbody", null, (j.pair.cols || []).map(c =>
+        /*#__PURE__*/React.createElement("tr", { key: c.col },
+          /*#__PURE__*/React.createElement("td", { style: { padding: "2px 8px 2px 0", color: c.same ? "#888" : "#B3261E" } }, (c.same ? "" : "≠ ") + c.col),
+          /*#__PURE__*/React.createElement("td", { style: { padding: "2px 8px 2px 0" } }, "作り直し「" + c.made + "」"),
+          /*#__PURE__*/React.createElement("td", { style: { padding: "2px 0" } }, "台帳「" + c.ledger + "」"))))));
+  return /*#__PURE__*/React.createElement("div", {
+    style: { ...S.note, background: "#F3F6F3", borderRadius: 6, padding: 10, marginTop: 8 }
+  },
+    /*#__PURE__*/React.createElement("table", { style: { fontSize: 12, borderCollapse: "collapse" } },
+      /*#__PURE__*/React.createElement("tbody", null,
+        row("一致", j.same + " 件"),
+        row("食い違い", j.differ + " 件"),
+        row("台帳に無い(作業にはある)", j.onlyWork + " 件"),
+        row("作業に無い(台帳にはある)", j.onlyLedger + " 件"))),
+    tally("食い違った列", j.byCol),
+    tally("台帳に無い作業の内訳(状態・薬剤)", j.onlyWorkBy),
+    pair);
+}
+
 function progressDiffLine() {
   const d = load(PROGRESS_DIFF_KEY, null);
   if (!d || !d.runs) return null;
@@ -9383,7 +9425,7 @@ function SettingsTab(p) {
     }
   }, "🧾 台帳の照合(開発用)"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "「台帳の照合」は、「防除記録」シートを「作業」シートから作り直せるかを見るためのものです(読むだけで、シートは書き換えません)。食い違いが 0 のままなら、端末が台帳へ別に送る仕組みをやめられます。"), /*#__PURE__*/React.createElement("p", {
+  }, "「台帳の照合」は、「防除記録」シートを「作業」シートから作り直せるかを見るためのものです(読むだけで、シートは書き換えません)。食い違いが 0 のままなら、端末が台帳へ別に送る仕組みをやめられます。"), ledgerReportBlock(p.ledgerReport), /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "チームコードは、一緒に作業する端末で同じ文字列にします。大文字と小文字は区別されます。共有パスワードはGAS側でスクリプトプロパティ SHARED_SECRET を設定しているときだけ使います。未設定なら空欄で動きますが、その場合はURLを知っている人なら誰でも書き込めます。"), secHead("２　データ共有(圃場・薬剤)"), /*#__PURE__*/React.createElement("button", {
     onClick: p.syncShared,
@@ -10626,6 +10668,7 @@ const progressEntries = (items, works, from, to, recorder) => {
 // 見るのは地図の見た目を決める項目だけ。at や sprayedL は吹き出しの中身で、
 // ここがずれても色は変わらないが、吹き出しも見比べる対象なので入れる。
 const PROGRESS_DIFF_KEY = "tankmix:progressdiff";
+const LEDGER_CHECK_KEY = "tankmix:ledgercheck";
 const PROGRESS_DIFF_KEYS = ["status", "by", "at", "sprayedL", "areaA", "prevDate"];
 const progressMapDiff = (a, b) => {
   const out = [];

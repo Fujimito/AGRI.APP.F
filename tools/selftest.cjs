@@ -1227,6 +1227,10 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("無ければ手元を残す",
     src.includes('reportMemo: inc.reportMemo || old.reportMemo || ""'), true);
   eq("照合を手で呼べる", src.includes('type: "ledgerCheck",'), true);
+  // 件数だけでは直しようがない。どの列が何件違うかを出す(v9.06)
+  eq("結果を表で出す", src.includes("ledgerReportBlock(p.ledgerReport)"), true);
+  eq("結果を残す", src.includes("save(LEDGER_CHECK_KEY, j);"), true);
+  eq("列ごとの件数を見る", src.includes('tally("食い違った列", j.byCol)'), true);
   eq("照合は書き込まない(ボタンの案内に明記)",
     src.includes("読むだけで、シートは書き換えません"), true);
 }

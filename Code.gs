@@ -1172,15 +1172,39 @@ function ledgerCheck_(team) {
   }
   const sample = [];
   let same = 0, differ = 0, onlyWork = 0, onlyLedger = 0;
+  // どの列が何件違うか。件数だけだと、1種類の食い違いが125件なのか
+  // 125種類バラバラなのかが分からず、直しようがない
+  const byCol = {};
+  // 台帳に行が無い作業は、状態ごとに数える。予定のまま(planned)なら
+  // 台帳に行が無いのが正しい。台帳の行は「薬剤を当てた」ときにできる
+  const onlyWorkBy = {};
+  // 最初の1件は全列を並べて返す。列ごとの件数だけでは、
+  // 「なぜ違うのか」の見当が付かないことがある
+  let pair = null;
   const push = o => { if (sample.length < 20) sample.push(o); };
+  const bump = (m, k) => { m[k] = (m[k] || 0) + 1; };
   for (const id in made) {
-    if (!have[id]) { onlyWork++; push({ id: id, why: "台帳に無い" }); continue; }
+    if (!have[id]) {
+      onlyWork++;
+      bump(onlyWorkBy, String(made[id][12] || "?") + (Number(made[id][7]) ? "・薬剤あり" : "・薬剤なし"));
+      push({ id: id, why: "台帳に無い" });
+      continue;
+    }
     const a = ledgerNorm_(made[id]);
     const b = ledgerNorm_(have[id]);
     let hit = -1;
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { hit = i; break; }
     if (hit < 0) { same++; continue; }
     differ++;
+    bump(byCol, HEADERS[hit]);
+    if (!pair) {
+      const cols = [];
+      for (let i = 0; i < HEADERS.length; i++) {
+        if (LEDGER_SKIP_COLS.indexOf(i) >= 0) continue;
+        cols.push({ col: HEADERS[i], made: a[i], ledger: b[i], same: a[i] === b[i] });
+      }
+      pair = { id: id, cols: cols };
+    }
     push({ id: id, why: HEADERS[hit], made: a[hit], ledger: b[hit] });
   }
   for (const id in have) {
@@ -1189,6 +1213,7 @@ function ledgerCheck_(team) {
   return {
     same: same, differ: differ,
     onlyWork: onlyWork, onlyLedger: onlyLedger,
+    byCol: byCol, onlyWorkBy: onlyWorkBy, pair: pair,
     sample: sample,
   };
 }
