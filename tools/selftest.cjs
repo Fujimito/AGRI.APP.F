@@ -1264,14 +1264,30 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   // 元帳を書き換えるので、先に下見を出してから実行する
   eq("下見を先に呼べる", src.includes("p.ledgerRebuild(true)"), true);
   eq("実行も呼べる", src.includes("p.ledgerRebuild(false)"), true);
-  // 下見を取っていなければ実行させない
-  eq("下見なしでは実行しない",
-    src.includes('flash("先に「下見」を押してください");'), true);
+  // 下見を取っていなければ実行させない。
+  // ただし .ok だけを見るのでは足りない(v9.09)。
+  // 実行の結果も .ok なので、古い件数のままもう一度押せてしまう。
+  // 「下見そのもの」かつ「取ってから新しい」ことを見る
+  eq("下見そのものでなければ実行しない",
+    src.includes("d.dryRun === true && d.at &&"), true);
+  eq("古い下見は使わない",
+    src.includes("Date.now() - Date.parse(d.at) < LEDGER_PLAN_MAX_AGE_MS"), true);
+  eq("実行したら下見を捨てる",
+    src.includes("localStorage.removeItem(LEDGER_PLAN_KEY);"), true);
   // 実行前に件数を見せて確認を取る
   eq("実行前に確認を取る", src.includes("window.confirm("), true);
   eq("行を消さないと書いてある",
     src.includes("行は消しません。受信日時も書き換えません。"), true);
   eq("下見の結果を出す", src.includes("ledgerPlanBlock(p.ledgerPlan)"), true);
+  // 「足す 258 件」だけでは、その中身が判断できない。
+  // 実施済なのか予定のままなのかを確認の画面にも出す(v9.09)
+  eq("足す行の内訳を確認に出す", src.includes("d.addedBy[k]"), true);
+  eq("足す行の内訳を表にも出す", src.includes('"足す行の内訳"'), true);
+  // ── 進捗の照合の数取り(v9.09) ──
+  // 版が上がったら数え直す。直した版でも古い差分の数が
+  // 出続けると、「差分00が続いたら外す」を二度と観測できない
+  eq("版を覚えておく", src.includes("ver: APP_VERSION,"), true);
+  eq("版が違えば数え直す", src.includes("saved && saved.ver === APP_VERSION"), true);
   eq("照合は書き込まない(ボタンの案内に明記)",
     src.includes("読むだけで、シートは書き換えません"), true);
 }

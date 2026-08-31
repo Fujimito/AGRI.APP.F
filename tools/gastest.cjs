@@ -135,8 +135,13 @@ const F2 = {
   post(ctx, { type: "pushFields", team: TEAM,
               items: [Object.assign({}, F1, { name: '=IMPORTXML("http://x","//y")' })] });
   const sh = ctx.SHEET_STATE.getSheetByName("圃場マスタ");
-  eq("= 始まりの圃場名はアポストロフィで固定する",
-     String(sh.getRange(2, 3).getValue()).charAt(0), "'");
+  // 実物のシートは先頭のアポストロフィを食うので、getValue では戻らない。
+  // 見るべきは「生きた数式になっていないか」のほう。
+  // v9.08 までは getValue にアポストロフィが戻る前提で書いていたが、
+  // 実物と違った。張りぼてを実物に合わせて直した(v9.09)
+  eq("= 始まりの圃場名は数式にならない", sh._isFormulaAt(2, 3), false);
+  eq("中身はそのまま読める",
+     sh.getRange(2, 3).getValue(), '=IMPORTXML("http://x","//y")');
 }
 
 // ── 7. 件数上限 ──
@@ -815,7 +820,14 @@ const F2 = {
                 sprayedL: 95, reportDate: "2026-08-20",
                 reportAreaA: 12.5, reportMemo: "実際は少なめ" }) });
 
+  // 照合は読むだけ。ボタンの案内にもそう書いてあるので、機械で確かめる(v9.09)。
+  // 文言だけを検査しても、実際に書かないことの保証にはならない
+  const lgSheet = ctx.SHEET_STATE.getSheetByName("防除記録");
+  const wkSheet = ctx.SHEET_STATE.getSheetByName("作業");
+  lgSheet._writeCells = 0;
+  wkSheet._writeCells = 0;
   const c = post(ctx, { type: "ledgerCheck", team: TEAM });
+  eq("照合は1セルも書かない", [lgSheet._writeCells, wkSheet._writeCells], [0, 0]);
   eq("作業シートから作った台帳が今の台帳と一致する",
      [c.ok, c.same, c.differ, c.onlyWork, c.onlyLedger, c.sample],
      [true, 1, 0, 0, 0, []]);
@@ -830,6 +842,18 @@ const F2 = {
      ["実散布量(L)", "95", "999"]);
   // 件数だけでは直しようがない。列ごとに数える(v9.06)
   eq("列ごとの件数", c2.byCol, { "実散布量(L)": 1 });
+  // 1行に2列以上の違いがあっても、全部数えること(v9.09)。
+  // 最初の1列で打ち切ると、記録者が違う行では状態や実散布量が
+  // いくつ違っても集計に出ない。この数値を読んで本番実行の可否を
+  // 決めるので、下限しか出ないのでは判断できない
+  lg.getRange(2, 4).setValue("別の人");   // 記録者も違わせる
+  {
+    const c = post(ctx, { type: "ledgerCheck", team: TEAM });
+    eq("2列違えば 2列とも数える", c.byCol, { "記録者": 1, "実散布量(L)": 1 });
+    eq("見本は最初の1列だけ", c.sample[0].why, "記録者");
+    eq("行数としては1件", c.differ, 1);
+  }
+  lg.getRange(2, 4).setValue("藤本");
   // 最初の1件は全列を並べる。どこが合っているかも見たい
   eq("1件目の全列を返す", c2.pair.id, "9101");
   {
@@ -847,6 +871,22 @@ const F2 = {
   const c3 = post(ctx, { type: "ledgerCheck", team: TEAM });
   eq("台帳にだけある行は数える", [c3.same, c3.onlyLedger], [1, 1]);
   eq("その行の理由", c3.sample[0].why, "作業シートに無い");
+  // 記録IDが重なる行を数える(v9.09)。照合と作り直しで見ている行が違うと、
+  // 直したのに照合が0にならない
+  eq("重なりは無い", c3.dup, 0);
+  // 既にある記録ID と同じIDの行を、中身を違えて足す。
+  // 先勝ちなら元の行を見るので一致、後勝ちならこの偽の行を
+  // 見るので食い違いになる。作り直しは先勝ちなので、
+  // 照合を後勝ちにしてしまうと「直したのに照合が0にならない」
+  lg.appendRow(["", "9101", "2026-08-20", "別の人", "偽の行", "", "", 0, "", 0, 0, "", "調合済", "", "", TEAM]);
+  {
+    const c = post(ctx, { type: "ledgerCheck", team: TEAM });
+    eq("重なっていれば数える", c.dup, 1);
+    // 先勝ち。作り直し(ledgerRebuild_)と揃えてある
+    eq("先に見つけた行を採る(偽の行を見ない)", c.differ, 0);
+  }
+  // 偽の二重行を空にして片づける(以降の件数に響かせない)
+  lg.getRange(lg.getLastRow(), 1, 1, 16).setValues([new Array(16).fill("")]);
 
   // 実績を取り消したら、作り直した台帳も「調合済」に戻ること
   post(ctx, { type: "unreport", team: TEAM, recorder: "藤本", record: { id: ID } });
@@ -933,6 +973,9 @@ const F2 = {
   const dry = post(ctx, { type: "ledgerRebuild", team: TEAM, dryRun: true });
   eq("下見は1セルも書かない", [lg._writeCells, wk._writeCells], [0, 0]);
   eq("下見の結果", [dry.ok, dry.dryRun, dry.added, dry.updated, dry.untouched], [true, true, 2, 1, 0]);
+  // 「足す 2 件」の中身が分かること(v9.09)。実施済なのか予定のままなのかで、
+  // 元帳に入れてよいかの判断が変わる
+  eq("足す行の内訳", dry.addedBy, { "調合済・薬剤なし": 1, "散布済・薬剤なし": 1 });
   eq("直る列が分かる", dry.cols.map(c => c.col).sort(),
      ["記録者", "実散布量(L)", "報告日", "状態"].sort());
   eq("下見では行が増えていない", lg.getLastRow(), 2);
@@ -946,6 +989,14 @@ const F2 = {
   eq("状態が散布済に直る", lg.getRange(2, 13).getValue(), "散布済");
   eq("実散布量が入る", lg.getRange(2, 12).getValue(), 33);
   eq("受信日時は書き換えない", lg.getRange(2, 1).getValue(), before);
+  // 足した行の受信日時は、既存行(buildRow_)と同じ書式・同じ時刻帯にする(v9.09)。
+  // ISO のままだと、足した行だけ見た目が違う。台帳は人が読んで印刷する表
+  {
+    const stamp = String(lg.getRange(lg.getLastRow(), 1).getValue());
+    eq("足した行の受信日時は JST の日時の形",
+       /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(stamp), true);
+    eq("既存行と同じ形", /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(String(before)), true);
+  }
 
   // ── もう一度やっても何も動かない ──
   const again = post(ctx, { type: "ledgerRebuild", team: TEAM });
@@ -990,6 +1041,31 @@ const F2 = {
     eq("行が入っている", lg.getLastRow(), 5 + 300);
     const c2 = post(ctx, { type: "ledgerCheck", team: TEAM });
     eq("足したあとも食い違わない", c2.differ, 0);
+  }
+
+  // ── 読んで書き戻すとき、数式インジェクションの防御を外さない ──
+  // 先頭のアポストロフィは getValues では戻らないので、素のまま
+  // setValues すると、Sheets が生きた数式として再解釈する。
+  // 台帳は全チームの行を含むので、1回の作り直しで全行ぶん
+  // 一斉に再点火しうる。直さない列・直さない行・別チームの行が危ない。
+  {
+    // 別チームの行に、数式になりうる圓場名を入れておく
+    post(ctx, { type: "record", team: "NCT", recorder: "前川",
+                record: { id: 8801, date: "2026-08-20",
+                          field: '=IMPORTXML("http://x","//y")', crop: "", areaA: 1,
+                          chems: [], totalL: 0, waterMl: 0, memo: "" } });
+    const row = lg.getLastRow();
+    eq("入れた時点では数式ではない", lg._isFormulaAt(row, 5), false);
+    // 別チーム(TEAM)で作り直す。この行は触らないはず。
+    // 書き戻しが実際に走るよう、足りない行を1件作っておく
+    // (変化が無いと setValues 自体を呼ばないので、検査にならない)
+    post(ctx, { type: "pushWorks", team: TEAM,
+                items: [mk(8802, "2026-08-23", true, "田中", "新しい田")] });
+    const r8802 = post(ctx, { type: "ledgerRebuild", team: TEAM });
+    eq("書き戻しが実際に走っている", r8802.added, 1);
+    eq("書き戻しても数式にならない", lg._isFormulaAt(row, 5), false);
+    eq("中身も変わらない",
+       lg.getRange(row, 5).getValue(), '=IMPORTXML("http://x","//y")');
   }
 
   eq("ledgerRebuild は team 必須",

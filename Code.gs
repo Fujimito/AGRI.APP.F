@@ -487,6 +487,8 @@ function getRecSheet_(name, headers, headBg) {
 // 14 は v8.97 で追加。これまで抜けており、入れた日付がシート側で Date に
 // 変換されていた(吹き出しに "Thu Aug 27 2026 ..." が出ていたのはこれ)。
 // 刻まで入った ISO を置くには、文字列のまま保たないとタイムゾーンがずれる。
+// 25 は実績メモ(v9.04)。日付列ではないが、"1-2" のような入力を
+// Sheets に日付と解釈させないため、同じく文字列に固定する
 const WORK_TEXT_COLS = [3, 14, 15, 16, 25];
 // 圃場マスタと薬剤マスタにも同じ手当てが要る。編集日時・更新日時は ISO 文字列だが、
 // 書式が固定されていないとシートが日付として解釈して Date で返す。
@@ -1086,6 +1088,15 @@ function buildRow_(data, status) {
 //
 // ★ここに書き込む処理を足さないこと。読み取り(doRead_)から呼ぶため、
 //   ロックを取らずに走る。
+// 受信日時の書式を buildRow_ と揃える。JSTの "yyyy-MM-dd HH:mm:ss"。
+// 値が空・壊れているときは空文字を返す(でたらめな時刻を書かない)。
+function jstStamp_(v) {
+  if (v === "" || v === null || v === undefined) return "";
+  const d = (v instanceof Date) ? v : new Date(String(v));
+  if (isNaN(d.getTime())) return "";
+  return Utilities.formatDate(d, "Asia/Tokyo", "yyyy-MM-dd HH:mm:ss");
+}
+
 function ledgerRowFromWork_(r) {
   const done = String(r[5] || "") === "done";
   // 面積は実績面積を優先する。実績が入っていなければ登録上の面積。
@@ -1093,8 +1104,11 @@ function ledgerRowFromWork_(r) {
   const area = Number(r[8]) || Number(r[18]) || "";
   return [
     // 受信日時。台帳は「受け取った時刻」、作業シートは「更新日時」。
-    // どちらも「サーバーが最後に書いた時刻」なので同じものを指す
-    atIso_(r[WORK_AT_COL]),
+    // どちらも「サーバーが最後に書いた時刻」なので同じものを指す。
+    // ★書式は buildRow_ と揃えること(JSTの "yyyy-MM-dd HH:mm:ss")。
+    //   ISO のまま入れると、足した行だけ書式も時刻帯も違って見える。
+    //   台帳は人が読んで印刷する表なので、そこは合わせる(v9.09)
+    jstStamp_(r[WORK_AT_COL]),
     String(r[0]),
     ymd_(r[2]),
     String(r[11] || ""),
@@ -1158,6 +1172,8 @@ function ledgerCheck_(team) {
     }
   }
   const have = {};
+  // 記録IDが重なっている行の数。0でないなら、台帳に二重行がある
+  let dup = 0;
   if (lg.getLastRow() >= 2) {
     const rows = lg.getRange(2, 1, lg.getLastRow() - 1, HEADERS.length).getValues();
     for (let i = 0; i < rows.length; i++) {
@@ -1167,7 +1183,13 @@ function ledgerCheck_(team) {
       // チーム欄が空の行は古い行。どのチームのものか分からないので、
       // 突き合わせの対象には入れるが、チーム違いとしては数えない
       if (team && rt && rt !== String(team)) continue;
-      have[String(r[COL.ID - 1])] = r;
+      const key = String(r[COL.ID - 1]);
+      // 同じ記録IDの行が複数あることはありうる(findRow_ のコメント参照)。
+      // 先に見つけた行を採る。作り直し(ledgerRebuild_)も先勝ちなので、
+      // ここを後勝ちにすると、直した行と見ている行が食い違って
+      // 「作り直したのに照合が0にならない」ことになる(v9.09)
+      if (key in have) { dup++; continue; }
+      have[key] = r;
     }
   }
   const sample = [];
@@ -1192,11 +1214,18 @@ function ledgerCheck_(team) {
     }
     const a = ledgerNorm_(made[id]);
     const b = ledgerNorm_(have[id]);
+    // 違う列は全部数える。最初の1列で打ち切ると、記録者が違う行では
+    // 状態や実散布量がいくつ違っても集計に出ない。それでは
+    //「1種類の食い違いが125件なのか125種類なのか」が結局分からない(v9.09)。
+    // hit は見本(sample)に出す1列目として別に持つ。
     let hit = -1;
-    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { hit = i; break; }
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] === b[i]) continue;
+      if (hit < 0) hit = i;
+      bump(byCol, HEADERS[i]);
+    }
     if (hit < 0) { same++; continue; }
     differ++;
-    bump(byCol, HEADERS[hit]);
     if (!pair) {
       const cols = [];
       for (let i = 0; i < HEADERS.length; i++) {
@@ -1213,6 +1242,8 @@ function ledgerCheck_(team) {
   return {
     same: same, differ: differ,
     onlyWork: onlyWork, onlyLedger: onlyLedger,
+    // 記録IDが重なっている台帳の行。作り直しでは1行目しか直らない
+    dup: dup,
     byCol: byCol, onlyWorkBy: onlyWorkBy, pair: pair,
     sample: sample,
   };
@@ -1267,8 +1298,16 @@ function ledgerRebuild_(team, dryRun) {
   }
 
   let added = 0, updated = 0, untouched = 0;
+  // 作り直しの対象にならなかった台帳の行(作業シートに対応が無い・
+  // 記録IDが空・別チーム)。触らないことを数えて見せる
+  const seen = {};
+  // 足す行の内訳。「足す 258 件」だけでは、その中身が
+  // 実施済なのか予定のままなのか分からず、元帳に入れてよいか判断できない。
+  // 台帳は人が読んで印刷する表なので、中身を見せてから決めてもらう(v9.09)
+  const addedBy = {};
   const cols = [];   // 直した列の内訳
-  const bump = k => { for (let i = 0; i < cols.length; i++) if (cols[i].col === k) { cols[i].n++; return; } cols.push({ col: k, n: 1 }); };
+  const bumpCol = k => { for (let i = 0; i < cols.length; i++) if (cols[i].col === k) { cols[i].n++; return; } cols.push({ col: k, n: 1 }); };
+  const bump = (m, k) => { m[k] = (m[k] || 0) + 1; };
   const append = [];
 
   for (let k = 0; k < order.length; k++) {
@@ -1276,17 +1315,19 @@ function ledgerRebuild_(team, dryRun) {
     const want = made[id];
     if (!(id in rowOf)) {
       added++;
+      bump(addedBy, String(want[12] || "?") + (Number(want[7]) ? "・薬剤あり" : "・薬剤なし"));
       if (!dryRun) append.push(want.map(safeCell_));
       continue;
     }
     const i = rowOf[id];
+    seen[i] = true;
     const have = cur[i];
     const a = ledgerNorm_(want), b = ledgerNorm_(have);
     let hit = false;
     for (let c = 0; c < W; c++) {
       if (a[c] === b[c]) continue;
       hit = true;
-      bump(HEADERS[c]);
+      bumpCol(HEADERS[c]);
       // 受信日時(LEDGER_SKIP_COLS)はここに来ない。ledgerNorm_ が
       // 両方とも "" にするので、上の a[c] === b[c] で必ず弾かれる。
       // 台帳の受信日時は「実際に受け取った時刻」なので、作り直しても変えない。
@@ -1300,7 +1341,17 @@ function ledgerRebuild_(team, dryRun) {
     // 足す分の行を先に確保する。シートの行数を超えて書くと
     // 例外になり、作り直しが途中で止まる(実データで 254 行足す見込み)
     ensureRows_(lg, 1 + cur.length + append.length);
-    if (cur.length) lg.getRange(2, 1, cur.length, W).setValues(cur);
+    // ★ 必ず safeCell_ を通してから書き戻すこと。
+    //
+    // 先頭のアポストロフィ(数式インジェクション対策)は getValues では
+    // 戻らない。つまり cur の中身は "=IMPORTXML(...)" という素の文字列で、
+    // そのまま setValues すると Sheets が生きた数式として再解釈する。
+    // 台帳は全チームの行を含むシートを丸ごと読んで丸ごと書き戻すので、
+    // 1回の作り直しで、過去に防いだ注入が全行ぶん一斉に再点火しうる。
+    // 直した列だけでなく、触らなかった列・行・別チームの行も通る。
+    // safeCell_ は数値・Date・安全な文字列を素通しするので、何度通しても良い。
+    if (cur.length) lg.getRange(2, 1, cur.length, W).setValues(
+      cur.map(function (row) { return row.map(safeCell_); }));
     if (append.length) lg.getRange(2 + cur.length, 1, append.length, W).setValues(append);
     // 日付ごとの色分けは行が増えたときだけ。作り直しは行数が大きく動く
     if (append.length) colorByDate_(lg);
@@ -1309,9 +1360,12 @@ function ledgerRebuild_(team, dryRun) {
   return {
     dryRun: !!dryRun,
     added: added, updated: updated, untouched: untouched,
-    // 台帳にしか無い行。数えるだけで、触らない
-    kept: cur.length - (updated + untouched),
+    // 台帳にしか無い行。数えるだけで、触らない。
+    // cur.length から引くやり方だと、記録IDが空の行や別チームの行まで
+    // 混ざって過大になる(確認の画面に出す数字なのでずれると困る・v9.09)
+    kept: (function () { let n = 0; for (let i = 0; i < cur.length; i++) if (!seen[i]) n++; return n; })(),
     cols: cols.sort(function (x, y) { return y.n - x.n; }),
+    addedBy: addedBy,
   };
 }
 

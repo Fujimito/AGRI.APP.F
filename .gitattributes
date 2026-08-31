@@ -1,0 +1,20 @@
+# 改行は LF に固定する。
+#
+# Windows の git は既定で checkout のときに LF → CRLF へ変換する。
+# このリポジトリには「app.js にこの並びで書かれているか」を文字列で見る検査が
+# いくつもあり、改行を含む。変換されると中身は正しいのにテストだけ落ちる
+# (v9.07 で実際に起きた)。テスト側でも LF に揃えているが、変換そのものを
+# 止めておかないと、編集する道具のほうが噛み合わなくなる。
+* text=auto eol=lf
+
+# 中身を触られると壊れるもの
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary

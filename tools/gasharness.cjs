@@ -25,7 +25,17 @@ const SRC = path.join(__dirname, "..", "Code.gs");
 // この2つを模していなかったので、since の比較が壊れる不具合を捕まえられなかった。
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$/;
+// 先頭のアポストロフィ。実物は「以降を必ず文字列として扱う」印として食い、
+// getValue では返さない(safeCell_ のコメントにあるとおり)。
+// つまり '=SUM(1) と書いたセルを読むと "=SUM(1)" が返り、それをそのまま
+// 書き戻すと今度は生きた数式になる。これを模していないと、
+// 「読んで書き戻す」処理が防御を外す不具合をテストで捕まえられない。
+// 文字列として固定されているかどうかは _isFormulaAt で見る。
+class Locked {
+  constructor(text) { this.text = text; }
+}
 function coerceIn(v, isText) {
+  if (typeof v === "string" && v.charAt(0) === "'") return new Locked(v.slice(1));
   if (isText) return v;
   if (typeof v !== "string") return v;
   if (DATE_RE.test(v)) return new Date(v + "T00:00:00+09:00");
@@ -67,7 +77,14 @@ class FakeSheet {
   _cell(r, c) {
     if (!this.rows[r]) this.rows[r] = [];
     const v = this.rows[r][c];
+    if (v instanceof Locked) return v.text;   // アポストロフィは返らない
     return v === undefined ? "" : v;
+  }
+  // そのセルが「生きた数式」になっているか(1始まりの行・列)。
+  // 文字列として固定されていれば false。テストから使う
+  _isFormulaAt(row, col) {
+    const v = (this.rows[row - 1] || [])[col - 1];
+    return typeof v === "string" && v.charAt(0) === "=";
   }
   getRange(row, col, numRows, numCols) {
     const sh = this;

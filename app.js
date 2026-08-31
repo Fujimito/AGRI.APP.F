@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.08";
+const APP_VERSION = "v9.09";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2533,13 +2533,24 @@ function App() {
     }
     if (!dryRun) {
       const d = ledgerPlan;
-      if (!d || !d.ok) {
-        flash("先に「下見」を押してください");
+      // 下見そのもの(dryRun)であること。実行の結果を残したまま
+      // もう一度押せると、確認に出る件数が前回の実行後の数字になる。
+      // 取ってから時間が経った下見も使わない。その間に他の端末が
+      // 作業を送っていれば、確認に出す件数が実物と合わない(v9.09)
+      const fresh = d && d.ok && d.dryRun === true && d.at &&
+        Date.now() - Date.parse(d.at) < LEDGER_PLAN_MAX_AGE_MS;
+      if (!fresh) {
+        flash(d && d.ok && !d.dryRun
+          ? "作り直したあとです。もう一度「下見」を押してから実行してください"
+          : "先に「下見」を押してください(下見から時間が経つと取り直しになります)");
         return;
       }
       if (!window.confirm(
         "「防除記録」シートを作業シートに合わせます。\n\n" +
         "・足す行 " + d.added + " 件\n" +
+        // 足す行の中身。実施済なのか予定のままなのかで判断が変わるので、
+        // 必ず「足す行」の直下に置く(離すと別の項目の内訳に見える)
+        Object.keys(d.addedBy || {}).map(k => "　　└ " + k + " " + d.addedBy[k] + " 件\n").join("") +
         "・直す行 " + d.updated + " 件\n" +
         "・触らない行 " + (d.untouched + d.kept) + " 件\n\n" +
         "行は消しません。受信日時も書き換えません。\n" +
@@ -2564,8 +2575,15 @@ function App() {
       return;
     }
     j.at = new Date().toISOString();
-    save(LEDGER_PLAN_KEY, j);
-    setLedgerPlan(j);
+    // 実行したら下見は捨てる。残すとボタンが出続け、古い件数のまま
+    // もう一度押せてしまう
+    if (dryRun) {
+      save(LEDGER_PLAN_KEY, j);
+      setLedgerPlan(j);
+    } else {
+      localStorage.removeItem(LEDGER_PLAN_KEY);
+      setLedgerPlan(null);
+    }
     flash((dryRun ? "下見しました: " : "✅ 作り直しました: ") +
       "足す " + j.added + " 件 / 直す " + j.updated + " 件 / 触らない " +
       (j.untouched + j.kept) + " 件");
@@ -7603,6 +7621,12 @@ function GoogleMapTab(p) {
     if (mapRef.current) mapRef.current.setMapTypeId(mapType);
   }, [mapType]);
 
+  // getProjection は地図の準備ができるまで null を返す。そのときは間引けない。
+  // 用意できたことに気づかないと、間引かれないままの札が残り続けるので、
+  // 描き直しの依存に入れる。ここで読むのは副作用の無い取得だけ(v9.09)
+  const projReady = !!(ready && mapRef.current && mapRef.current.getProjection &&
+    mapRef.current.getProjection());
+
   // 登録済み圃場ポリゴンを再描画
   React.useEffect(() => {
     if (!ready || !mapRef.current) return;
@@ -7706,7 +7730,9 @@ function GoogleMapTab(p) {
     // 間引きの結果は倍率で変わるので、帯(v9.00)ではなく倍率そのものを見る。
     // 帯のままだと、倍率を上げても間引きが計算し直されず、
     // 十分に寄っても落とされたままの札が出てこない
-  }, [ready, p.fields, Math.floor(zoom), hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
+    // projReady も入れる。用意できたことに気づかないと、
+    // 間引かれないままの札が残り続ける(v9.09)
+  }, [ready, p.fields, Math.floor(zoom), hidden, p.areaUnitKey, projReady]); // 単位を変えたら札も描き直す
 
   // 作図中の頂点・線を再描画
   React.useEffect(() => {
@@ -9207,6 +9233,14 @@ function ledgerPlanBlock(j) {
     /*#__PURE__*/React.createElement("div", null,
       "足す " + j.added + " 件 / 直す " + j.updated + " 件 / そのまま " + j.untouched +
       " 件 / 台帳にしか無い(触らない) " + j.kept + " 件"),
+    Object.keys(j.addedBy || {}).length ? /*#__PURE__*/React.createElement("div", { style: { marginTop: 6 } },
+      /*#__PURE__*/React.createElement("div", { style: { fontWeight: 700 } }, "足す行の内訳"),
+      /*#__PURE__*/React.createElement("table", { style: { fontSize: 12, borderCollapse: "collapse" } },
+        /*#__PURE__*/React.createElement("tbody", null,
+          Object.keys(j.addedBy).sort((a, b) => j.addedBy[b] - j.addedBy[a]).map(k =>
+            /*#__PURE__*/React.createElement("tr", { key: k },
+              /*#__PURE__*/React.createElement("td", { style: { padding: "2px 8px 2px 0" } }, k),
+              /*#__PURE__*/React.createElement("td", { style: { padding: "2px 0", textAlign: "right", fontWeight: 700 } }, j.addedBy[k] + " 件")))))) : null,
     (j.cols || []).length ? /*#__PURE__*/React.createElement("div", { style: { marginTop: 6 } },
       /*#__PURE__*/React.createElement("div", { style: { fontWeight: 700 } }, "直る列"),
       /*#__PURE__*/React.createElement("table", { style: { fontSize: 12, borderCollapse: "collapse" } },
@@ -9251,7 +9285,9 @@ function ledgerReportBlock(j) {
         row("一致", j.same + " 件"),
         row("食い違い", j.differ + " 件"),
         row("台帳に無い(作業にはある)", j.onlyWork + " 件"),
-        row("作業に無い(台帳にはある)", j.onlyLedger + " 件"))),
+        row("作業に無い(台帳にはある)", j.onlyLedger + " 件"),
+        // 0 でなければ台帳に二重行がある。作り直しでは1行目しか直らない
+        j.dup ? row("記録IDが重なっている行", j.dup + " 件") : null)),
     tally("食い違った列", j.byCol),
     tally("台帳に無い作業の内訳(状態・薬剤)", j.onlyWorkBy),
     pair);
@@ -9263,7 +9299,7 @@ function progressDiffLine() {
   const ok = !d.diffs;
   return /*#__PURE__*/React.createElement("p", {
     style: { ...S.note, marginTop: 8 }
-  }, "進捗地図の照合(開発用): ", /*#__PURE__*/React.createElement("strong", null,
+  }, "進捗地図の照合(開発用・" + (d.ver || "?") + "以降): ", /*#__PURE__*/React.createElement("strong", null,
     "照合 " + d.runs + " 回 / 差分 " + (d.diffs || 0) + " 回"),
     ok ? " — サーバーの進捗を使わず、受信した作業だけで同じ地図が作れています。"
        : " — 違いが出ています: " + (d.sample || []).map(x =>
@@ -10775,6 +10811,9 @@ const progressEntries = (items, works, from, to, recorder) => {
 const PROGRESS_DIFF_KEY = "tankmix:progressdiff";
 const LEDGER_CHECK_KEY = "tankmix:ledgercheck";
 const LEDGER_PLAN_KEY = "tankmix:ledgerplan";
+// 下見の有効期限。長くすると、その間に他の端末が送った作業のぶんだけ
+// 確認に出す件数が実物とずれる。10分は未計測の暫定値
+const LEDGER_PLAN_MAX_AGE_MS = 10 * 60 * 1000;
 const PROGRESS_DIFF_KEYS = ["status", "by", "at", "sprayedL", "areaA", "prevDate"];
 const progressMapDiff = (a, b) => {
   const out = [];
@@ -12060,8 +12099,14 @@ function ProgressMapTab(p) {
       progressEntries([], p.works, fetchFrom, fetchTo, p.recorder),
       p.workDate);
     const d = progressMapDiff(statusByField, onlyWorks);
-    const prev = load(PROGRESS_DIFF_KEY, { runs: 0, diffs: 0, last: null, sample: [] });
+    const saved = load(PROGRESS_DIFF_KEY, null);
+    // 版が変わったら数え直す。直した版でも古い差分の数が出続けると、
+    //「差分0が続いたら progress を外す」を二度と観測できない(v9.09)
+    const prev = saved && saved.ver === APP_VERSION
+      ? saved
+      : { runs: 0, diffs: 0, last: null, sample: [] };
     const next = {
+      ver: APP_VERSION,
       runs: (prev.runs || 0) + 1,
       diffs: (prev.diffs || 0) + (d.length ? 1 : 0),
       last: new Date().toISOString(),

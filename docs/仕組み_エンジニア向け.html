@@ -457,12 +457,35 @@ flowchart TD
   </div>
 
   <div class="fail">
+    <h3>読んで書き戻す処理が、数式インジェクションの防御を全行ぶん外していた</h3>
+    <p class="ver">v9.09 で修正 / コードレビューで発見・本番実行の直前で止めた</p>
+    <dl>
+      <dt>症状</dt><dd>出ていない。<strong>本番の台帳に対して <code>ledgerRebuild</code> を走らせる直前に、レビューで見つかった。</strong></dd>
+      <dt>機構</dt><dd><code>safeCell_</code> は <code>=</code> 始まりの文字列の先頭にアポストロフィを付けて数式化を防ぐ。<strong>このアポストロフィは <code>getValues()</code> では返らない</strong>&mdash;&mdash;この事実は <code>ledgerNorm_</code> のコメント自身が書いていた。つまりシートから読んだ <code>cur</code> の中身は <code>=IMPORTXML(...)</code> という素の文字列で、それを <code>setValues</code> で書き戻すと<strong>Sheets が生きた数式として再解釈する</strong>。<code>ledgerRebuild_</code> は台帳を<strong>丸ごと読んで丸ごと書き戻す</strong>ので、直した列だけでなく、触っていない列・触っていない行・<strong>別チームの行</strong>まで通る。1回の作り直しで、過去に防いだ注入が全行ぶん一斉に再点火しうる。</dd>
+      <dt>対処</dt><dd>書き戻しを <code>cur.map(row =&gt; row.map(safeCell_))</code> にする。<code>safeCell_</code> は数値・Date・安全な文字列を素通しするので何度通しても良い。</dd>
+      <dt>なぜテストで捕まらなかったか</dt><dd><strong>張りぼて(<code>gasharness</code>)がアポストロフィを再現していなかった。</strong>それどころか既存のテストは <code>getValue()</code> にアポストロフィが<strong>返る</strong>前提で書かれていて、実物と逆だった。張りぼてを実物に合わせ(<code>Locked</code> と <code>_isFormulaAt</code>)、既存テストを「アポストロフィが返るか」ではなく<strong>「生きた数式になっていないか」</strong>を見るように直した。そのうえで、別チームの行に <code>=IMPORTXML(...)</code> を仕込んで作り直しを走らせる検査を足した(対照実験で赤くなることを確認済み)。</dd>
+      <dt>忘れやすい点</dt><dd><strong>「読んで書き戻す」は、読んだ時点で失われる情報がある。</strong>アポストロフィ・書式・数式・メモはいずれも <code>getValues</code> では返らない。丸ごと書き戻す設計を採るなら、失われるものを先に数え上げること。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>「どの列が何件違うか」が、実は「最初に違った列」しか数えていなかった</h3>
+    <p class="ver">v9.09 で修正 / コードレビューで発見</p>
+    <dl>
+      <dt>症状</dt><dd><code>ledgerCheck</code> の <code>byCol</code> が「記録者75 / 状態6 / 面積2」を返し、<strong>その数字を根拠に本番実行の可否を判断していた</strong>。</dd>
+      <dt>機構</dt><dd>行ごとに <code>for (...) if (a[i] !== b[i]) { hit = i; break; }</code> と最初の1列で打ち切っていた。記録者が違う行では、状態も実散布量も薬剤内容もいくつ違っていても集計に出ない。<strong>返していたのは内訳ではなく下限だった。</strong>関数のコメントは「1種類の食い違いが125件なのか125種類なのか分からず、直しようがない」と目的を書いていたのに、その目的を果たしていなかった。</dd>
+      <dt>紛らわしかった点</dt><dd>作り直し(<code>ledgerRebuild_</code>)側の <code>cols</code> は <code>break</code> せず全列を数えていた。<strong>同じ見た目の2つの表が、別の数え方をしていた</strong>(下見に「報告日6件」が出て照合に出ないのはこのため)。</dd>
+      <dt>対処</dt><dd><code>break</code> をやめて全列を数える。<code>hit</code> は見本(<code>sample</code>)に出す1列目として別に持つ。1行に2列以上の違いがある場合の検査を足した(既存の検査は差が常に1列のケースしか作っておらず、この欠陥を構造的に検出できなかった)。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>git checkout しただけでテストが2件落ちた(改行)</h3>
     <p class="ver">v9.07 で修正</p>
     <dl>
       <dt>症状</dt><dd><code>git checkout -- app.js</code> で作業中の変更を捨てただけで、<code>selftest</code> が2件落ちた。中身は HEAD と同じなのに落ちる。</dd>
       <dt>機構</dt><dd><code>selftest</code> には「app.js にこの並びで書かれているか」を<strong>文字列で</strong>見る検査がいくつもあり、改行(<code>\n</code>)を含む。Windows の git は checkout のときに <strong>LF を CRLF に変換</strong>するので、<code>\n</code> が <code>\r\n</code> になって一致しなくなる。それまで通っていたのは、編集を Python から LF で書いていたため。</dd>
-      <dt>対処</dt><dd>読み込んだ時点で CRLF を LF に揃える(<code>nl()</code>)。<strong>検査したいのは中身であって改行ではない。</strong></dd>
+      <dt>対処</dt><dd>読み込んだ時点で CRLF を LF に揃える(<code>nl()</code>)。<strong>検査したいのは中身であって改行ではない。</strong>ただしこれはテスト側の手当てにすぎず、<strong>編集する道具のほうが噛み合わなくなる</strong>(v9.09 で実際に起きた&mdash;&mdash;<code>\n</code> で書いた置換パターンが CRLF のファイルに当たらない)。v9.09 で <code>.gitattributes</code> に <code>* text=auto eol=lf</code> を置き、変換そのものを止めた。</dd>
       <dt>忘れやすい点</dt><dd>この手の検査は「自分の書き方では通るが、普通に clone した人では落ちる」という形で壊れる。<strong>手元で通ったことは、他所で通る根拠にならない。</strong></dd>
     </dl>
   </div>
