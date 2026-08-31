@@ -446,6 +446,21 @@ flowchart TD
   </div>
 
   <div class="fail">
+    <h3>古いGASが「invalid payload」を返し、古いと分からなかった</h3>
+    <p class="ver">v9.05 で修正 / 実機(利用者の環境)で発生</p>
+    <dl>
+      <dt>症状</dt><dd>v9.04 で足した「🧾 台帳の照合」を押すと <strong>「照合できません(invalid payload)」</strong>。文面は「送ったものが壊れている」と読めるが、実際は<strong>スプレッドシート側のスクリプトが古かっただけ</strong>。</dd>
+      <dt>機構</dt><dd><code>doPost</code> の末尾は、<strong>中身の検査 → 種類の判定</strong>の順だった。<pre>const rec = data.record;
+if (!rec || !rec.id || ...) return "invalid payload";   // ← ここで落ちる
+if (type === "record" || "report" || "unreport") { ... }
+return "unknown type";                                   // ← ここまで来ない</pre>知らない種類には <code>record</code> が付いていないので、<strong>必ず手前の「invalid payload」で返る</strong>。<code>unknown type</code> は事実上どのリクエストでも返らなかった。</dd>
+      <dt>なぜ効くのか</dt><dd>アプリは <code>unknown type</code> を<strong>「動いているGASが古い」の目印</strong>にしている。目印が返らないので、新しい種類を足すたびに同じ勘違いが起きる。進捗地図だけは <code>e === "GAS" || e === "invalid payload"</code> と両方を見るように後から足してあり、そこだけ症状が出ていなかった&mdash;&mdash;<strong>1か所で場当たりに直したため、次に足した機能で再発した</strong>。</dd>
+      <dt>対処</dt><dd>(1) <code>doPost</code> で<strong>種類の判定を先にする</strong>。知らない種類は中身を見ずに <code>unknown type</code>。(2) アプリ側の台帳の照合も、念のため <code>invalid payload</code> を「古い」と読む(古いGASにつないでいる間は (1) が効かないため)。</dd>
+      <dt>忘れやすい点</dt><dd><strong>新しい種類を足したときは、古いGASが何を返すかまで確かめる。</strong>アプリだけ配ってGASを貼り替えていない期間が必ずあり、そこで出る文面が利用者の見る唯一の手がかりになる。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>倍率のしきい値では、札の重なりは止められない</h3>
     <p class="ver">v9.02 で対処 / ブラウザで実測</p>
     <dl>

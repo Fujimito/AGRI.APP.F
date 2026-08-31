@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.04";
+const APP_VERSION = "v9.05";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2501,7 +2501,11 @@ function App() {
       return;
     }
     if (!j.ok) {
-      flash(j.error === "unknown type"
+      // v9.04 までのGASは、知らない種類を record として扱おうとして
+      // 「invalid payload」を返す。「unknown type」は返らない。
+      // どちらも「動いているGASが古い」を意味する(進捗の案内と揃えてある)
+      const old = j.error === "unknown type" || j.error === "invalid payload";
+      flash(old
         ? "スプレッドシート側のスクリプトが古い版です。Code.gs を貼り直して「新バージョン」でデプロイしてください"
         : "照合できません(" + (j.error || "不明") + ")");
       return;

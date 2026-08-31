@@ -1388,18 +1388,24 @@ function doPost(e) {
       return json_({ ok: true, results: results });
     }
 
+    // 種類の判定を先にする(v9.05)。
+    // ここが後ろだと、知らない種類はすべて record の中身の検査に落ちて
+    // 「invalid payload」になる。アプリ側は「unknown type」を
+    // 「動いているGASが古い」の目印にしているので、古いのに古いと分からず
+    // 「送ったものが壊れている」と読める案内が出る。
+    // 実際、v9.04 で足した ledgerCheck を古いGASに送ると、そうなった。
+    if (type !== "record" && type !== "report" && type !== "unreport") {
+      return json_({ ok: false, error: "unknown type" });
+    }
     const rec = data.record;
     if (!rec || !rec.id || (type === "record" && !Array.isArray(rec.chems))) {
       return json_({ ok: false, error: "invalid payload" });
     }
-    if (type === "record" || type === "report" || type === "unreport") {
-      const sh = getSheet_();
-      const r = applyRecord_(sh, type, rec, String(data.team || ""), data.recorder);
-      // 色分けは行を足したときだけ(従来と同じ)
-      if (r.added) colorByDate_(sh);
-      return json_(r);
-    }
-    return json_({ ok: false, error: "unknown type" });
+    const sh = getSheet_();
+    const r = applyRecord_(sh, type, rec, String(data.team || ""), data.recorder);
+    // 色分けは行を足したときだけ(従来と同じ)
+    if (r.added) colorByDate_(sh);
+    return json_(r);
   } catch (err) {
     return json_({ ok: false, error: String(err) });
   } finally {

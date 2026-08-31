@@ -864,6 +864,27 @@ const F2 = {
      (JSON.parse(ctx.doGet().getContent()).features || []).indexOf("ledgerCheck") >= 0, true);
 }
 
+// ── 21. 知らない種類は「unknown type」で返す(v9.05) ──────
+// v9.04 までは、知らない種類が record の中身の検査に落ちて
+// 「invalid payload」になっていた。アプリ側は unknown type を
+// 「動いているGASが古い」の目印にしているので、古いのに古いと分からず、
+// 「送ったものが壊れている」と読める案内が出た。
+// 実際に v9.04 の ledgerCheck を古いGASに送ってそうなった。
+{
+  const ctx = makeContext({});
+  eq("知らない種類は unknown type",
+     post(ctx, { type: "なんだこれ", team: TEAM }).error, "unknown type");
+  // 中身が付いていても同じ。種類の判定が先
+  eq("中身があっても種類が先",
+     post(ctx, { type: "なんだこれ", team: TEAM,
+                 record: { id: 1, chems: [] } }).error, "unknown type");
+  // record の中身が足りないときはこれまでどおり
+  eq("record の中身が足りなければ invalid payload",
+     post(ctx, { type: "record", team: TEAM, record: { id: 1 } }).error, "invalid payload");
+  eq("record 自体が無ければ invalid payload",
+     post(ctx, { type: "report", team: TEAM }).error, "invalid payload");
+}
+
 // ─────────── 結果 ───────────
 if (fails.length) {
   console.error("\n  ✗ " + fails.length + " 件失敗 / " + (pass + fails.length) + " 件中\n");
