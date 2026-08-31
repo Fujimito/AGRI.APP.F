@@ -416,6 +416,18 @@ flowchart TD
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
 
   <div class="fail">
+    <h3>札のしきい値を変えたのに、小さい圃場の札が永久に出なかった</h3>
+    <p class="ver">v9.00 で修正 / 実機の地図を動かして発覚</p>
+    <dl>
+      <dt>やりたかったこと</dt><dd>札を出す倍率を面積で分ける。一律の15だと、倍率15で 5a の圃場は一辺 <strong>5.6px</strong> なのに札は 60～90px あり、隣と重なって読めない。</dd>
+      <dt>機構</dt><dd>描画側の条件だけを <code>zoom &gt;= 基準 + step</code> にした。ところが<strong>差分描画の署名には全体の on/off しか入っていなかった</strong>。札の大きさは面積で決まり倍率では変わらないので、<strong>倍率を 16→17 にしても署名が1文字も変わらず、<code>diffDraw</code> が「変化なし」と判定して一度も描き直さない</strong>。</dd>
+      <dt>対処</dt><dd><code>fieldDrawSig</code> の第3引数を「地図全体で札を出すか」から<strong>「この圃場の札を今の倍率で出すか」</strong>に変えた。依存配列にも <code>zoom</code> を入れる。</dd>
+      <dt>教訓</dt><dd>08節の先頭に書いてある「<strong>描画が読むものは漏れなく署名に入れる</strong>」を、自分でもう一度踏んだ。今回は<strong>値ではなく「値を使う判定」が変わった</strong>ケース。署名には材料ではなく<strong>描画の結果を決めるものを全部</strong>入れる。</dd>
+      <dt>地図タブ側</dt><dd>こちらは差分描画をしておらず <code>clearLayers()</code> で丸ごと作り直す。依存に <code>zoom</code> をそのまま入れると拡大縮小のたびに全部作り直すので、<code>labelBandOf(zoom, 基準)</code>(0～3)を依存に入れて<strong>しきい値をまたいだときだけ</strong>走らせる。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>by が「作業した人」ではなく「最後に送った端末」になっていた</h3>
     <p class="ver">v8.99 で修正 / 利用者からの報告で発覚</p>
     <dl>

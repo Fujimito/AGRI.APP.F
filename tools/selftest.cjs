@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "labelBandOf", "LABEL_SIZE_BREAKS", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -1048,6 +1048,70 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.includes("by: w.by || recorder" + String.fromCharCode(10) + "    } : w);"), true);
 }
 
+// ── 面積ごとに札を出す倍率を分ける(v9.00) ────
+// 一律の 15 だと、小さい圃場の札が圃場より大きくなって隣と重なる。
+{
+  const sz = t.labelSizeOf, vis = t.fieldLabelVisible, Z = t.PROGRESS_LABEL_MIN_ZOOM;
+  eq("基準の倍率は 15", Z, 15);
+
+  eq("30a 以上は大", [sz(30).size, sz(30).step], ["lg", 0]);
+  eq("100a も大", [sz(100).size, sz(100).step], ["lg", 0]);
+  eq("10a は中(基準から1段)", [sz(10).size, sz(10).step], ["md", 1]);
+  eq("29.9a は中", sz(29.9).size, "md");
+  eq("9.9a は小(基準から2段)", [sz(9.9).size, sz(9.9).step], ["sm", 2]);
+  eq("5a は小", sz(5).size, "sm");
+  // 面積が無いものを小扱いにすると、寄っても名前が出ない圃場に見える
+  eq("面積未登録は大扱い", sz("").size, "lg");
+  eq("0 も大扱い", sz(0).size, "lg");
+  eq("壊れた値も大扱い", sz("あ").size, "lg");
+  eq("文字列の数字でも見る", sz("12").size, "md");
+
+  // 出すかどうか
+  eq("大きい圃場は 15 で出る", vis(true, 15, 30), true);
+  // 圃場登録タブの地図は基準が 16。基準を渡せること
+  eq("基準を 16 にすれば大は 16 から", [vis(true, 15, 30, 16), vis(true, 16, 30, 16)], [false, true]);
+  eq("基準 16 で小さい圃場は 18", [vis(true, 17, 5, 16), vis(true, 18, 5, 16)], [false, true]);
+  // 帯
+  eq("帯は 0～3", [t.labelBandOf(13, 15), t.labelBandOf(15, 15), t.labelBandOf(16, 15), t.labelBandOf(17, 15), t.labelBandOf(20, 15)], [0, 1, 2, 3, 3]);
+  eq("中くらいは 15 では出ない", vis(true, 15, 10), false);
+  eq("中くらいは 16 で出る", vis(true, 16, 10), true);
+  eq("小さい圃場は 16 では出ない", vis(true, 16, 5), false);
+  eq("小さい圃場は 17 で出る", vis(true, 17, 5), true);
+  eq("引いていれば大きい圃場でも出ない", vis(true, 14, 100), false);
+  // 手動の「札なし」が優先する
+  eq("札なしなら寄っても出さない", vis(false, 18, 100), false);
+
+  // 従来の振る舞いを変えていないこと
+  eq("全体の入切は今までどおり", [t.labelsVisible(true, 15), t.labelsVisible(true, 14), t.labelsVisible(false, 18)], [true, false, false]);
+
+  // 差分描画の署名に入っているか。入っていないと、倍率を変えても
+  // 一部の札だけ古いまま残る
+  {
+    const f = { id: 1, name: "あ", areaA: 5, polygon: [], updatedAt: "" };
+    const st = { status: "done", by: "", at: "", sprayedL: 0, areaA: "", prevDate: "" };
+    const big = { id: 1, name: "あ", areaA: 50, polygon: [], updatedAt: "" };
+    eq("大きさが違えば署名も違う",
+      t.fieldDrawSig(f, st, true, "a") !== t.fieldDrawSig(big, st, true, "a"), true);
+  }
+  // 描画側の配線
+  // 進捗地図(2) ＋ 圃場登録タブの地図(2) で 4か所
+  eq("4つの地図すべてで使う",
+    (src.match(/const lsz = labelSizeOf\(f\.areaA\);/g) || []).length, 4);
+  eq("進捗地図は基準 15",
+    (src.match(/showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM \+ lsz\.step/g) || []).length, 2);
+  eq("圃場登録タブは基準 16",
+    (src.match(/showLabel && zoom >= LABEL_MIN_ZOOM \+ lsz\.step/g) || []).length, 2);
+  eq("圃場登録タブは帯で描き直す",
+    (src.match(/labelBandOf\(zoom, LABEL_MIN_ZOOM\)/g) || []).length, 2);
+  eq("札の大きさを CSS に渡す", src.includes('"field-label fl-" + lsz.size'), true);
+  // ここが最初の実装で抜けていた。署名が全体の on/off だけだったため、
+  // 倍率を 16 → 17 に上げても小さい圃場が一度も描き直されなかった
+  eq("署名にも圃場ごとの判定を入れる",
+    (src.match(/fieldDrawSig\(f, st, showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM \+ labelSizeOf\(f\.areaA\)\.step, p\.areaUnitKey\)/g) || []).length, 2);
+  eq("倍率を変えたら描き直す",
+    (src.match(/labelsVisible\(p\.showLabels, zoom\), zoom, p\.onlyTarget/g) || []).length, 2);
+}
+
 // ── 札に出す記録者名(v8.97) ──────────────────
 {
   const L = t.labelByText;
@@ -1259,7 +1323,10 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   const L = src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas"));
   const G = src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab"));
   [["Leaflet", L], ["Google", G]].forEach(([name, body]) => {
-    eq(name + " は署名で比べる", body.includes("fieldDrawSig(f, st, showLabel, p.areaUnitKey)"), true);
+    // 第3引数は「この圃場の札を今の倍率で出すか」。全体の on/off を渡すと、
+    // 倍率を上げても署名が変わらず小さい圃場の札が永久に出ない(v9.00)
+    eq(name + " は署名で比べる",
+      body.includes("fieldDrawSig(f, st, showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + labelSizeOf(f.areaA).step, p.areaUnitKey)"), true);
     eq(name + " は差分を取る", body.includes("diffDraw(prevSig, nextSig)"), true);
     eq(name + " は消すぶんと作るぶんを分けて当てる",
       body.includes("d.drop.forEach") && body.includes("d.draw.forEach"), true);

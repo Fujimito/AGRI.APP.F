@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.99";
+const APP_VERSION = "v9.00";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -7529,7 +7529,9 @@ function GoogleMapTab(p) {
         startEditPoly(f);
       });
       fieldOverlaysRef.current.push(poly);
-      if (showLabel) {
+      // 小さい圃場の札はもう少し寄ってから出す(v9.00)
+      const lsz = labelSizeOf(f.areaA);
+      if (showLabel && zoom >= LABEL_MIN_ZOOM + lsz.step) {
         const c = f.center || polygonCenter(f.polygon);
         const label = new g.Marker({
           position: {
@@ -7545,7 +7547,8 @@ function GoogleMapTab(p) {
           label: {
             text: f.name + (f.crop ? " / " + f.crop : ""),
             color: "#fff",
-            fontSize: "12px",
+            // 面積で大きさを変える(v9.00)。Leaflet 側の CSS と揃えてある
+            fontSize: lsz.size === "lg" ? "13px" : lsz.size === "md" ? "12px" : "11px",
             fontWeight: "700",
             className: "gm-field-label"
           }
@@ -7577,7 +7580,8 @@ function GoogleMapTab(p) {
     // 拡大縮小のたびに全部の圃場を描き直すと、圃場が多い端末でカクツく。
     // zoom を使っているのは「札を出すかどうか」だけなので、
     // しきい値をまたいだときだけ描き直す。
-  }, [ready, p.fields, zoom >= LABEL_MIN_ZOOM, hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
+  // 帯(大だけ / 大・中 / 全部)が変わったときだけ描き直す(v9.00)
+  }, [ready, p.fields, labelBandOf(zoom, LABEL_MIN_ZOOM), hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
 
   // 作図中の頂点・線を再描画
   React.useEffect(() => {
@@ -8457,7 +8461,9 @@ function LeafletMapTab(p) {
         fillColor: st.fill,
         fillOpacity: st.opacity
       }).addTo(grp);
-      if (showLabel) {
+      // 小さい圃場の札はもう少し寄ってから出す(v9.00)
+      const lsz = labelSizeOf(f.areaA);
+      if (showLabel && zoom >= LABEL_MIN_ZOOM + lsz.step) {
         // 圃場名と面積を別の行にする。同じ行に並べると、
         // 名前に数字が入る圃場(「嘉島60」など)で面積と続きの数字に見える。
         // 名前は受け取った文字列でもあるので、必ずエスケープしてからHTMLに入れる。
@@ -8466,7 +8472,7 @@ function LeafletMapTab(p) {
         poly.bindTooltip(labelText, {
           permanent: true,
           direction: "center",
-          className: "field-label"
+          className: "field-label fl-" + lsz.size
         });
       }
       poly.on("click", () => {
@@ -8476,7 +8482,8 @@ function LeafletMapTab(p) {
     // 拡大縮小のたびに全部の圃場を描き直すと、圃場が多い端末でカクツく。
     // zoom を使っているのは「札を出すかどうか」だけなので、
     // しきい値をまたいだときだけ描き直す。
-  }, [ready, p.fields, zoom >= LABEL_MIN_ZOOM, hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
+  // 帯(大だけ / 大・中 / 全部)が変わったときだけ描き直す(v9.00)
+  }, [ready, p.fields, labelBandOf(zoom, LABEL_MIN_ZOOM), hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
 
   // 作図中ポリゴンの再描画
   React.useEffect(() => {
@@ -9575,9 +9582,20 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.99",
+    ver: "v9.00",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "🏷 札を出す倍率を、圃場の広さで分けました。大きい圃場(30a以上)は今までどおり、中くらい(10～30a)はもう一段、小さい圃場(10a未満)はもう二段寄ってから出ます",
+      "🔍 引いた状態では、札のほうが圃場より大きくなっていました。倍率15では 5a の圃場は一辺 5.6px、5a の圃場に 60～90px の札が付くため、隣と重なってどれがどれか分からなくなっていました",
+      "🔤 札の文字の大きさも広さで変えました(大 13px / 中 12px / 小 11px)。寄ったときに、どれが大きな圃場かが一目で分かります",
+      "※ 面積を登録していない圃場は「大」扱いで、今までどおり出ます。寄っても名前が出ない圃場ができないようにしています",
+      "※ 進捗地図と圃場登録タブの地図の両方に入れてあります。札が出始める倍率は地図ごとに違うので(進捗地図は15、圃場登録は16)、それぞれの基準から中は1段、小は2段寄ってからになります",
+      "🧪 検査を 466 → 496 件に増やしました"
+    ]
+  }, {
+    ver: "v8.99",
+    date: "2026-08",
     notes: [
       "🐞 端末ごとに違う作業者名が出ていた不具合を直しました。作業を送るときに、すでに付いている記録者名をその端末の名前で上書きしていたためです",
       "🔍 具体例: A が済ませた圃場を B が受け取り、B が数量を直すと、サーバーの名前が B に入れ替わりました。B の手元は A のままなので、A の画面には B、B の画面には A が出る状態になっていました",
@@ -10438,6 +10456,63 @@ const PROGRESS_LABEL_MIN_ZOOM = 15;
 // 手で消せるようにする(既定は従来どおり出す)。
 const labelsVisible = (on, zoom) => on !== false && zoom >= PROGRESS_LABEL_MIN_ZOOM;
 
+// ── 面積ごとに札を出す倍率を分ける ──
+//
+// 一律のしきい値(15)だと、小さい圃場の札が圃場より大きくなり、
+// 隣と重なってどれがどれか分からなくなる。
+//
+// 地図上で圃場が何pxになるかは倍率で決まる。
+// 地上分解能(m/px) = 156543.03 × cos(緯度) ÷ 2^倍率。
+// 熊本(北緯32.8度、cos≈0.84)で計算すると:
+//   倍率 14 = 8.03 m/px / 15 = 4.02 / 16 = 2.01 / 17 = 1.00 / 18 = 0.50
+// 圃場を正方形と見なした一辺は √(面積 a × 100) m なので:
+//   面積    一辺    倍率15   倍率16   倍率17
+//     5a    22.4m    5.6px   11.1px   22.3px
+//    10a    31.6m    7.9px   15.7px   31.5px
+//    30a    54.8m   13.6px   27.3px   54.6px
+//   100a   100.0m   24.9px   49.8px   99.6px
+// 札の幅は 60～90px ある。つまり倍率15 では 100a でさえ札のほうが大きい。
+//
+// それでも大きい圃場は従来どおり 15 で出す。引いた状態で
+// 「どのへんに何があるか」を見るのに使っているから。
+// 小さいものだけ先送りにする。
+//
+// 境目は日本の水田の常識に合わせた。
+//   30a 以上 = 大(基準區画の30a区画以上)     → 15
+//   10a 以上 = 中(1反～)                        → 16
+//   10a 未満 = 小                                → 17
+// 面積が未登録(空)のものは大扱いにする。出さないと
+// 「寄っても名前が出ない圃場がある」という見え方になる。
+// step は「その地図の基準の倍率から何段寄ってから出すか」。
+// 基準は地図ごとに違う(進捗地図 15 / 圃場登録タブ 16)ので、
+// ここに絶対の倍率を書かない。書くと片方の地図の振る舞いが変わる。
+const LABEL_SIZE_BREAKS = [
+  { min: 30, step: 0, size: "lg" }, // 大
+  { min: 10, step: 1, size: "md" }, // 中
+  { min: 0,  step: 2, size: "sm" }  // 小
+];
+const labelSizeOf = areaA => {
+  const a = parseFloat(areaA);
+  if (!isFinite(a) || a <= 0) return LABEL_SIZE_BREAKS[0]; // 未登録は大扱い
+  for (let i = 0; i < LABEL_SIZE_BREAKS.length; i++) {
+    if (a >= LABEL_SIZE_BREAKS[i].min) return LABEL_SIZE_BREAKS[i];
+  }
+  return LABEL_SIZE_BREAKS[LABEL_SIZE_BREAKS.length - 1];
+};
+// この圃場の札を今の倍率で出すか。
+// on は手動の入切(「🏷 札なし」)。これが優先する。
+// 今の倍率で「どこまでの大きさの札を出しているか」を返す。
+// 0 = 一つも出さない / 1 = 大だけ / 2 = 大・中 / 3 = 全部。
+// 圃場登録タブの地図は差分描画をしておらず丸ごと作り直すので、
+// 倍率をそのまま依存に入れると拡大縮小のたびに全部作り直してカクツく。
+// この帯を依存に入れれば、しきい値をまたいだときだけ走る。
+const labelBandOf = (zoom, base) => {
+  const n = Math.floor(zoom) - base + 1;
+  return n < 0 ? 0 : n > 3 ? 3 : n;
+};
+const fieldLabelVisible = (on, zoom, areaA, base) =>
+  on !== false && zoom >= (base === undefined ? PROGRESS_LABEL_MIN_ZOOM : base) + labelSizeOf(areaA).step;
+
 // ── 差分描画 ──
 //
 // 進捗地図は45秒ごとに取り直し、そのたびに全部の形と札を作り直していた。
@@ -10454,6 +10529,10 @@ const labelsVisible = (on, zoom) => on !== false && zoom >= PROGRESS_LABEL_MIN_Z
 // 利用者からは共有が壊れたのと見分けが付かないので、描画が読むものは
 // 漏れなく入れる。実績・記録者・入力日は色を変えないが、圃場をタップした
 // ときの吹き出しに出るので、これも入れる(落とすと吹き出しだけ古くなる)。
+// showLabel は「地図全体で札を出すか」ではなく、
+// **この圃場の札を今の倍率で出すか** を渡すこと(v9.00)。
+// 札を出す倍率は面積ごとに違うので、全体の on/off だけを入れると
+// 倍率を上げても署名が変わらず、小さい圃場の札が永久に出ない。
 const fieldDrawSig = (f, st, showLabel, areaUnitKey) => {
   const U = "␟";
   return [
@@ -10466,7 +10545,11 @@ const fieldDrawSig = (f, st, showLabel, areaUnitKey) => {
     // 前の日に済ませた日付。色は donePrev のまま変わらないが、吹き出しに
     // 出るので入れる。落とすと吹き出しの日付だけ古くなる(v8.95)
     st ? st.prevDate || "" : "",
+    // この圃場の札を出すかと、札の大きさ。面積で変わるので
+    // 全体の on/off だけでは足りない(v9.00)。落とすと、倍率を変えても
+    // 一部の札だけ古いまま残る
     showLabel ? "L" : "-",
+    showLabel ? labelSizeOf(f.areaA).size : "",
     areaUnitKey || "",
     f.name || "",
     f.areaA == null ? "" : f.areaA,
@@ -10709,7 +10792,7 @@ function ProgressLeafletCanvas(p) {
       const key = st ? st.status : "none";
       if (p.onlyTarget && key === "none") return;
       if (key !== "none") targetBounds.push(f.polygon);
-      const sig = fieldDrawSig(f, st, showLabel, p.areaUnitKey);
+      const sig = fieldDrawSig(f, st, showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + labelSizeOf(f.areaA).step, p.areaUnitKey);
       nextSig.set(id, sig);
       want.set(id, {
         f,
@@ -10742,7 +10825,10 @@ function ProgressLeafletCanvas(p) {
         fillColor: c.fill,
         fillOpacity: key === "none" ? 0.3 : 0.55
       }).addTo(grp);
-      if (showLabel) {
+      // 小さい圃場の札はもう少し寄ってから出す(v9.00)。
+      // 引いた状態では札のほうが圃場より大きく、隣と重なって読めない
+      const lsz = labelSizeOf(f.areaA);
+      if (showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + lsz.step) {
         // 圃場名は他の端末から受け取った文字列でもあるので、必ずエスケープしてから
         // 札のHTMLに入れる(そのまま入れるとXSSになる)
         // 地図タブと同じ形。名前と面積を行で分ける。
@@ -10753,7 +10839,9 @@ function ProgressLeafletCanvas(p) {
         poly.bindTooltip('<span class="fl-box"><span class="fl-name">' + escapeHtml((c.mark ? c.mark + " " : "") + f.name) + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>' + (byText ? '<span class="fl-by">' + escapeHtml(byText) + '</span>' : '') + '</span>', {
           permanent: true,
           direction: "center",
-          className: "field-label"
+          // 大きさで文字の大きさも変える。同じ大きさだと、寄ったときに
+          // 小さい圃場の札だけが目立って大きな圃場を見失う
+          className: "field-label fl-" + lsz.size
         });
       }
       poly.on("click", () => p.onSelect({
@@ -10775,7 +10863,11 @@ function ProgressLeafletCanvas(p) {
     }
     // 札の出し分けが変わったときだけ描き直す。zoom そのものを入れると、
     // 少し動かすたびに全部の形を作り直すことになる
-  }, [ready, p.fields, p.statusByField, labelsVisible(p.showLabels, zoom), p.onlyTarget, p.areaUnitKey]);
+  // zoom をそのまま入れているのは、札を出す倍率が面積ごとに違うから(v9.00)。
+  // labelsVisible だけだと 15 をぶないと走らず、16・17 で出るはずの札が出ない。
+  // 倍率を変えるたびに走るが、変わらない圃場は署名が同じなので触らない
+  // (200圃場で 0.40ms の実測あり)。
+  }, [ready, p.fields, p.statusByField, labelsVisible(p.showLabels, zoom), zoom, p.onlyTarget, p.areaUnitKey]);
   // 地図を作ったあとで入れ物の幅が決まることがある。
   // そのとき地図は 0px のままで、タイルも形も出ない。
   // 他のタブを往復すると直るのは、その拍子に大きさが測り直されるから。
@@ -11054,7 +11146,7 @@ function ProgressGoogleCanvas(p) {
       const key = st ? st.status : "none";
       if (p.onlyTarget && key === "none") return;
       if (key !== "none") targetBounds.push(f.polygon);
-      nextSig.set(id, fieldDrawSig(f, st, showLabel, p.areaUnitKey));
+      nextSig.set(id, fieldDrawSig(f, st, showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + labelSizeOf(f.areaA).step, p.areaUnitKey));
       want.set(id, {
         f,
         st,
@@ -11096,7 +11188,8 @@ function ProgressGoogleCanvas(p) {
         st: st || null
       }));
       mine.push(poly);
-      if (showLabel) {
+      const lsz = labelSizeOf(f.areaA);
+      if (showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + lsz.step) {
         const ctr = f.center || polygonCenter(f.polygon);
         // 透明アイコン+ラベルだけのマーカー。Googleマップ側は文字列として
         // 扱うのでHTMLにはならない(Leaflet側のエスケープに当たる処理は不要)
@@ -11113,7 +11206,8 @@ function ProgressGoogleCanvas(p) {
           label: {
             text: (c.mark ? c.mark + " " : "") + f.name,
             color: "#fff",
-            fontSize: "12px",
+            // 面積で大きさを変える(v9.00)。Leaflet 側の CSS と揃えてある
+            fontSize: lsz.size === "lg" ? "13px" : lsz.size === "md" ? "12px" : "11px",
             fontWeight: "700",
             className: "gm-field-label"
           }
@@ -11176,7 +11270,11 @@ function ProgressGoogleCanvas(p) {
     }
     // 札の出し分けが変わったときだけ描き直す。zoom そのものを入れると、
     // 少し動かすたびに全部の形を作り直すことになる
-  }, [ready, p.fields, p.statusByField, labelsVisible(p.showLabels, zoom), p.onlyTarget, p.areaUnitKey]);
+  // zoom をそのまま入れているのは、札を出す倍率が面積ごとに違うから(v9.00)。
+  // labelsVisible だけだと 15 をぶないと走らず、16・17 で出るはずの札が出ない。
+  // 倍率を変えるたびに走るが、変わらない圃場は署名が同じなので触らない
+  // (200圃場で 0.40ms の実測あり)。
+  }, [ready, p.fields, p.statusByField, labelsVisible(p.showLabels, zoom), zoom, p.onlyTarget, p.areaUnitKey]);
   // 地図を作ったあとで入れ物の幅が決まることがある。
   // そのとき地図は 0px のままで、タイルも形も出ない。
   // 他のタブを往復すると直るのは、その拍子に大きさが測り直されるから。
