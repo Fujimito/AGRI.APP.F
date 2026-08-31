@@ -461,6 +461,44 @@ const F2 = {
   }
 }
 
+// ── 15b. 実績入力の「刻」(v8.97) ──
+// 同じ日に2人が同じ圃場を済ませたとき、どちらが先かを
+// 日付だけでは決められない。刻まで入った値を別に返す。
+{
+  const ctx = makeContext({});
+  const T = "2026-08-26T02:34:56.000Z";
+  post(ctx, { type: "pushWorks", team: TEAM, items: [{
+    id: 900, workDate: "2026-08-26", fieldId: 1, fieldName: "A", status: "done",
+    sprayedL: 20, chems: [], by: "Aさん",
+    reportedAt: T, updatedAt: "2026-08-26T03:00:00.000Z",
+  }] });
+
+  const sh = ctx.SHEET_STATE.getSheetByName("作業");
+  // 列 14(実績入力日時)の書式を固定していないと、シートが ISO を
+  // Date に変換してタイムゾーンがずれる。v8.96 までは抜けていた
+  // Date と ISO 文字列は JSON にすると同じに見えるので、型も見る。
+  // これが無いと、書式を外しても検査が通ってしまう
+  eq("実績入力日時の列は文字列のまま", sh.getRange(2, 14).getValue(), T);
+  eq("実績入力日時の列は Date にされない", typeof sh.getRange(2, 14).getValue(), "string");
+
+  const pr = post(ctx, { type: "progress", team: TEAM, date: "2026-08-26" });
+  eq("progress は刻まで入った値も返す", pr.items[0].atTime, T);
+  eq("日付のほうは丸めたまま", pr.items[0].at, "2026-08-26");
+  eq("記録者名も返す", pr.items[0].by, "Aさん");
+
+  const all = post(ctx, { type: "pull", team: TEAM, since: "" });
+  eq("pull の実績入力日は日付のまま", all.works[0].reportedAt, "2026-08-26");
+  eq("pull は刻まで入った値も返す", all.works[0].reportedAtTime, T);
+
+  // 日付しか入っていない古い行でも落ちない
+  {
+    const sh2 = ctx.SHEET_STATE.getSheetByName("作業");
+    sh2.getRange(2, 14).setValue("2026-08-26");
+    const pr2 = post(ctx, { type: "progress", team: TEAM, date: "2026-08-26" });
+    eq("古い行は日付がそのまま刻の位置に入る", pr2.items[0].atTime, "2026-08-26");
+  }
+}
+
 // ── 16. doGet ──
 {
   const ctx = makeContext({ SHARED_SECRET: "x" });

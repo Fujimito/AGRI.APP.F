@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "labelByText", "summarizeByRecorder", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -493,8 +493,9 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.includes('v.status = v.doneCount === v.total ? "done" : "planned";'), true);
   eq("大きい方を採る古い判定が残っていない",
     src.indexOf("PROGRESS_RANK[st.status] > PROGRESS_RANK[cur.status]"), -1);
-  eq("吹き出しの中身は実績のあるほうを優先", src.includes("if (r > cur._rank) {"), true);
+  eq("吹き出しの中身は実績のあるほうを優先", src.includes("r > cur._rank ||"), true);
   eq("内部の順位は外に出さない", src.includes("delete v._rank;"), true);
+  eq("比較用の刻も外に出さない", src.includes("delete v._at;"), true);
   // 取得範囲は選んでいる日を含めた直近3日(Code.gs は元から範囲に対応している)
   eq("取得範囲をさかのぼる",
     src.includes("daysBefore(p.workDate, PROGRESS_CARRY_DAYS - 1)"), true);
@@ -766,6 +767,26 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     eq("今日の予定に無く前日に済なら青", st(m, 1), "donePrev");
     eq("いつ済んだかを出す", m.get("1").prevDate, "2026-08-28");
     eq("吹き出しの入力日はその日にする", m.get("1").at, "2026-08-28");
+    // 青の圃場でも札に名前を出す(v8.97)。出ないと青だけ名無しになる
+    eq("前日に済ませた人の名前も出す", m.get("1").by, "藤本");
+  }
+  {
+    const m = f([
+      E(1, "2026-08-27", "done", { by: "古い人" }),
+      E(1, "2026-08-28", "done", { by: "新しい人" })
+    ], day);
+    eq("何日か済んでいたら新しい日の人を出す", m.get("1").by, "新しい人");
+  }
+  {
+    const m = f([E(1, "2026-08-28", "done", { by: "" })], day);
+    eq("名前が無い前日分でも落ちない", m.get("1").by, "");
+  }
+  {
+    const m = f([
+      E(1, "2026-08-28", "done", { by: "前日の人" }),
+      E(1, day, "done", { by: "今日の人" })
+    ], day);
+    eq("今日の実績があれば今日の人を出す", m.get("1").by, "今日の人");
   }
   {
     const m = f([E(1, "2026-08-27", "done"), E(1, "2026-08-28", "done")], day);
@@ -802,11 +823,177 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     const m = f([E(1, "2026-08-28", "done", { pending: true })], day);
     eq("前日ぶんの未送信は今日の印にしない", m.get("1").pending, false);
   }
+  // 重複して済ませたとき、先に済ませた人を採る(v8.97)
+  // 2チームで回っていて同じ圃場を二重に済ませることがある。
+  // 受信の順で名前が入れ替わると、見るたびに札の名前が変わる。
+  {
+    const m = f([
+      E(1, day, "done", { by: "Bさん", atTime: "2026-08-29T05:00:00.000Z" }),
+      E(1, day, "done", { by: "Aさん", atTime: "2026-08-29T01:00:00.000Z" })
+    ], day);
+    eq("あとから来ても、先に済ませた人を採る", m.get("1").by, "Aさん");
+  }
+  {
+    const m = f([
+      E(1, day, "done", { by: "Aさん", atTime: "2026-08-29T01:00:00.000Z" }),
+      E(1, day, "done", { by: "Bさん", atTime: "2026-08-29T05:00:00.000Z" })
+    ], day);
+    eq("順番を逆にしても同じ結果になる", m.get("1").by, "Aさん");
+  }
+  {
+    const m = f([
+      E(1, day, "done", { by: "Bさん" }),
+      E(1, day, "done", { by: "Aさん" })
+    ], day);
+    eq("刻が無い古いデータは、先に来たほうを残す", m.get("1").by, "Bさん");
+  }
+  {
+    const m = f([
+      E(1, day, "done", { by: "Bさん" }),
+      E(1, day, "done", { by: "Aさん", atTime: "2026-08-29T05:00:00.000Z" })
+    ], day);
+    eq("刻を持っているほうを採る(空を「先」と見なさない)", m.get("1").by, "Aさん");
+  }
+  {
+    const m = f([
+      E(1, day, "planned", { by: "Aさん", atTime: "2026-08-29T01:00:00.000Z" }),
+      E(1, day, "done", { by: "Bさん", atTime: "2026-08-29T05:00:00.000Z" })
+    ], day);
+    eq("未実施が早くても、実績のあるほうが勝つ", m.get("1").by, "Bさん");
+    eq("色は v8.83 の規則のまま(1件でも未なら未実施)", st(m, 1), "planned");
+  }
+  {
+    const m = f([
+      E(1, day, "done", { by: "Aさん", atTime: "2026-08-29T01:00:00.000Z", sprayedL: 30 }),
+      E(1, day, "done", { by: "Bさん", atTime: "2026-08-29T05:00:00.000Z", sprayedL: 99 })
+    ], day);
+    eq("数量も先の作業のものに揃える", m.get("1").sprayedL, 30);
+  }
   // 内部の作業用の値を外に出さない
   {
     const m = f([E(1, day, "done")], day);
     eq("_rank は外に出さない", "_rank" in m.get("1"), false);
+    eq("_at も外に出さない", "_at" in m.get("1"), false);
   }
+  // 呼び側が刻を渡しているか。渡さなければ上の規則は動かない
+  eq("サーバーから来た刻を渡す", src.includes("atTime: it.atTime || \"\","), true);
+  eq("手元の作業の刻も渡す", src.includes("atTime: w.reportAt || \"\","), true);
+}
+
+// ── 記録者ごとの実績集計(v8.97) ──────────────
+// 2チームで回ったあと、どちらがどこをやったのかを見る。
+{
+  const sum = t.summarizeByRecorder;
+  const DAY = "2026-08-29";
+  const W = (fieldId, by, fromTeam, reported, sprayedL, reportAreaA, workDate) => ({
+    id: fieldId + ":" + (by || "-"), fieldId, workDate: workDate || DAY,
+    by, fromTeam: !!fromTeam, reported: !!reported,
+    sprayedL, reportAreaA
+  });
+  const areaOf = () => 10;
+
+  {
+    const r = sum([
+      W(1, null, false, true, 20, 12),
+      W(2, "Bさん", true, true, 30, 15)
+    ], DAY, "Aさん", areaOf);
+    eq("記録者で分かれる", r.length, 2);
+    eq("手元の作業はこの端末の名前", r[0].by, "Aさん");
+    eq("他端末の作業はその端末の名前", r[1].by, "Bさん");
+  }
+  {
+    const r = sum([
+      W(1, "A", false, true, 20, 12),
+      W(2, "A", false, true, 30, 15),
+      W(3, "B", true, true, 5, 5)
+    ], DAY, "A", areaOf);
+    eq("圃場数の多い順", [r[0].by, r[1].by], ["A", "B"]);
+    eq("圃場数を数える", r[0].fieldCount, 2);
+    eq("面積を足す", r[0].areaA, 27);
+    eq("散布量を足す", r[0].sprayedL, 50);
+  }
+  {
+    const r = sum([W(1, "A", false, false, 0, 12)], DAY, "A", areaOf);
+    eq("未実施は数えない", r.length, 0);
+  }
+  {
+    const r = sum([W(1, "A", false, true, 20, 12, "2026-08-28")], DAY, "A", areaOf);
+    eq("別の日は数えない", r.length, 0);
+  }
+  {
+    const r = sum([W(1, "A", false, true, 20, "")], DAY, "A", areaOf);
+    eq("実績面積が無ければ圃場の登録面積を使う", r[0].areaA, 10);
+  }
+  {
+    const r = sum([W(1, "", true, true, 20, 12)], DAY, "A", areaOf);
+    eq("名前の無い作業も落とさない", [r.length, r[0].by], [1, "(名前なし)"]);
+  }
+  {
+    const r = sum([
+      W(1, "い", false, true, 1, 1), W(2, "あ", true, true, 1, 1)
+    ], DAY, "い", areaOf);
+    eq("同数なら名前順(見るたびに入れ替わらない)", [r[0].by, r[1].by], ["あ", "い"]);
+  }
+  {
+    eq("作業が無ければ空", sum([], DAY, "A", areaOf).length, 0);
+    eq("works が undefined でも落ちない", sum(undefined, DAY, "A", areaOf).length, 0);
+    eq("areaOf が無くても落ちない",
+      sum([W(1, "A", false, true, 5, "")], DAY, "A", null)[0].areaA, 0);
+  }
+  // 呼び側の配線。ここが違うと、関数が正しくても画面には出ない
+  eq("作業タブでその日を集計する",
+    src.includes("summarizeByRecorder(p.works, p.workDate, p.recorder,"), true);
+  eq("面積は圃場マスタから引く",
+    src.includes("w => p.resolveWork(w).areaA)"), true);
+  eq("集計が空の日は表を出さない",
+    src.includes("recSummary.length > 0 &&"), true);
+  eq("集計の CSV 書き出しがある", src.includes("exportSummaryCSV"), true);
+  eq("CSV は数式インジェクション対策をかける",
+    src.includes('if (/^[=+' + String.fromCharCode(92) + '-@]/.test(t)) t = "' + String.fromCharCode(39) + '" + t;'), true);
+  eq("Excel 向けに BOM を付ける", src.includes('"' + String.fromCharCode(92) + 'uFEFF" + lines.join'), true);
+}
+
+// ── 札に出す記録者名(v8.97) ──────────────────
+{
+  const L = t.labelByText;
+  eq("実施済みなら出す", L("done", "藤本"), "藤本");
+  eq("前日までに済でも出す", L("donePrev", "藤本"), "藤本");
+  eq("未実施には出さない", L("planned", "藤本"), "");
+  eq("対象外にも出さない", L("none", "藤本"), "");
+  eq("名前が空なら行を作らない", L("done", ""), "");
+  eq("空白だけの名前も行を作らない", L("done", "   "), "");
+  eq("名前が無い(undefined)でも落ちない", L("done", undefined), "");
+  eq("前後の空白は落とす", L("done", " 藤本 "), "藤本");
+  // 描画側。Leaflet と Google の両方で使うこと
+  eq("Leaflet の札で使う", src.includes('labelByText(key, st && st.by)'), true);
+  eq("Leaflet はエスケープしてから入れる(XSS)",
+    src.includes("escapeHtml(byText)") && src.includes("fl-by"), true);
+  eq("Google 側でも使う(2か所)",
+    (src.match(/labelByText\(key, st && st\.by\)/g) || []).length, 2);
+  eq("差分描画の署名に記録者名が入っている(入っていないと札が古いまま)",
+    src.includes('st ? st.by || "" : "",'), true);
+}
+
+// ── 実施した人の名前(v8.97) ────────────────────
+// 他の端末がやった作業を受け取っても、地図ではこの端末の記録者名で
+// 上書きされていた。吹き出しの名前が全部自分になる。
+{
+  const by = t.workBy;
+  eq("他端末の作業はその端末の記録者名を使う",
+    by({ fromTeam: true, by: "Bさん" }, "Aさん"), "Bさん");
+  eq("手元で作った作業はこの端末の記録者名",
+    by({ fromTeam: false }, "Aさん"), "Aさん");
+  eq("他端末なのに名前が空なら空のまま(偵称しない)",
+    by({ fromTeam: true, by: "" }, "Aさん"), "");
+  eq("by を持っている手元の作業はそちらを優先",
+    by({ by: "Cさん" }, "Aさん"), "Cさん");
+  eq("作業が無ければ空", by(null, "Aさん"), "");
+  eq("記録者名が未設定でも落ちない", by({}, undefined), "");
+  // 呼び側。ここを p.recorder に戻すと上の修正が無効になる
+  eq("地図の状態は workBy を通す",
+    src.includes("by: workBy(w, p.recorder),"), true);
+  eq("p.recorder を直に入れていない",
+    src.includes('by: p.recorder || "",'), false);
 }
 
 // ── 吹き出しが対象にする作業(v8.96) ──────────────────

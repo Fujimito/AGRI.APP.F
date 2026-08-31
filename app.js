@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.96";
+const APP_VERSION = "v8.97";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -768,6 +768,67 @@ const geoHintFor = (state, hasFix) => {
     guide: false
   };
 };
+// その作業を実施した人の名前を返す。
+//
+// 他の端末がやった作業は fromTeam で受け取り、そのときの記録者名を
+// w.by に持っている。ここを見ずにこの端末の記録者名を入れると、
+// 人がやった作業まで自分の名前で出る(v8.97 で直した)。
+// 地図の状態は手元の作業をサーバーの内容の上に重ねるので、
+// ここを間違えるとサーバーから届いた正しい名前が潰される。
+//
+// 自分で作った作業には by を持たせていない(送るときに付けている)ので、
+// そのときだけこの端末の記録者名を使う。
+const workBy = (w, recorder) => {
+  if (!w) return "";
+  if (w.fromTeam) return String(w.by || "");
+  return String(w.by || recorder || "");
+};
+// その日の実績を記録者ごとにまとめる。
+//
+// 2チームで回ったあと、どちらがどこをやったのかを見るためのもの。
+// チームコードは端末に1つしか無く、一緒に回る端末は同じコードを使う。
+// よって班を分ける鍵はチームコードではなく記録者名になる。
+// 記録者名は端末ごとの自由入力なので、表記がぶれると別の行になる。
+// そこはアプリでは直せないので、合わせるなら名前のほうを揃えてもらう。
+//
+// 数えるのは実績のある作業(reported)だけ。未実施を混ぜると
+// 「作業した圃場の集計」という見出しと合わない。
+// 面積は実績面積(reportAreaA)を優先し、無ければ圃場の登録面積を使う。
+//
+// areaOf は圃場の登録面積を返す関数。ここで圃場一覧を直に探すと、
+// 検査のたびに圃場一覧を作らなければならなくなるので外から渡す。
+const summarizeByRecorder = (works, day, recorder, areaOf) => {
+  const m = new Map();
+  (works || []).forEach(w => {
+    if (String(w.workDate || "") !== String(day)) return;
+    if (!w.reported) return;
+    const name = workBy(w, recorder) || "(名前なし)";
+    let cur = m.get(name);
+    if (!cur) {
+      cur = { by: name, fieldCount: 0, areaA: 0, sprayedL: 0 };
+      m.set(name, cur);
+    }
+    cur.fieldCount++;
+    const a = parseFloat(w.reportAreaA);
+    const fa = areaOf ? parseFloat(areaOf(w)) : NaN;
+    cur.areaA += isFinite(a) && a > 0 ? a : (isFinite(fa) ? fa : 0);
+    const l = parseFloat(w.sprayedL);
+    cur.sprayedL += isFinite(l) ? l : 0;
+  });
+  // 圃場数の多い順。同数なら名前順で、見るたびに入れ替わらないようにする
+  return Array.from(m.values()).sort((a, b) =>
+    b.fieldCount - a.fieldCount || (a.by < b.by ? -1 : a.by > b.by ? 1 : 0));
+};
+// 札に出す記録者名を決める。出さないときは空文字列。
+//
+// 実施済み(緑)と前日までに済(青)のときだけ出す。
+// 未実施には記録者名が入っていない(散布済を押したときに付く)ので、
+// 常に出すと赤い圃場の札だけ空行になる。また札は圃場の数だけ作るので、
+// 出す行を増やすほど描画が重くなる(200圃場・札ありで 1回 173.7ms の実測あり)。
+const labelByText = (key, by) => {
+  if (key !== "done" && key !== "donePrev") return "";
+  return String(by == null ? "" : by).trim();
+};
 // ── 圃場ごとの色を決める ──
 //
 // 170圃場を1日で回りきれないとき、翌日は「まだ済んでいない圃場だけ」を
@@ -804,7 +865,9 @@ const foldProgress = (entries, day) => {
         total: 0,        // その日の作業の件数
         doneCount: 0,    // そのうち済んだ件数
         prevDate: "",    // 前の日に済ませた日付(吹き出しに出す)
-        _rank: -1
+        prevBy: "",      // その日に済ませた人
+        _rank: -1,
+        _at: ""          // 採用した作業の実績入力時刻(先後の比較用)
       };
       m.set(key, cur);
     }
@@ -813,10 +876,21 @@ const foldProgress = (entries, day) => {
       cur.total++;
       if (e.status === "done") cur.doneCount++;
       if (e.pending) cur.pending = true;
-      // 吹き出しに出す中身は、実績のあるほうを優先する
+      // 吹き出しと札に出す中身を選ぶ。
+      //
+      // まず実績のあるほう(done)を優先する。
+      // 同じ done が2件並んだときは、先に済ませたほうを採る。
+      // 2チームで回っていて同じ圃場を二重に済ませたとき、札に出る名前が
+      // 受信の順(シートの行順)で入れ替わると、見るたびに名前が変わる。
+      // atTime は刻まで入った ISO。古いデータには無いので、無いものは
+      // 「先」とは見なさず、先に来たものを残す(今までの振る舞い)。
       const r = PROGRESS_RANK[e.status] || 0;
-      if (r > cur._rank) {
+      const eAt = String(e.atTime || "");
+      const better = r > cur._rank ||
+        (r === cur._rank && eAt && (!cur._at || eAt < cur._at));
+      if (better) {
         cur._rank = r;
+        cur._at = eAt;
         cur.by = e.by || "";
         cur.at = e.at || "";
         cur.sprayedL = e.sprayedL || 0;
@@ -828,7 +902,12 @@ const foldProgress = (entries, day) => {
     // 入っていない以上その日の話であって、今日の地図で赤くするものではない
     if (e.status !== "done") return;
     const d = String(e.workDate || "");
-    if (d > cur.prevDate) cur.prevDate = d;
+    if (d > cur.prevDate) {
+      cur.prevDate = d;
+      // 済ませた人の名前も拾う(v8.97)。これが無いと、青の圃場だけ
+      // 札に名前が出ない。一番新しい日のものを採る
+      cur.prevBy = e.by || "";
+    }
   });
   m.forEach((v, key) => {
     if (v.total > 0) {
@@ -837,14 +916,17 @@ const foldProgress = (entries, day) => {
     } else if (v.prevDate) {
       v.status = "donePrev";
       // 前の日に済んだものは、その日を入力日として見せる。
-      // 今日の実績は無いので、数量や記録者は出さない
+      // 今日の実績は無いので数量は出さないが、済ませた人の名前は出す。
+      // 青の圃場で「誰がやったのか」が分からないと、札の意味が半分になる(v8.97)
       v.at = v.prevDate;
+      v.by = v.prevBy || "";
     } else {
       // 今日の予定にも無く、前の日にも済んでいない。地図には出さない
       m.delete(key);
       return;
     }
     delete v._rank;
+    delete v._at;
   });
   return m;
 };
@@ -1893,6 +1975,7 @@ function App() {
           reportAreaA: "",
           reportMemo: "",
           reportDate: "",
+          reportAt: "",
           reportSynced: false,
           // 既にシートへ「散布済」で送ってあるなら、取り消しも送らないと
           // アプリは未実施・シートは散布済という食い違いが黙って残る
@@ -1907,7 +1990,10 @@ function App() {
         // 散布量はここでは入れない。0のままでも「終わった」ことは伝わる
         sprayedL: parseFloat(x.sprayedL) || 0,
         reportAreaA: parseFloat(f.areaA) || "",
-        reportDate: today()
+        reportDate: today(),
+        // 実施した刻(ISO)。同じ日に2人が同じ圃場を済ませたとき、
+        // どちらが先かを決めるのに使う。reportDate は日付しか無く決められない(v8.97)
+        reportAt: nowIso()
       };
     }));
     // 進捗マップの色をその場で他の端末へ届ける。圏外なら未送信のまま残る
@@ -2076,7 +2162,9 @@ function App() {
       // 散布面積は圃場マスタの面積をそのまま記録する(実績入力では面積を入力させない)
       reportAreaA: parseFloat(resolveWork(w).areaA) || "",
       reportMemo: rep.memo || "",
-      reportDate: today()
+      reportDate: today(),
+      // 後から数量を直しても、最初に済ませた刻は動かさない(v8.97)
+      reportAt: w.reportAt || nowIso()
     } : w);
     setWorksSave(next);
     flash("実績を保存しました。作業終了後に一括送信してください");
@@ -2133,6 +2221,7 @@ function App() {
         reportAreaA: parseFloat(f.areaA) || "",
         reportMemo: (rep.memo ? rep.memo + " " : "") + "【連続散布 " + names + " 合計" + fmt(totalSprayed, 2) + "L を面積比按分】",
         reportDate: today(),
+        reportAt: w.reportAt || nowIso(),
         flightGroupId: groupId
       };
     });
@@ -2514,7 +2603,8 @@ function App() {
       chemText: (w.chems || []).map(c => (c.name || "(無名)") + "(" + (c.ratio || "?") + "倍)").join(" / "),
       by: recorder,
       deviceId,
-      reportedAt: w.reported ? w.reportDate || "" : "",
+      // 刻まで入った ISO を優先する。古いデータには日付しか無い(v8.97)
+      reportedAt: w.reported ? w.reportAt || w.reportDate || "" : "",
       updatedAt: w.updatedAt || "",
       // ここからは v8.58。受け取った端末が予定を組み直せるだけの中身。
       // 要約(薬剤数・薬剤内容の文字列)だけだと、希釈倍率も量も戻せない。
@@ -2547,6 +2637,7 @@ function App() {
     reportAreaA: it.reportAreaA || "",
     reportMemo: "",
     reportDate: ymd(it.reportedAt),
+    reportAt: String(it.atTime || it.reportedAt || ""),
     seq: it.seq === "" || it.seq === undefined ? "" : Number(it.seq),
     // 台帳(「防除記録」シート)へ送るのは、その作業をした端末の役目とする。
     // 受け取っただけの端末でも未送信扱いにすると、全員の画面に
@@ -3995,6 +4086,27 @@ function WorkTab(p) {
   // 集計バーは「圃場数・合計面積・合計薬液量」なので、実績入力済みも含めた
   // その日のリスト全体で集計する(見出しの「合計」と中身を一致させる)
   const sumArea = dayList.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
+  // その日の実績を記録者ごとにまとめる(v8.97)。
+  // 2チームで回ったとき、どちらがどこをやったのかを見る
+  const recSummary = summarizeByRecorder(p.works, p.workDate, p.recorder, w => p.resolveWork(w).areaA);
+  const exportSummaryCSV = () => {
+    // 圃場名・記録者名は自由入力なので、CSV の囲みと
+    // 数式インジェクション対策を exportCSV と同じやり方でかける
+    const cell = v => {
+      let t = String(v == null ? "" : v);
+      if (/^[=+\-@]/.test(t)) t = "'" + t;
+      return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+    };
+    const head = ["作業日", "記録者", "圃場数", "合計面積(a)", "合計散布量(L)"];
+    const lines = [head.join(",")].concat(recSummary.map(r =>
+      [p.workDate, r.by, r.fieldCount, Math.round(r.areaA * 100) / 100, Math.round(r.sprayedL * 100) / 100].map(cell).join(",")));
+    const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "実績集計_" + p.workDate + ".csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
   // AgriNote 転記やタンク補給の計算と同じ sprayVolumeL を使う。
   // 以前は実績入力後も予定量を足していたため、転記画面の数字と合わなかった
   const sumLiters = dayList.reduce((s, w) => s + sprayVolumeL(w), 0);
@@ -5212,7 +5324,84 @@ function WorkTab(p) {
       ...S.smallSecondary,
       opacity: history.length ? 1 : 0.4
     }
-  }, "印刷"))), /*#__PURE__*/React.createElement("div", {
+  }, "印刷"))), recSummary.length > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 10,
+      padding: "8px 10px",
+      background: "#F7F9F5",
+      border: "1px solid #DCE5D6",
+      borderRadius: 8
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "#3B4A38"
+    }
+  }, dateLabel(p.workDate), " の実績(記録者ごと)"), /*#__PURE__*/React.createElement("button", {
+    onClick: exportSummaryCSV,
+    style: S.smallSecondary,
+    className: "no-print"
+  }, "CSV")), /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: "100%",
+      borderCollapse: "collapse",
+      fontSize: 12
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, ["記録者", "圃場", "面積", "散布量"].map((h, i) => /*#__PURE__*/React.createElement("th", {
+    key: h,
+    style: {
+      textAlign: i === 0 ? "left" : "right",
+      padding: "3px 4px",
+      borderBottom: "1px solid #CBD6C4",
+      color: "#5B6B57",
+      fontWeight: 700
+    }
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, recSummary.map(r => /*#__PURE__*/React.createElement("tr", {
+    key: r.by
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: "3px 4px",
+      borderBottom: "1px solid #E6ECE2",
+      fontWeight: 700
+    }
+  }, r.by), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: "3px 4px",
+      borderBottom: "1px solid #E6ECE2",
+      textAlign: "right"
+    },
+    className: "num"
+  }, r.fieldCount), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: "3px 4px",
+      borderBottom: "1px solid #E6ECE2",
+      textAlign: "right"
+    },
+    className: "num"
+  }, dispArea(r.areaA, p.areaUnitKey), " ", areaSuffix(p.areaUnitKey)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: "3px 4px",
+      borderBottom: "1px solid #E6ECE2",
+      textAlign: "right"
+    },
+    className: "num"
+  }, fmt(r.sprayedL, 2), " L"))))), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "6px 0 0",
+      fontSize: 11,
+      color: "#6B7A66"
+    }
+  }, "実績を入れた作業だけを数えています。名前は各端末の「記録者名」で、表記が違うと別の行になります")), /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.cardLabel,
       display: "none"
@@ -9322,9 +9511,20 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.96",
+    ver: "v8.97",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "👤 進捗地図の札に、散布を済ませた人の名前を出すようにしました。実施済(緑)と前日までに済(青)のときだけ出ます。未実施には名前が入っていないので出しません",
+      "🐞 これまで吹き出しに出ていた記録者名が、他の端末がやった作業でも自分の名前になっていた不具合を直しました。受け取った名前をこの端末の記録者名で上書きしていました",
+      "🕑 同じ日に2人が同じ圃場を済ませたときは、先に済ませたほうの名前を出します。これまでは実績の日付しか保存しておらず先後を決められなかったので、刻まで保存するようにしました。※スプレッドシート側の Code.gs を差し替えて再デプロイしてください",
+      "🧮 作業タブの「記録」に、その日の実績を記録者ごとにまとめた表(圃場数・合計面積・合計散布量)を追加しました。「CSV」で書き出せます。分ける鍵は各端末の「記録者名」なので、表記が違うと別の行になります",
+      "🐞 「作業」シートの実績入力日時の列だけ書式を固定していなかったのを直しました。入れた日付がシート側で日付型に変換されていました",
+      "🧪 検査を 411 件 → 432 件、シート側を 127 件 → 135 件に増やしました"
+    ]
+  }, {
+    ver: "v8.96",
+    date: "2026-08",
     notes: [
       "🐞 v8.95 の不具合を修正しました。進捗地図で圃場をタップしても「✓ 散布済にする」が出ない、押しても色が変わらない、という状態でした。現場でご迷惑をおかけしました",
       "🔍 原因: v8.95 で進捗の取得範囲を3日に広げたとき、吹き出しが対象の作業を探す条件まで3日前になっていました。引き継いで今日入れた圃場は3日前に作業が無いのでボタンが出ず、出た圃場でも3日前の作業の実績が変わるだけで今日の色は動きませんでした",
@@ -10462,7 +10662,10 @@ function ProgressLeafletCanvas(p) {
         // 札のHTMLに入れる(そのまま入れるとXSSになる)
         // 地図タブと同じ形。名前と面積を行で分ける。
         // 名前に数字が入る圃場だと、同じ行に並べた面積と続きの数字に見える。
-        poly.bindTooltip('<span class="fl-box"><span class="fl-name">' + escapeHtml((c.mark ? c.mark + " " : "") + f.name) + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span></span>', {
+        // 実施済みのときだけ、済ませた人の名前を3行目に出す(v8.97)。
+        // 名前も他の端末から受け取った文字列なので必ずエスケープする
+        const byText = labelByText(key, st && st.by);
+        poly.bindTooltip('<span class="fl-box"><span class="fl-name">' + escapeHtml((c.mark ? c.mark + " " : "") + f.name) + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>' + (byText ? '<span class="fl-by">' + escapeHtml(byText) + '</span>' : '') + '</span>', {
           permanent: true,
           direction: "center",
           className: "field-label"
@@ -10852,6 +11055,29 @@ function ProgressGoogleCanvas(p) {
           }
         });
         mine.push(areaLabel);
+        // 実施済みのときだけ、済ませた人の名前をさらに下へ(v8.97)。
+        // Google 側は札1枚に1行しか入らないので、3枚目を立ててずらす
+        const byText = labelByText(key, st && st.by);
+        if (byText) {
+          mine.push(new g.Marker({
+            position: {
+              lat: ctr[0],
+              lng: ctr[1]
+            },
+            map: mapRef.current,
+            icon: {
+              path: 0,
+              scale: 0
+            },
+            label: {
+              text: byText,
+              color: "#FFE9A8",
+              fontSize: "11px",
+              fontWeight: "600",
+              className: "gm-field-by"
+            }
+          }));
+        }
       }
       drawn.set(id, {
         overlays: mine,
@@ -11126,6 +11352,8 @@ function ProgressMapTab(p) {
       status: toMapStatus(it.status || "planned"),
       by: it.by || "",
       at: it.at || "",
+      // 先に済ませた人を選ぶための刻。古い Code.gs は返さない(空になる)
+      atTime: it.atTime || "",
       sprayedL: it.sprayedL || 0,
       areaA: it.areaA || "",
       pending: false
@@ -11134,8 +11362,11 @@ function ProgressMapTab(p) {
       if (!w.workDate || w.workDate < fetchFrom || w.workDate > fetchTo) return;
       put(w.id, w.fieldId, w.workDate, {
         status: w.reported ? "done" : "planned",
-        by: p.recorder || "",
+        // 他の端末から受け取った作業は、その端末の記録者名を使う。手元を後に
+        // 重ねるので、ここで p.recorder を入れるとサーバーの名前を潰す(v8.97)
+        by: workBy(w, p.recorder),
         at: w.reportDate || "",
+        atTime: w.reportAt || "",
         sprayedL: parseFloat(w.sprayedL) || 0,
         areaA: w.reportAreaA || "",
         // この端末で入れたが、まだ送れていない実績。色は変えず件数だけ出す

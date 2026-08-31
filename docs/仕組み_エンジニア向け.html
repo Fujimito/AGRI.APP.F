@@ -416,6 +416,38 @@ flowchart TD
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
 
   <div class="fail">
+    <h3>記録者名が、誰の画面でも「自分の名前」になっていた</h3>
+    <p class="ver">v8.97 で修正 / ブラウザで再現して確認</p>
+    <dl>
+      <dt>機構</dt><dd>他の端末がやった作業は <code>fromTeam:true, by:"佐藤"</code> で受け取っている。ところが <code>statusByField</code> が手元の作業を重ねるとき <code>by: p.recorder</code> を<strong>無条件に</strong>入れていた。手元が後勝ちなので、サーバーから届いた正しい名前が潰される。</dd>
+      <dt>影響</dt><dd>吹き出しの「入力者」が、他人の作業でもこの端末の名前になる。<strong>色は合っているので気づきにくい。</strong>v8.58 で他端末の作業を受け取るようにしてから、この状態だった可能性が高い(当時の実機の振る舞いは未確認)。</dd>
+      <dt>対処</dt><dd><code>workBy(w, recorder)</code> に切り出し、<code>fromTeam</code> なら <code>w.by</code> を使う。検査を8件追加。<strong>呼び側を元に戻すと2件落ちることを確認。</strong></dd>
+      <dt>教訓</dt><dd>「この端末の値」を既定値にするコードは、<strong>受け取った値を黙って上書きする</strong>。共有するデータでは「自分の値を入れる」前に「相手の値が無いか」を先に見る。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>先後を決めたいのに、日付しか保存していなかった</h3>
+    <p class="ver">v8.97 で列の書式とあわせて修正</p>
+    <dl>
+      <dt>機構</dt><dd>実績の時刻は <code>reportDate: today()</code> しか無く、シート側でも <code>at: ymd_(r[13])</code> で日付に丸めていた。同じ日に2チームが同じ圃場を済ませると、<strong>どちらが先かを判定できない</strong>。従来は受信の順(シートの行順)で決まり、見るたびに入れ替わりうる。</dd>
+      <dt>併発していた<br>不具合</dt><dd><code>WORK_TEXT_COLS</code> のコメントは「<code>[3, 15, 16]</code> = 作業日 / 実績入力日時 / 編集日時」と書いてあったが、<strong>実績入力日時は 1始まり 14 列目で、リストに入っていなかった</strong>。コメントだけが合っているつもりで、実態は 15 = 編集日時 / 16 = 更新日時だった。そのため <code>"2026-08-26"</code> がシート側で <code>Date</code> に変換されていた。</dd>
+      <dt>対処</dt><dd>クライアントに <code>reportAt</code>(ISO)を持たせ、<code>progressItems_</code> は <code>atTime</code> を丸めずに返す。<code>WORK_TEXT_COLS</code> を <code>[3, 14, 15, 16]</code> に。畳むときは、同じ <code>done</code> なら <code>atTime</code> が小さいほうを採る。<strong>古い行には刻が無いので、空を「先」とは見なさない</strong>(見なすと、古いデータが常に勝つ)。</dd>
+      <dt>検査の落とし穴</dt><dd><code>Date</code> と ISO 文字列は <code>JSON.stringify</code> すると<strong>同じ文字列</strong>になる。値だけ見る検査は、書式を外しても通ってしまう。<code>typeof === "string"</code> も一緒に見ること。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>自分で app.js を 0 バイトにした</h3>
+    <p class="ver">v8.97 の作業中 / 退避から復旧</p>
+    <dl>
+      <dt>機構</dt><dd>置換スクリプトで <code>io.open(path, "w")</code> を先に呼んでから <code>write()</code> していた。サロゲートペアの絵文字で <code>UnicodeEncodeError</code> が出て <code>write()</code> が落ち、<strong>ファイルは開いた時点で既に空になっていた</strong>。</dd>
+      <dt>対処</dt><dd>先に <code>s.encode("utf-8")</code> でバイト列を作り、<strong>成功してから</strong> <code>"wb"</code> で書く。絵文字はサロゲートペアで書かない。</dd>
+      <dt>教訓</dt><dd>大きなファイルを叩く前に退避を取る。今回は別の目的(対照実験)で取ってあった退避に助けられただけで、<strong>運がよかった</strong>。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>45秒ごとに、変わっていないものまで作り直していた</h3>
     <p class="ver">v8.91 で差分描画に / 実測あり</p>
     <dl>
