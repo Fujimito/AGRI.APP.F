@@ -416,6 +416,29 @@ flowchart TD
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
 
   <div class="fail">
+    <h3>510件を返すために 408,000セル読んでいた</h3>
+    <p class="ver">v8.98 で修正 / 張りぼてで実測</p>
+    <dl>
+      <dt>機構</dt><dd><code>progressItems_</code> も <code>pullRows_</code> も <code>getRange(2, 1, 全行, 全列)</code> で丸ごと読んでから絞っていた。進捗地図が見るのは<strong>直近3日だけ</strong>なのに、シーズン全期間を読む。しかも <code>pull</code> と <code>progress</code> が別のタイマーで30秒ごとに両方走る。</dd>
+      <dt>実測</dt><dd>170圃場、張りぼてでセル数を数えた。<table><tr><th>経過</th><th>行数</th><th>progress 従来</th><th>progress 今</th><th>pull(変化なし) 今</th></tr><tr><td>1日</td><td>170</td><td>4,080</td><td>4,274</td><td>194</td></tr><tr><td>10日</td><td>1,700</td><td>40,800</td><td>13,964</td><td>1,724</td></tr><tr><td>50日</td><td>8,500</td><td>204,000</td><td>20,764</td><td>8,524</td></tr><tr><td><strong>100日</strong></td><td><strong>17,000</strong></td><td><strong>408,000</strong></td><td><strong>29,264</strong></td><td><strong>17,024</strong></td></tr></table>応答自体は小さい(84KB、gzip 2.9KB)。<strong>問題は転送ではなくサーバー側の読み取り量</strong>だった。</dd>
+      <dt>対処</dt><dd><code>scanRows_</code>。鍵になる列(作業日 / 更新日時)を<strong>1列だけ先に読み</strong>、条件に合う行番号の最小と最大を出して、その範囲だけを読む。</dd>
+      <dt>なぜ行を<br>散らばさないか</dt><dd>GAS は <code>getRange</code> 1回ごとの往復が高い。合う行だけを個別に取ると、セル数は減っても遅くなる。作業行は日付順に追記されるので実際にはほぼ連続しており、<strong>連続していなくても最悪で今までと同じ(全行読み)になるだけ</strong>で、遅くはならない。</dd>
+      <dt>未検証</dt><dd>実際の実行秒数。本番の GAS を叩いていない。減ったのは<strong>読み取ったセル数</strong>であって、秒数ではない。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>台帳への送信が、1圃場につき1往復で直列だった</h3>
+    <p class="ver">v8.98 でまとめ送りに</p>
+    <dl>
+      <dt>機構</dt><dd>同じ作業を、<code>pushWorks</code>(自動・200件まとめ)とは別に <code>record</code> と <code>report</code> で1件ずつ送っていた。<strong>170圃場に実績を入れた日は 341回、うち 340回が直列の <code>await</code></strong>。</dd>
+      <dt>対処</dt><dd><code>pushRecords</code> を追加し、50件ずつ送る(340件 → 7回。ブラウザで実測)。GAS側は record/report/unreport の中身を <code>applyRecord_</code> に切り出し、<strong>単体もまとめ送りも同じここを通す</strong>(二重に書くと片方だけ直して振る舞いがずれる)。</dd>
+      <dt>順番</dt><dd><code>record → unreport → report</code>。取り消しを報告より後に送ると、同じ回で「取り消し→再報告」が起きたときに取り消しが勝ち、シートだけ未実施になる。検査では<strong>順を逆にすると実際に取り消しが勝つこと</strong>も確かめてある。</dd>
+      <dt>古い GAS</dt><dd><code>unknown type</code> が返ったら<strong>その場で1件ずつに戻す</strong>。これが無いと、アプリだけ更新して Code.gs を貼り替えていない人の台帳送信が全部止まる。ブラウザで、古い応答を返す偽物に当てて確認した(pushRecords 1回 → record 170 + report 170 で完了)。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>記録者名が、誰の画面でも「自分の名前」になっていた</h3>
     <p class="ver">v8.97 で修正 / ブラウザで再現して確認</p>
     <dl>

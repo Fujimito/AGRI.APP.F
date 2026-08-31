@@ -772,14 +772,50 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
 }
 
 // ── 差分取得:since より後にサーバーが書いた行だけ返す ──
-function pullRows_(sh, headers, atCol, team, since, mapper) {
+// ── 列を1本だけ先に読んで、要る行の範囲を決めてから本体を読む ──
+//
+// なぜ必要か:
+//   進捗も差分取得も、実際に要るのは一部の行だけなのに、
+//   これまでは毎回 getRange(2, 1, 全行, 全列) で丸ごと読んでいた。
+//   170圃場を100日分とると 17,000行×24列 = 408,000セルを、
+//   510件を返すために 30秒ごとに読んでいた(実測)。
+//
+// やり方:
+//   1. 鍵になる列(作業日 / 更新日時)だけを1列読む。Nセル。
+//   2. 条件に合う行番号の最小と最大を出す。
+//   3. その範囲だけを getRange で一度に読む。
+//
+// 行を散らばって getRange を何回も呼ばないのは、GAS では
+// 呼び出し1回ごとの往復が高く、細かく分けるとかえって遅いため。
+// 作業行は日付順に追記されるので、実際にはほぼ連続している。
+// 連続していなくても、最悪でも今までと同じ(全行読み)になるだけで、
+// 遅くなることはない。
+//
+// 戻り値は { rows, offset }。offset は rows[0] がシートの何行目か(1始まり)。
+function scanRows_(sh, headers, keyCol0, keep) {
   const last = sh.getLastRow();
-  if (last < 2) return [];
-  const rows = sh.getRange(2, 1, last - 1, headers.length).getValues();
+  if (last < 2) return { rows: [], offset: 0 };
+  const n = last - 1;
+  const keys = sh.getRange(2, keyCol0 + 1, n, 1).getValues();
+  let lo = -1, hi = -1;
+  for (let i = 0; i < n; i++) {
+    if (!keep(keys[i][0])) continue;
+    if (lo < 0) lo = i;
+    hi = i;
+  }
+  if (lo < 0) return { rows: [], offset: 0 };
+  const rows = sh.getRange(2 + lo, 1, hi - lo + 1, headers.length).getValues();
+  return { rows: rows, offset: 2 + lo };
+}
+
+function pullRows_(sh, headers, atCol, team, since, mapper) {
   const s = String(since || "");
+  // 更新日時の列だけを先に見る。30秒ごとの定期取得では
+  // 何も変わっていないことがほとんどで、そのときはここで終わる。
+  const hit = scanRows_(sh, headers, atCol, v => !s || atIso_(v) > s);
   const out = [];
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
+  for (let i = 0; i < hit.rows.length; i++) {
+    const r = hit.rows[i];
     if (!r[0] && r[0] !== 0) continue;              // 空行
     if (team && String(r[1]) !== String(team)) continue;
     if (s && atIso_(r[atCol]) <= s) continue;
@@ -793,9 +829,15 @@ function pullRows_(sh, headers, atCol, team, since, mapper) {
 // 「どの圃場が何色か」だけ。応答が小さいほど電波の弱い場所でも通る。
 function progressItems_(team, from, to) {
   const sh = getWorkSheet_();
-  const last = sh.getLastRow();
-  if (last < 2) return [];
-  const rows = sh.getRange(2, 1, last - 1, WORK_HEADERS.length).getValues();
+  // 作業日の列(0始まり2)だけを先に見て、見る日の範囲に絞る。
+  // 進捗地図が見るのは直近3日だけなのに、全期間を読んでいた
+  const hit = scanRows_(sh, WORK_HEADERS, 2, v => {
+    const d = ymd_(v);
+    if (from && d < from) return false;
+    if (to && d > to) return false;
+    return true;
+  });
+  const rows = hit.rows;
   const out = [];
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
@@ -932,6 +974,67 @@ function chemsText_(chems) {
 }
 
 // 1散布ぶんの行データを作る
+// ── 台帳(防除記録)の1件を反映する ──
+//
+// record / report / unreport の中身。単体でもまとめ送り(pushRecords)でも
+// 同じここを通す。二重に書くと、片方だけ直して振る舞いがずれる。
+//
+// 呼び側がロックを取っていること。ここでは取らない。
+function applyRecord_(sh, op, rec, team, recorder) {
+  if (!rec || !rec.id) return { ok: false, error: "invalid payload" };
+  if (op === "record" && !Array.isArray(rec.chems)) return { ok: false, error: "invalid payload" };
+  const row = findRow_(sh, rec.id, team);
+  // 第2段で拾ったチーム欄が空の行は、ここで自分のチームのものとして確定させる
+  if (row > 0) claimRow_(sh, row, team);
+  const data = { record: rec, team: team, recorder: recorder };
+
+  if (op === "record") {
+    // 既に行がある場合は薬剤の内容だけ上書きする。
+    // (実績入力のあとから薬剤を適用したケースを反映するため。行は増やさない)
+    if (row > 0) {
+      sh.getRange(row, COL.CHEM_N, 1, 4).setValues([[
+        rec.chems.length,
+        chemsText_(rec.chems),
+        Number(rec.totalL) || 0,
+        Math.round(Number(rec.waterMl) || 0) / 1000,
+      ]]);
+      return { ok: true, updated: 1, chemsOnly: true };
+    }
+    sh.appendRow(buildRow_(data, "調合済"));
+    return { ok: true, added: 1 };
+  }
+
+  // ── 実績の取り消し ──
+  // 作業タブのチェックを外したとき。行は消さない(調合した事実は残るため)。
+  // 状態を「調合済」に戻し、実散布量と報告日だけを消す。
+  if (op === "unreport") {
+    if (row <= 0) {
+      // 元の行が無い(まだ一度も送っていない)。取り消すものが無いので成功扱い。
+      // ここで失敗を返すと、アプリ側が永久に再送を続ける
+      return { ok: true, updated: 0, missing: true };
+    }
+    sh.getRange(row, COL.SPRAYED).setValue("");
+    sh.getRange(row, COL.STATUS).setValue("調合済");
+    sh.getRange(row, COL.REPORT_DATE).setValue("");
+    return { ok: true, updated: 1 };
+  }
+
+  if (op === "report") {
+    if (row > 0) {
+      sh.getRange(row, COL.SPRAYED).setValue(Number(rec.sprayedL) || "");
+      sh.getRange(row, COL.STATUS).setValue("散布済");
+      sh.getRange(row, COL.REPORT_DATE).setValue(safeCell_(rec.reportDate || ""));
+      if (rec.reportAreaA) sh.getRange(row, COL.AREA).setValue(Number(rec.reportAreaA) || "");
+      if (rec.reportMemo) sh.getRange(row, COL.MEMO).setValue(safeCell_(rec.reportMemo));
+      return { ok: true, updated: 1 };
+    }
+    // 元の記録が見つからない場合は報告内容ごと新規追加(取りこぼし防止)
+    sh.appendRow(buildRow_(data, "散布済"));
+    return { ok: true, added: 1 };
+  }
+  return { ok: false, error: "unknown type" };
+}
+
 function buildRow_(data, status) {
   const rec = data.record;
   const now = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy-MM-dd HH:mm:ss");
@@ -1113,67 +1216,46 @@ function doPost(e) {
                                list, workRow_, data.team, null));
     }
 
+    // ── 台帳へのまとめ送り(v8.98) ──
+    // 従来は圃場1枚につき record と report で別々に送っていた。
+    // 170圃場に実績を入れた日は 340回を直列で往復していた。
+    // 順序は送られてきたまま守る(record → unreport → report の並びを
+    // アプリ側が作っている。ここで並べ替えると取り消しが後勝ちになる)。
+    if (type === "pushRecords") {
+      if (!data.team) return json_({ ok: false, error: "team required" });
+      const list = data.items;
+      if (!Array.isArray(list)) return json_({ ok: false, error: "items required" });
+      if (list.length > PUSH_MAX) {
+        return json_({ ok: false, error: "too many", max: PUSH_MAX, got: list.length });
+      }
+      const sh = getSheet_();
+      const team = String(data.team || "");
+      const results = [];
+      let touched = false;
+      for (let i = 0; i < list.length; i++) {
+        const it = list[i] || {};
+        const r = applyRecord_(sh, String(it.op || ""), it.record, team, data.recorder);
+        // 色分けが要るのは行を足したときだけ。既存行の更新では作業日は変わらない
+        if (r.added) touched = true;
+        results.push({ id: it.record && it.record.id, op: it.op, ok: !!r.ok, error: r.error || "" });
+      }
+      // 日付の色分けは行を足したあとに1度だけ。
+      // 1件ごとに呼ぶと、まとめ送りにした意味がなくなる
+      if (touched) colorByDate_(sh);
+      return json_({ ok: true, results: results });
+    }
+
     const rec = data.record;
-    if (!rec || !rec.id || !Array.isArray(rec.chems)) {
+    if (!rec || !rec.id || (type === "record" && !Array.isArray(rec.chems))) {
       return json_({ ok: false, error: "invalid payload" });
     }
-    const sh = getSheet_();
-    const team = String(data.team || "");
-    const row = findRow_(sh, rec.id, team);
-    // 第2段で拾ったチーム欄が空の行は、ここで自分のチームのものとして確定させる
-    if (row > 0) claimRow_(sh, row, team);
-
-    if (type === "record") {
-      // 既に行がある場合は薬剤の内容だけ上書きする。
-      // (実績入力のあとから薬剤を適用したケースを反映するため。行は増やさない)
-      if (row > 0) {
-        sh.getRange(row, COL.CHEM_N, 1, 4).setValues([[
-          rec.chems.length,
-          chemsText_(rec.chems),
-          Number(rec.totalL) || 0,
-          Math.round(Number(rec.waterMl) || 0) / 1000,
-        ]]);
-        return json_({ ok: true, updated: 1, chemsOnly: true });
-      }
-      sh.appendRow(buildRow_(data, "調合済"));
-      colorByDate_(sh);
-      return json_({ ok: true, added: 1 });
+    if (type === "record" || type === "report" || type === "unreport") {
+      const sh = getSheet_();
+      const r = applyRecord_(sh, type, rec, String(data.team || ""), data.recorder);
+      // 色分けは行を足したときだけ(従来と同じ)
+      if (r.added) colorByDate_(sh);
+      return json_(r);
     }
-
-    // ── 実績の取り消し ──
-    // 作業タブのチェックを外したとき。行は消さない(調合した事実は残るため)。
-    // 状態を「調合済」に戻し、実散布量と報告日だけを消す。
-    // ここを送らずに済ませると、アプリは未実施・シートは散布済という食い違いが
-    // 黙って残り、アグリノートへの転記までそのまま流れる。
-    if (type === "unreport") {
-      if (!rec || !rec.id) return json_({ ok: false, error: "invalid payload" });
-      if (row <= 0) {
-        // 元の行が無い(まだ一度も送っていない)。取り消すものが無いので成功扱い。
-        // ここで失敗を返すと、アプリ側が永久に再送を続ける
-        return json_({ ok: true, updated: 0, missing: true });
-      }
-      sh.getRange(row, COL.SPRAYED).setValue("");
-      sh.getRange(row, COL.STATUS).setValue("調合済");
-      sh.getRange(row, COL.REPORT_DATE).setValue("");
-      return json_({ ok: true, updated: 1 });
-    }
-
-    if (type === "report") {
-      // 散布完了報告:既存の行を更新
-      if (row > 0) {
-        sh.getRange(row, COL.SPRAYED).setValue(Number(rec.sprayedL) || "");
-        sh.getRange(row, COL.STATUS).setValue("散布済");
-        sh.getRange(row, COL.REPORT_DATE).setValue(safeCell_(rec.reportDate || ""));
-        if (rec.reportAreaA) sh.getRange(row, COL.AREA).setValue(Number(rec.reportAreaA) || "");
-        if (rec.reportMemo) sh.getRange(row, COL.MEMO).setValue(safeCell_(rec.reportMemo));
-        return json_({ ok: true, updated: 1 });
-      }
-      // 元の記録が見つからない場合は報告内容ごと新規追加(取りこぼし防止)
-      sh.appendRow(buildRow_(data, "散布済"));
-      colorByDate_(sh);
-      return json_({ ok: true, added: 1 });
-    }
-
     return json_({ ok: false, error: "unknown type" });
   } catch (err) {
     return json_({ ok: false, error: String(err) });
@@ -1194,7 +1276,8 @@ function doGet() {
     // アプリ側が「このGASは進捗マップに対応しているか」を判定するための印。
     // 古いGASのまま進捗マップを開くと unknown type が返るだけで理由が分からない。
     features: ["record", "report", "unreport", "chemdbLoad", "cloudSave", "cloudLoad",
-               "pushFields", "pushWorks", "pushChems", "pull", "progress", "workPlan"],
+               "pushFields", "pushWorks", "pushChems", "pull", "progress", "workPlan",
+               "pushRecords"],
   });
 }
 

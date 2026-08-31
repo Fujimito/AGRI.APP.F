@@ -81,6 +81,9 @@ class FakeSheet {
     }
     const range = {
       getValues() {
+        // 読み取ったセル数を数える(検査で「全行読み」を見張るため)。
+        // 実物の GAS には無いが、引いても害はない
+        sh._readCells = (sh._readCells || 0) + nr * nc;
         const out = [];
         for (let i = 0; i < nr; i++) {
           const line = [];

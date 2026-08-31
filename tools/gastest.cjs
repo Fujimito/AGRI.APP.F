@@ -499,6 +499,130 @@ const F2 = {
   }
 }
 
+// ── 15c. 読み取るセルを絞る(v8.98) ──
+// 進捗も差分取得も、毎回作業シートを丸ごと読んでいた。
+// 鍵の列を1本だけ先に読んで、要る行の範囲だけを取る。
+{
+  const ctx = makeContext({});
+  const DAYS = 12, N = 20;
+  let id = 1;
+  const dates = [];
+  for (let d = 0; d < DAYS; d++) {
+    const ymd = new Date(Date.UTC(2026, 3, 1 + d)).toISOString().slice(0, 10);
+    dates.push(ymd);
+    const items = [];
+    for (let f = 1; f <= N; f++) items.push({
+      id: id++, workDate: ymd, fieldId: f, fieldName: "圃場" + f,
+      status: f % 2 ? "done" : "planned", sprayedL: 10, reportAreaA: 12,
+      chems: [], by: "藤本", reportedAt: ymd + "T02:00:00.000Z",
+      updatedAt: ymd + "T02:00:00.000Z"
+    });
+    post(ctx, { type: "pushWorks", team: TEAM, items: items });
+  }
+  const sh = ctx.SHEET_STATE.getSheetByName("作業");
+  const rows = sh.getLastRow() - 1;
+  const full = rows * 24; // 作業シートの列数
+  eq("下抵えの行数", rows, DAYS * N);
+
+  // 直近3日
+  const from = dates[DAYS - 3], to = dates[DAYS - 1];
+  sh._readCells = 0;
+  const pr = post(ctx, { type: "progress", team: TEAM, from: from, to: to });
+  const progCells = sh._readCells;
+  eq("範囲の件数は変わらない", pr.items.length, 3 * N);
+  eq("範囲外は入らない", pr.items.every(x => x.workDate >= from && x.workDate <= to), true);
+  ok("進捗は全行読みより少ないセルで済む (" + progCells + " < " + full + ")",
+    progCells < full * 0.6);
+
+  // 変化が無いときの差分取得
+  sh._readCells = 0;
+  const pu = post(ctx, { type: "pull", team: TEAM, since: new Date().toISOString() });
+  const pullCells = sh._readCells;
+  eq("変化が無ければ何も返さない", pu.works.length, 0);
+  // 日時の列 rows セル + 見出し行の確認 24 セル。行本体は1行も読まない
+  ok("変化が無いときは日時の列と見出しだけで済む (" + pullCells + " ≤ " + (rows + 24) + ")",
+    pullCells <= rows + 24);
+
+  // 変化があれば拾う(絞っても取りこぼさない)
+  post(ctx, { type: "pushWorks", team: TEAM, items: [{
+    id: 5, workDate: dates[0], fieldId: 5, fieldName: "圃場5", status: "done",
+    sprayedL: 99, chems: [], updatedAt: "2099-01-01T00:00:00.000Z"
+  }] });
+  const pu2 = post(ctx, { type: "pull", team: TEAM, since: "2026-01-01T00:00:00.000Z" });
+  eq("先頭の行を直しても差分に出る", pu2.works.some(w => w.id === 5 && w.sprayedL === 99), true);
+
+  // 範囲に1件も無いとき
+  const none = post(ctx, { type: "progress", team: TEAM, from: "2020-01-01", to: "2020-01-02" });
+  eq("範囲外なら空", none.items.length, 0);
+
+  // 日付が逆順で入っても拾う(追記順とは限らない)
+  post(ctx, { type: "pushWorks", team: TEAM, items: [{
+    id: 9001, workDate: dates[DAYS - 1], fieldId: 99, fieldName: "あとから入った",
+    status: "done", sprayedL: 1, chems: [], updatedAt: "2099-01-02T00:00:00.000Z"
+  }] });
+  const pr2 = post(ctx, { type: "progress", team: TEAM, from: from, to: to });
+  eq("あとから末尾に追記された行も拾う", pr2.items.some(x => x.fieldId === 99), true);
+}
+
+// ── 15d. 台帳へのまとめ送り(v8.98) ──
+{
+  const ctx = makeContext({});
+  const R = (id, o) => Object.assign({ id, date: "2026-08-26", field: "圃場" + id,
+    crop: "水稲", areaA: 10, totalL: 5, waterMl: 5000, chems: [] }, o || {});
+
+  const j = post(ctx, { type: "pushRecords", team: TEAM, recorder: "藤本", items: [
+    { op: "record", record: R(1) },
+    { op: "record", record: R(2) },
+    { op: "report", record: R(1, { sprayedL: 12, reportDate: "2026-08-26" }) }
+  ] });
+  eq("まとめ送りは件数分の結果を返す", [j.ok, (j.results || []).length], [true, 3]);
+  eq("全部成功", (j.results || []).length === 3 && j.results.every(r => r.ok), true);
+
+  const sh = ctx.SHEET_STATE.getSheetByName("防除記録");
+  eq("行は2本だけ(report は既存行を更新)", sh.getLastRow() - 1, 2);
+  eq("実散布量が入る", sh.getRange(2, 12).getValue(), 12);
+  eq("状態が散布済", sh.getRange(2, 13).getValue(), "散布済");
+  eq("チームも入る", sh.getRange(2, 16).getValue(), TEAM);
+
+  // 順番が守られること。取り消し→再報告 を同じ回で送る
+  const j2 = post(ctx, { type: "pushRecords", team: TEAM, recorder: "藤本", items: [
+    { op: "unreport", record: R(1) },
+    { op: "report", record: R(1, { sprayedL: 33, reportDate: "2026-08-27" }) }
+  ] });
+  eq("2件とも成功", (j2.results || []).length === 2 && j2.results.every(r => r.ok), true);
+  eq("あとに送った報告が残る(取り消しが勝たない)", sh.getRange(2, 12).getValue(), 33);
+
+  // 逆に並べると取り消しが勝つ(順番に意味があることの確認)
+  post(ctx, { type: "pushRecords", team: TEAM, items: [
+    { op: "report", record: R(1, { sprayedL: 99, reportDate: "2026-08-28" }) },
+    { op: "unreport", record: R(1) }
+  ] });
+  eq("順を逆にすると取り消しが勝つ", sh.getRange(2, 12).getValue(), "");
+
+  // 壊れた件が混ざっても、他の件は通る
+  const j3 = post(ctx, { type: "pushRecords", team: TEAM, items: [
+    { op: "record", record: { id: "" } },
+    { op: "record", record: R(3) }
+  ] });
+  eq("壊れた件だけ失敗する", (j3.results || []).map(r => r.ok), [false, true]);
+  eq("他の件は行になる", sh.getLastRow() - 1, 3);
+
+  eq("team は必須", post(ctx, { type: "pushRecords", items: [] }).error, "team required");
+  eq("items は必須", post(ctx, { type: "pushRecords", team: TEAM }).error, "items required");
+  eq("多すぎれば断る",
+    post(ctx, { type: "pushRecords", team: TEAM, items: new Array(400).fill({ op: "record", record: R(9) }) }).error, "too many");
+
+  // 1件ずつの古い道も残っていること(アプリだけ更新した人のため)
+  const ctx2 = makeContext({});
+  const s1 = post(ctx2, { type: "record", team: TEAM, recorder: "藤本", record: R(7) });
+  eq("record 単体は今までどおり", [s1.ok, s1.added], [true, 1]);
+  const s2 = post(ctx2, { type: "report", team: TEAM, record: R(7, { sprayedL: 8, reportDate: "2026-08-26" }) });
+  eq("report 単体も今までどおり", [s2.ok, s2.updated], [true, 1]);
+  const s3 = post(ctx2, { type: "unreport", team: TEAM, record: R(7) });
+  eq("unreport 単体も今までどおり", [s3.ok, s3.updated], [true, 1]);
+  eq("実績が消える", ctx2.SHEET_STATE.getSheetByName("防除記録").getRange(2, 12).getValue(), "");
+}
+
 // ── 16. doGet ──
 {
   const ctx = makeContext({ SHARED_SECRET: "x" });

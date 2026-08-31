@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.97";
+const APP_VERSION = "v8.98";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -783,6 +783,28 @@ const workBy = (w, recorder) => {
   if (w.fromTeam) return String(w.by || "");
   return String(w.by || recorder || "");
 };
+// 台帳(防除記録)へ送る操作を、送る順に並べる。
+//
+// 1圃場につき最大3つ。順番に意味がある。
+//   record   … 行が無ければ作る(調合の内容)
+//   unreport … 実績の取り消し
+//   report   … 実績の報告
+// 取り消しを報告より後に送ると、同じ回で「取り消し→再報告」が
+// 起きたときに取り消しが勝ち、シートだけ未実施になる。
+// record を先頭に置くのは、行が無いと report が新規行を作って
+// 調合の内容(薬剤・総量・水量)が入らない行になるため。
+//
+// mark は、その操作が成功したときに立てる印の名前。
+const buildLedgerOps = works => {
+  const ops = [];
+  (works || []).forEach(w => {
+    if (!w) return;
+    if (!w.synced) ops.push({ op: "record", id: w.id, mark: "synced" });
+    if (w.unreportPending) ops.push({ op: "unreport", id: w.id, mark: "unreportPending" });
+    if (w.reported && !w.reportSynced) ops.push({ op: "report", id: w.id, mark: "reportSynced" });
+  });
+  return ops;
+};
 // その日の実績を記録者ごとにまとめる。
 //
 // 2チームで回ったあと、どちらがどこをやったのかを見るためのもの。
@@ -879,15 +901,17 @@ const foldProgress = (entries, day) => {
       // 吹き出しと札に出す中身を選ぶ。
       //
       // まず実績のあるほう(done)を優先する。
-      // 同じ done が2件並んだときは、先に済ませたほうを採る。
+      // 同じ done が2件並んだときは、**最後に済ませたほう**を採る(v8.98)。
       // 2チームで回っていて同じ圃場を二重に済ませたとき、札に出る名前が
       // 受信の順(シートの行順)で入れ替わると、見るたびに名前が変わる。
+      // v8.97 は「先に済ませた人」を採っていたが、実際に知りたいのは
+      // 「最後に実施済みを押したのは誰か」なので逆にした。
       // atTime は刻まで入った ISO。古いデータには無いので、無いものは
-      // 「先」とは見なさず、先に来たものを残す(今までの振る舞い)。
+      // 「最後」とは見なさず、先に来たものを残す(今までの振る舞い)。
       const r = PROGRESS_RANK[e.status] || 0;
       const eAt = String(e.atTime || "");
       const better = r > cur._rank ||
-        (r === cur._rank && eAt && (!cur._at || eAt < cur._at));
+        (r === cur._rank && eAt && (!cur._at || eAt > cur._at));
       if (better) {
         cur._rank = r;
         cur._at = eAt;
@@ -2324,84 +2348,102 @@ function App() {
     let sent = 0;
     let failed = false;
     let aborted = false;
-    for (let ti = 0; ti < targets.length; ti++) {
+
+    // ── 送る作業を並べる ──
+    // 1圃場につき最大3つ(調合の登録 / 取り消し / 実績)。
+    // 順番はこのまま守ること。取り消しを報告より後に送ると、
+    // 同じ回で「取り消し→再報告」が起きたときに取り消しが勝つ。
+    const ops = buildLedgerOps(targets);
+    // 1回の送信に入れる件数。GAS側の PUSH_MAX(300)より小さくしてある。
+    // 小さくするほど「中止」が早く効き、失敗したときのやり直しも少ない。
+    // 大きくするほど往復が減る。170圃場なら 340件 → 7回。
+    const REC_CHUNK = 50;
+    // 台帳への実際の書き込み。成功したものだけ印を付ける
+    const markDone = o => {
+      current = current.map(x => {
+        if (x.id !== o.id) return x;
+        if (o.mark === "synced") return { ...x, synced: true };
+        if (o.mark === "unreportPending") return { ...x, unreportPending: false };
+        return { ...x, reportSynced: true };
+      });
+    };
+    const flush = () => {
+      setWorks(current);
+      save("tankmix:works", current);
+    };
+    // 進捗の表示は「圃場単位」のままにする。
+    // 送信の単位を変えただけで、利用者に見せる数を変える理由はない
+    const doneFields = () => targets.filter(w => {
+      const c = current.find(x => x.id === w.id);
+      return c && c.synced && !c.unreportPending && (!c.reported || c.reportSynced);
+    }).length;
+
+    // 古い GAS は pushRecords を知らない。そのときは1件ずつに戻す。
+    // ここを省くと、アプリだけ更新した人の台帳送信が全部止まる
+    let batchOk = true;
+    for (let i = 0; i < ops.length; i += REC_CHUNK) {
+      if (abortRef.current) { aborted = true; break; }
+      const part = ops.slice(i, i + REC_CHUNK);
+      const items = part.map(o => ({
+        op: o.op,
+        record: buildPayload(current.find(x => x.id === o.id) || targets.find(x => x.id === o.id))
+      }));
+      const j = await post({
+        type: "pushRecords",
+        // 台帳シートは記録IDだけで行を探していた。別チームが同じ日に同じ圃場を
+        // 入れると作業IDが一致して互いの行を上書きする(v8.85)
+        team: teamCode.trim(),
+        recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
+        items
+      });
+      if (j && j.error === "unknown type") { batchOk = false; break; }
+      if (!j || !j.ok || !Array.isArray(j.results)) { failed = true; break; }
+      j.results.forEach((r, k) => {
+        if (!r || !r.ok) { failed = true; return; }
+        markDone(part[k]);
+        sent++;
+      });
+      flush();
+      setSyncProgress({ done: doneFields(), total: targets.length });
+      if (failed) break;
+    }
+
+    // 古い GAS 向けの道。1圃場ずつ、従来どおりに送る
+    if (!batchOk) for (let ti = 0; ti < targets.length; ti++) {
       if (abortRef.current) {
         aborted = true;
         break;
       }
       const w = targets[ti];
-      if (!w.synced) {
+      const one = async (op) => {
+        const cur = current.find(x => x.id === w.id);
         const j = await post({
-          type: "record",
-          // 台帳シートは記録IDだけで行を探していた。別チームが同じ日に同じ圃場を
-          // 入れると作業IDが一致して互いの行を上書きする。GAS側がチームで
-          // 分けられるように送る(v8.85)
+          type: op,
           team: teamCode.trim(),
           recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
-          record: buildPayload(w)
+          record: buildPayload(cur || w)
         });
-        if (!j || !j.ok) {
-          failed = true;
-          break;
-        }
-        current = current.map(x => x.id === w.id ? {
-          ...x,
-          synced: true
-        } : x);
-        setWorks(current);
-        save("tankmix:works", current);
+        return !!(j && j.ok);
+      };
+      const cur0 = current.find(x => x.id === w.id) || w;
+      if (!cur0.synced) {
+        if (!(await one("record"))) { failed = true; break; }
+        markDone({ id: w.id, mark: "synced" });
+        flush();
         sent++;
       }
-      if (abortRef.current) {
-        aborted = true;
-        break;
-      }
-      let cur = current.find(x => x.id === w.id);
-      // 実績の取り消しを先に送る。報告より後に送ると、同じ回で
-      // 「取り消し → 再報告」が起きたとき順序が入れ替わって取り消しが勝つ
-      if (cur && cur.unreportPending && cur.synced) {
-        const j = await post({
-          type: "unreport",
-          // 台帳シートは記録IDだけで行を探していた。別チームが同じ日に同じ圃場を
-          // 入れると作業IDが一致して互いの行を上書きする。GAS側がチームで
-          // 分けられるように送る(v8.85)
-          team: teamCode.trim(),
-          recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
-          record: buildPayload(cur)
-        });
-        if (!j || !j.ok) {
-          failed = true;
-          break;
-        }
-        current = current.map(x => x.id === w.id ? {
-          ...x,
-          unreportPending: false
-        } : x);
-        setWorks(current);
-        save("tankmix:works", current);
-        cur = current.find(x => x.id === w.id);
+      const cur1 = current.find(x => x.id === w.id) || w;
+      if (cur1.unreportPending) {
+        if (!(await one("unreport"))) { failed = true; break; }
+        markDone({ id: w.id, mark: "unreportPending" });
+        flush();
         sent++;
       }
-      if (cur && cur.reported && cur.synced && !cur.reportSynced) {
-        const j = await post({
-          type: "report",
-          // 台帳シートは記録IDだけで行を探していた。別チームが同じ日に同じ圃場を
-          // 入れると作業IDが一致して互いの行を上書きする。GAS側がチームで
-          // 分けられるように送る(v8.85)
-          team: teamCode.trim(),
-          recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
-          record: buildPayload(cur)
-        });
-        if (!j || !j.ok) {
-          failed = true;
-          break;
-        }
-        current = current.map(x => x.id === w.id ? {
-          ...x,
-          reportSynced: true
-        } : x);
-        setWorks(current);
-        save("tankmix:works", current);
+      const cur2 = current.find(x => x.id === w.id) || w;
+      if (cur2.reported && !cur2.reportSynced) {
+        if (!(await one("report"))) { failed = true; break; }
+        markDone({ id: w.id, mark: "reportSynced" });
+        flush();
         sent++;
       }
       setSyncProgress({
@@ -4837,7 +4879,81 @@ function WorkTab(p) {
     }
   }, p.syncing ? "送信中…" : pending === 0 ? "☁ 送信するものはありません" : "☁ " + dateLabel(p.workDate) + "の未送信 " + pending + "件を送信"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "送信されるのは", dateLabel(p.workDate), "ぶんだけです。送信済みは二重登録されません")) ), /*#__PURE__*/React.createElement("button", {
+  }, "送信されるのは", dateLabel(p.workDate), "ぶんだけです。送信済みは二重登録されません")) ), recSummary.length > 0 && /*#__PURE__*/React.createElement("section", {
+    style: {
+      ...S.card,
+      marginTop: 12
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      flexWrap: "wrap",
+      gap: 8,
+      marginBottom: 6
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontSize: 12,
+      fontWeight: 700,
+      color: "#3B4A38"
+    }
+  }, dateLabel(p.workDate), " の実績(記録者ごと)"), /*#__PURE__*/React.createElement("button", {
+    onClick: exportSummaryCSV,
+    style: S.smallSecondary,
+    className: "no-print"
+  }, "CSV")), /*#__PURE__*/React.createElement("table", {
+    style: {
+      width: "100%",
+      borderCollapse: "collapse",
+      fontSize: 12
+    }
+  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, ["記録者", "圃場", "面積", "散布量"].map((h, i) => /*#__PURE__*/React.createElement("th", {
+    key: h,
+    style: {
+      textAlign: i === 0 ? "left" : "right",
+      padding: "3px 4px",
+      borderBottom: "1px solid #CBD6C4",
+      color: "#5B6B57",
+      fontWeight: 700
+    }
+  }, h)))), /*#__PURE__*/React.createElement("tbody", null, recSummary.map(r => /*#__PURE__*/React.createElement("tr", {
+    key: r.by
+  }, /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: "3px 4px",
+      borderBottom: "1px solid #E6ECE2",
+      fontWeight: 700
+    }
+  }, r.by), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: "3px 4px",
+      borderBottom: "1px solid #E6ECE2",
+      textAlign: "right"
+    },
+    className: "num"
+  }, r.fieldCount), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: "3px 4px",
+      borderBottom: "1px solid #E6ECE2",
+      textAlign: "right"
+    },
+    className: "num"
+  }, dispArea(r.areaA, p.areaUnitKey), " ", areaSuffix(p.areaUnitKey)), /*#__PURE__*/React.createElement("td", {
+    style: {
+      padding: "3px 4px",
+      borderBottom: "1px solid #E6ECE2",
+      textAlign: "right"
+    },
+    className: "num"
+  }, fmt(r.sprayedL, 2), " L"))))), /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "6px 0 0",
+      fontSize: 11,
+      color: "#6B7A66"
+    }
+  }, "実績を入れた作業だけを数えています。名前は各端末の「記録者名」で、表記が違うと別の行になります")), /*#__PURE__*/React.createElement("button", {
     // v8.74: 作業一覧を別の表示としてはやめた。
     // 現場で見るのは地図だけで済む。ただし順送りナビ・並べ替え・
     // まとめ散布・タンク補給の区切り・書き出しは地図に載せられないので、
@@ -5324,84 +5440,7 @@ function WorkTab(p) {
       ...S.smallSecondary,
       opacity: history.length ? 1 : 0.4
     }
-  }, "印刷"))), recSummary.length > 0 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 10,
-      padding: "8px 10px",
-      background: "#F7F9F5",
-      border: "1px solid #DCE5D6",
-      borderRadius: 8
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      flexWrap: "wrap",
-      gap: 8,
-      marginBottom: 6
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12,
-      fontWeight: 700,
-      color: "#3B4A38"
-    }
-  }, dateLabel(p.workDate), " の実績(記録者ごと)"), /*#__PURE__*/React.createElement("button", {
-    onClick: exportSummaryCSV,
-    style: S.smallSecondary,
-    className: "no-print"
-  }, "CSV")), /*#__PURE__*/React.createElement("table", {
-    style: {
-      width: "100%",
-      borderCollapse: "collapse",
-      fontSize: 12
-    }
-  }, /*#__PURE__*/React.createElement("thead", null, /*#__PURE__*/React.createElement("tr", null, ["記録者", "圃場", "面積", "散布量"].map((h, i) => /*#__PURE__*/React.createElement("th", {
-    key: h,
-    style: {
-      textAlign: i === 0 ? "left" : "right",
-      padding: "3px 4px",
-      borderBottom: "1px solid #CBD6C4",
-      color: "#5B6B57",
-      fontWeight: 700
-    }
-  }, h)))), /*#__PURE__*/React.createElement("tbody", null, recSummary.map(r => /*#__PURE__*/React.createElement("tr", {
-    key: r.by
-  }, /*#__PURE__*/React.createElement("td", {
-    style: {
-      padding: "3px 4px",
-      borderBottom: "1px solid #E6ECE2",
-      fontWeight: 700
-    }
-  }, r.by), /*#__PURE__*/React.createElement("td", {
-    style: {
-      padding: "3px 4px",
-      borderBottom: "1px solid #E6ECE2",
-      textAlign: "right"
-    },
-    className: "num"
-  }, r.fieldCount), /*#__PURE__*/React.createElement("td", {
-    style: {
-      padding: "3px 4px",
-      borderBottom: "1px solid #E6ECE2",
-      textAlign: "right"
-    },
-    className: "num"
-  }, dispArea(r.areaA, p.areaUnitKey), " ", areaSuffix(p.areaUnitKey)), /*#__PURE__*/React.createElement("td", {
-    style: {
-      padding: "3px 4px",
-      borderBottom: "1px solid #E6ECE2",
-      textAlign: "right"
-    },
-    className: "num"
-  }, fmt(r.sprayedL, 2), " L"))))), /*#__PURE__*/React.createElement("p", {
-    style: {
-      margin: "6px 0 0",
-      fontSize: 11,
-      color: "#6B7A66"
-    }
-  }, "実績を入れた作業だけを数えています。名前は各端末の「記録者名」で、表記が違うと別の行になります")), /*#__PURE__*/React.createElement("div", {
+  }, "印刷"))), /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.cardLabel,
       display: "none"
@@ -9511,9 +9550,19 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.97",
+    ver: "v8.98",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "⚡ 進捗の取得と差分取得が、毎回「作業」シートを全部読んでいたのをやめました。日付の列を先に見て、要る行だけを読みます。170圃場を100日使った想定で 408,000セル → 29,264セル(実測)。シーズン後半に進捗地図が重くなるのを防ぎます",
+      "⚡ 台帳(防除記録)への送信をまとめ送りにしました。170圃場に実績を入れた日は、従来 340回の往復を順番に待っていましたが、7回になります。※スプレッドシート側の Code.gs を差し替えて再デプロイしてください(古いままでも自動で従来の1件ずつに戻ります)",
+      "👤 札に出す名前を「最後に実施済みを押した人」に変えました(v8.97 は「先に済ませた人」でした)",
+      "🧮 記録者ごとの実績表が「作業リストを開く」の中に入っていて見つからなかったのを、地図の下に常に出すようにしました",
+      "🧪 検査を 436 → 452 件、シート側を 135 → 162 件に増やしました"
+    ]
+  }, {
+    ver: "v8.97",
+    date: "2026-08",
     notes: [
       "👤 進捗地図の札に、散布を済ませた人の名前を出すようにしました。実施済(緑)と前日までに済(青)のときだけ出ます。未実施には名前が入っていないので出しません",
       "🐞 これまで吹き出しに出ていた記録者名が、他の端末がやった作業でも自分の名前になっていた不具合を直しました。受け取った名前をこの端末の記録者名で上書きしていました",

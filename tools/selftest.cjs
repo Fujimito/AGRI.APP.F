@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "labelByText", "summarizeByRecorder", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "labelByText", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -823,7 +823,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     const m = f([E(1, "2026-08-28", "done", { pending: true })], day);
     eq("前日ぶんの未送信は今日の印にしない", m.get("1").pending, false);
   }
-  // 重複して済ませたとき、先に済ませた人を採る(v8.97)
+  // 重複して済ませたとき、最後に済ませた人を採る(v8.98)
   // 2チームで回っていて同じ圃場を二重に済ませることがある。
   // 受信の順で名前が入れ替わると、見るたびに札の名前が変わる。
   {
@@ -831,14 +831,14 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
       E(1, day, "done", { by: "Bさん", atTime: "2026-08-29T05:00:00.000Z" }),
       E(1, day, "done", { by: "Aさん", atTime: "2026-08-29T01:00:00.000Z" })
     ], day);
-    eq("あとから来ても、先に済ませた人を採る", m.get("1").by, "Aさん");
+    eq("先に来ても、最後に済ませた人を採る", m.get("1").by, "Bさん");
   }
   {
     const m = f([
       E(1, day, "done", { by: "Aさん", atTime: "2026-08-29T01:00:00.000Z" }),
       E(1, day, "done", { by: "Bさん", atTime: "2026-08-29T05:00:00.000Z" })
     ], day);
-    eq("順番を逆にしても同じ結果になる", m.get("1").by, "Aさん");
+    eq("順番を逆にしても同じ結果になる", m.get("1").by, "Bさん");
   }
   {
     const m = f([
@@ -852,7 +852,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
       E(1, day, "done", { by: "Bさん" }),
       E(1, day, "done", { by: "Aさん", atTime: "2026-08-29T05:00:00.000Z" })
     ], day);
-    eq("刻を持っているほうを採る(空を「先」と見なさない)", m.get("1").by, "Aさん");
+    eq("刻を持っているほうを採る(空を「最後」と見なさない)", m.get("1").by, "Aさん");
   }
   {
     const m = f([
@@ -867,7 +867,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
       E(1, day, "done", { by: "Aさん", atTime: "2026-08-29T01:00:00.000Z", sprayedL: 30 }),
       E(1, day, "done", { by: "Bさん", atTime: "2026-08-29T05:00:00.000Z", sprayedL: 99 })
     ], day);
-    eq("数量も先の作業のものに揃える", m.get("1").sprayedL, 30);
+    eq("数量も最後の作業のものに揃える", m.get("1").sprayedL, 99);
   }
   // 内部の作業用の値を外に出さない
   {
@@ -878,6 +878,61 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   // 呼び側が刻を渡しているか。渡さなければ上の規則は動かない
   eq("サーバーから来た刻を渡す", src.includes("atTime: it.atTime || \"\","), true);
   eq("手元の作業の刻も渡す", src.includes("atTime: w.reportAt || \"\","), true);
+}
+
+// ── 台帳へのまとめ送り(v8.98) ────────────────
+// 170圃場に実績を入れた日は、record 170回 + report 170回 を
+// 直列で往復していた。順番を崩さずに1本の列にする。
+{
+  const B = t.buildLedgerOps;
+  const W = (id, o) => Object.assign({ id, synced: false, reported: false, reportSynced: false, unreportPending: false }, o || {});
+
+  {
+    const ops = B([W(1)]);
+    eq("未送信なら調合の登録だけ", ops.map(o => o.op), ["record"]);
+    eq("成功時に立てる印", ops[0].mark, "synced");
+  }
+  {
+    const ops = B([W(1, { reported: true })]);
+    eq("未送信で実績ありなら record のあとに report",
+      ops.map(o => o.op), ["record", "report"]);
+  }
+  {
+    const ops = B([W(1, { synced: true, reported: true, unreportPending: true })]);
+    eq("取り消しは報告より先", ops.map(o => o.op), ["unreport", "report"]);
+  }
+  {
+    const ops = B([W(1, { synced: true, reported: true, reportSynced: true })]);
+    eq("送るものが無ければ空", ops.length, 0);
+  }
+  {
+    const ops = B([W(1, { synced: true, reported: true })]);
+    eq("調合済みなら報告だけ", ops.map(o => o.op), ["report"]);
+  }
+  {
+    const ops = B([W(1), W(2, { synced: true, reported: true })]);
+    eq("圃場の順は崩さない",
+      ops.map(o => o.id + ":" + o.op), ["1:record", "2:report"]);
+  }
+  {
+    eq("空の一覧でも落ちない", B([]).length, 0);
+    eq("undefined でも落ちない", B(undefined).length, 0);
+    eq("null が混ざっても飛ばす", B([null, W(1)]).length, 1);
+  }
+  // 170圃場分の往復回数。ここが C の目的
+  {
+    const many = [];
+    for (let i = 1; i <= 170; i++) many.push(W(i, { reported: true }));
+    const ops = B(many);
+    eq("170圃場の操作数", ops.length, 340);
+    eq("50件ずつなら7回の往復", Math.ceil(ops.length / 50), 7);
+  }
+  // 呼び側の配線
+  eq("まとめ送りを使う", src.includes('type: "pushRecords"'), true);
+  eq("順を作るのは buildLedgerOps", src.includes("const ops = buildLedgerOps(targets);"), true);
+  eq("古い GAS に当たったら１件ずつに戻す",
+    src.includes('if (j && j.error === "unknown type") { batchOk = false; break; }'), true);
+  eq("送る件数は GAS 側の上限より小さい", src.includes("const REC_CHUNK = 50;"), true);
 }
 
 // ── 記録者ごとの実績集計(v8.97) ──────────────
