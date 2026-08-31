@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.07";
+const APP_VERSION = "v9.08";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -10723,7 +10723,20 @@ const progressEntries = (items, works, from, to, recorder) => {
       fieldKey: String(fieldId)
     }));
   };
-  (items || []).forEach(it => put(it.id, it.fieldId, it.workDate, {
+  // サーバー由来にも同じ範囲を掛ける(v9.08)。
+  //
+  // items は端末に保存した写し(tankmix:progresssnap)から来ることがある。
+  // 写しは前に取ったときの範囲のままなので、範囲を狭めたあと
+  // (v9.01 で 3日 → 2日にした)や、作業日を切り替えた直後は、
+  // 範囲の外の日が混ざる。手元の作業だけ範囲で切っていたため、
+  // 写しにしか無い古い日が「前の日に済んだ(青)」として地図に残っていた。
+  //
+  // 提案A の照合が実データで拾った(prevDate 進捗=2026-08-29 / 受信=空 が9圃場)。
+  // 直したのは進捗地図そのものの振る舞いで、照合はそれを見つける役に立った。
+  (items || []).forEach(it => {
+    const wd = String(it.workDate || "");
+    if (!wd || wd < from || wd > to) return;
+    put(it.id, it.fieldId, it.workDate, {
     status: toMapStatus(it.status || "planned"),
     by: it.by || "",
     at: it.at || "",
@@ -10732,7 +10745,8 @@ const progressEntries = (items, works, from, to, recorder) => {
     sprayedL: it.sprayedL || 0,
     areaA: it.areaA || "",
     pending: false
-  }));
+    });
+  });
   (works || []).forEach(w => {
     if (!w.workDate || w.workDate < from || w.workDate > to) return;
     put(w.id, w.fieldId, w.workDate, {
