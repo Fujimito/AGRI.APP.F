@@ -415,6 +415,14 @@ flowchart TD
   </div>
   <div class="col">
   <p>防除記録シートだけチームコード列がなく、記録IDだけで行を探していた。作業IDが内容から決まるので、別チームが同じ日に同じ圃場を入れると衝突する。<strong>v8.85 で修正</strong>(08節)。チームコードは<strong>列16</strong>、つまり末尾に足してある。先頭に挿すと既存シートの全列がずれ、設置済みのスプレッドシートを手で直すことになるため。他のシートは列1なので、位置は揃っていない。</p>
+  <h3>台帳(防除記録)は作業シートから作り直せる — 進行中(v9.04 で照合を開始)</h3>
+  <p><strong>今の形。</strong>端末は同じ散布を<strong>2か所へ別々に送っている</strong>。<code>pushWorks</code> で「作業」シートへ、<code>record</code> / <code>report</code> / <code>unreport</code> で「防除記録」シートへ。別々に書いているので<strong>食い違いうる</strong>。</p>
+  <p><strong>調べた結果。</strong>「防除記録」の16列は<strong>すべて「作業」にもある</strong>。<code>受信日時→更新日時 / 記録ID→作業ID / 散布日→作業日 / 記録者→記録者 / 圃場→圃場名 / 作物→作物 / 面積→実績面積a か 面積a / 薬剤数→薬剤数 / 薬剤内容→薬剤内容 / 総量→総量L / 水量→水量mL÷1000 / 実散布量→実績L / 状態→状態(done なら散布済) / 報告日→実績入力日時 / 備考→実績メモ か 備考 / チームコード→チームコード</code>。記録IDと作業IDは同じもの(どちらもアプリが日付＋圃場IDから決める)。</p>
+  <p><strong>1つだけ足りなかった。</strong>「実績メモ」の列が作業シートに無かった。<code>itemToWork</code> が必ず空を入れていたのはこのため。<strong>v9.04 で列24として末尾に足した</strong>。</p>
+  <p><strong>切り替える前に照合する。</strong><code>ledgerRowFromWork_()</code> が作業行から台帳行を作り、<code>ledgerCheck</code>(読み取りのみ)が今の台帳と突き合わせて <code>一致 / 食い違い / 台帳に無い / 作業に無い</code> の件数と、違った列を返す。設定タブ→送信・共有の「🧾 台帳の照合(開発用)」から呼ぶ。<strong>シートは書き換えない。</strong>2枚とも丸ごと読むので自動では呼ばない。</p>
+  <p><strong>照合で実際に食い違いが1つ見つかった。</strong><code>unreport</code> は実散布量と報告日は消すが、<strong>備考に入れた実績メモは消さない</strong>。そのため実績を取り消しても台帳には実績メモが残る。作業シートから作り直すと予定のメモになる。<code>unreport</code> の送りものは <code>{id}</code> だけで予定のメモを知らないので、<strong>台帳側だけでは直せない</strong>(消すことしかできない)。この食い違いは提案Dを通せば無くなるので直さず、テストで固めてある(<code>gastest</code> 20番)。</p>
+  <p><strong>切り替えるときにやること。</strong>食い違い 0 を確かめたうえで、(1) <code>syncPending</code> の台帳送信をやめる (2) <code>applyRecord_</code> / <code>pushRecords</code> / <code>buildRow_</code> / <code>findRow_</code> / <code>claimRow_</code> と <code>record</code> / <code>report</code> / <code>unreport</code> を消す (3) 台帳を <code>ledgerRowFromWork_</code> から書き出す関数に置き換える。<strong>既存の行は消さないこと。</strong>古い版で入れた記録は作業シートに無く(<code>onlyLedger</code> に出る)、消すと戻せない。</p>
+
   <h3>日付が化ける</h3>
   <p>スプレッドシートは <code>"2026-08-27"</code> をセルに入れた時点で <code>Date</code> と解釈する。読み戻すと <code>Date</code> オブジェクトになり、テキスト書式の列へ書き戻すと <code>"Mon Jul 13 2026 00:00:00 GMT+0900"</code> になる。<code>WORK_TEXT_COLS</code> で書式を固定しつつ、<code>ymd_()</code> が <code>Date</code>・ISO文字列・化けた文字列のどれでも <code>yyyy-MM-dd</code> に戻す。</p>
   </div>

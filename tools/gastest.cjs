@@ -539,9 +539,11 @@ const F2 = {
   const pu = post(ctx, { type: "pull", team: TEAM, since: new Date().toISOString() });
   const pullCells = sh._readCells;
   eq("変化が無ければ何も返さない", pu.works.length, 0);
-  // 日時の列 rows セル + 見出し行の確認 24 セル。行本体は1行も読まない
-  ok("変化が無いときは日時の列と見出しだけで済む (" + pullCells + " ≤ " + (rows + 24) + ")",
-    pullCells <= rows + 24);
+  // 日時の列 rows セル + 見出し行の確認(列数分)。行本体は1行も読まない。
+  // 列を足すたびにここの数字を直すのを避けるため、見出しから引く
+  const headCells = ctx.SpreadsheetApp.getActiveSpreadsheet().getSheetByName("作業").getLastColumn();
+  ok("変化が無いときは日時の列と見出しだけで済む (" + pullCells + " ≤ " + (rows + headCells) + ")",
+    pullCells <= rows + headCells);
 
   // 変化があれば拾う(絞っても取りこぼさない)
   post(ctx, { type: "pushWorks", team: TEAM, items: [{
@@ -777,6 +779,89 @@ const F2 = {
   sh.getRange(2, 11).setValue(new Date(Date.now() - lag - 60000).toISOString());
   const old = post(ctx, { type: "pull", team: TEAM, since: r.serverTime });
   eq("幅より古い行は配り直さない", old.fields.length, 0);
+}
+
+// ── 20. 台帳を作業シートから作れるか(提案D・第2段) ──────────
+// 「防除記録」シートの列は全部「作業」シートにもある。最後に残っていた
+// 実績メモも v9.04 で足した。ここでは、いつもの送り方(pushWorks + record +
+// report)で入れたあと、作業シートから作り直した台帳が今の台帳と
+// 一致することを確かめる。一致するなら record / report は要らなくなる。
+{
+  const ctx = makeContext({});
+  const CHEMS = [{ name: "薬剤A", useName: "殺菌剤", formName: "フロアブル", ratio: 1000, ml: 100 }];
+  const CHEM_TEXT = "薬剤A(殺菌剤・フロアブル・1000倍・100mL)";
+  const ID = 9101;
+  const W = {
+    id: ID, workDate: "2026-08-20", fieldId: 3, fieldName: "北の田",
+    status: "done", plannedL: 100, sprayedL: 95, reportAreaA: 12.5,
+    chemCount: 1, chemText: CHEM_TEXT, crop: "水稲", areaA: 12.5,
+    chems: CHEMS, totalL: 100, waterMl: 99900, memo: "予定のメモ",
+    reportMemo: "実際は少なめ", seq: 0, by: "藤本", deviceId: "d1",
+    reportedAt: "2026-08-20T04:00:00.000Z",
+    updatedAt: "2026-08-20T04:00:00.000Z",
+  };
+  post(ctx, { type: "pushWorks", team: TEAM, items: [W] });
+  // 実績メモが往復すること(この列が無いと台帳の備考が作れない)
+  eq("実績メモが戻る",
+     post(ctx, { type: "pull", team: TEAM, since: "" }).works[0].reportMemo, "実際は少なめ");
+
+  const rec = {
+    id: ID, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
+    chems: CHEMS, totalL: 100, waterMl: 99900, memo: "予定のメモ",
+  };
+  post(ctx, { type: "record", team: TEAM, recorder: "藤本", record: rec });
+  post(ctx, { type: "report", team: TEAM, recorder: "藤本",
+              record: Object.assign({}, rec, {
+                sprayedL: 95, reportDate: "2026-08-20",
+                reportAreaA: 12.5, reportMemo: "実際は少なめ" }) });
+
+  const c = post(ctx, { type: "ledgerCheck", team: TEAM });
+  eq("作業シートから作った台帳が今の台帳と一致する",
+     [c.ok, c.same, c.differ, c.onlyWork, c.onlyLedger, c.sample],
+     [true, 1, 0, 0, 0, []]);
+
+  // 台帳を手で書き換えたら気づくこと(気づかないなら照合の意味がない)
+  const lg = ctx.SHEET_STATE.getSheetByName("防除記録");
+  lg.getRange(2, 12).setValue(999);            // 実散布量
+  const c2 = post(ctx, { type: "ledgerCheck", team: TEAM });
+  eq("違いがあれば拾う", [c2.same, c2.differ], [0, 1]);
+  eq("どの列が違うかまで出す",
+     [c2.sample[0].why, c2.sample[0].made, c2.sample[0].ledger],
+     ["実散布量(L)", "95", "999"]);
+  lg.getRange(2, 12).setValue(95);
+
+  // 台帳にだけある行(古い版で入れた記録など)は「作業シートに無い」と出す
+  lg.appendRow(["", "9999", "2026-08-01", "藤本", "昔の田", "", "", 0, "", 0, 0, "", "調合済", "", "", TEAM]);
+  const c3 = post(ctx, { type: "ledgerCheck", team: TEAM });
+  eq("台帳にだけある行は数える", [c3.same, c3.onlyLedger], [1, 1]);
+  eq("その行の理由", c3.sample[0].why, "作業シートに無い");
+
+  // 実績を取り消したら、作り直した台帳も「調合済」に戻ること
+  post(ctx, { type: "unreport", team: TEAM, recorder: "藤本", record: { id: ID } });
+  post(ctx, { type: "pushWorks", team: TEAM, items: [Object.assign({}, W, {
+    status: "mixed", sprayedL: 0, reportAreaA: "", reportedAt: "",
+    updatedAt: "2026-08-20T05:00:00.000Z" })] });
+  const c4 = post(ctx, { type: "ledgerCheck", team: TEAM });
+  // ここで実際に食い違いが見つかった(照合の意味があった例)。
+  // unreport は実散布量と報告日は消すが、備考に入れた実績メモは消さない。
+  // そのため、実績を取り消したあとも台帳には実績メモが残る。
+  // 作業シートから作り直すと予定のメモになる。
+  // unreport の送りものは {id} だけで、予定のメモを知らないので、
+  // 台帳側だけでは直せない(消すことしかできない)。
+  // 提案D を通せばこの食い違い自体がなくなるので、ここでは直さず、
+  // 黙って変わらないように固めておく。
+  eq("取り消し後は備考だけ食い違う(既知)",
+     [c4.differ, c4.sample[0].why, c4.sample[0].made, c4.sample[0].ledger],
+     [1, "備考", "予定のメモ", "実際は少なめ"]);
+  // 9999 の行は作業シートに無いまま
+  eq("残っているのは台帳だけの行", c4.onlyLedger, 1);
+  // 状態と報告日と実散布量はちゃんと戻っている(備考だけが残る)
+  eq("状態は調合済に戻る", lg.getRange(2, 13).getValue(), "調合済");
+
+  eq("ledgerCheck は team 必須",
+     post(ctx, { type: "ledgerCheck" }).error, "team required");
+  eq("features に載っている",
+     (JSON.parse(ctx.doGet().getContent()).features || []).indexOf("ledgerCheck") >= 0, true);
 }
 
 // ─────────── 結果 ───────────

@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.03";
+const APP_VERSION = "v9.04";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2479,6 +2479,42 @@ function App() {
   const abortSync = () => {
     abortRef.current = true;
   };
+  // ── 台帳(防除記録)を作業シートから作り直せるかの下見(提案D) ──
+  //
+  // 「防除記録」シートの列は全部「作業」シートにもある。作業シートから
+  // 作り直せるなら、端末が record / report を別に送る必要がなくなり、
+  // 2つのシートが食い違うこともなくなる。
+  // 切り替える前に、実物で「同じものが作れるか」を見る。読むだけで書かない。
+  // シートを丸ごと2枚読むので、自動では呼ばない(このボタンからだけ)。
+  const ledgerCheck = async () => {
+    if (!syncReady()) {
+      flash(notReadyMsg());
+      return;
+    }
+    flash("台帳を照合中…");
+    const j = await post({
+      type: "ledgerCheck",
+      team: teamCode.trim()
+    }, 1);
+    if (!j) {
+      flash("照合できません(電波を確認してください)");
+      return;
+    }
+    if (!j.ok) {
+      flash(j.error === "unknown type"
+        ? "スプレッドシート側のスクリプトが古い版です。Code.gs を貼り直して「新バージョン」でデプロイしてください"
+        : "照合できません(" + (j.error || "不明") + ")");
+      return;
+    }
+    const head = "一致 " + j.same + " 件 / 食い違い " + j.differ +
+      " 件 / 台帳に無い " + j.onlyWork + " 件 / 作業に無い " + j.onlyLedger + " 件";
+    const detail = (j.sample || []).slice(0, 5).map(x =>
+      "記録" + x.id + "(" + x.why + (x.made === undefined ? "" :
+        ": 作り直し「" + x.made + "」/ 台帳「" + x.ledger + "」") + ")").join("、");
+    flash((j.differ || j.onlyWork || j.onlyLedger ? "⚠ " : "✅ ") + head +
+      (detail ? " — " + detail : ""));
+  };
+
   const testConnection = async () => {
     const url = gasUrl.trim();
     if (!url) {
@@ -2676,6 +2712,9 @@ function App() {
       totalL: parseFloat(w.totalL) || 0,
       waterMl: parseFloat(w.waterMl) || 0,
       memo: w.memo || "",
+      // v9.04 で送るようにした。台帳(防除記録)の備考は、散布済のときは
+      // これを使う。作業シートに無いと台帳を作業シートから作り直せない(提案D)
+      reportMemo: w.reportMemo || "",
       seq: seq === undefined || seq === null ? "" : seq
     };
   };
@@ -2697,7 +2736,9 @@ function App() {
     reported: it.status === "done",
     sprayedL: it.sprayedL || 0,
     reportAreaA: it.reportAreaA || "",
-    reportMemo: "",
+    // v9.04 までは作業シートに列が無く、必ず空だった。古いGASからは
+    // 今も undefined で来るので、受け側の合流で手元の値を残している
+    reportMemo: it.reportMemo || "",
     reportDate: ymd(it.reportedAt),
     reportAt: String(it.atTime || it.reportedAt || ""),
     seq: it.seq === "" || it.seq === undefined ? "" : Number(it.seq),
@@ -2975,8 +3016,10 @@ function App() {
           synced: old.synced,
           reportSynced: old.reportSynced,
           unreportPending: old.unreportPending,
-          // 実績メモは作業シートに列が無く、itemToWork が必ず空を入れる。
-          // 自分が送った行が戻ってきたときに消えていた(v8.78)
+          // 実績メモは v9.04 まで作業シートに列が無く、必ず空で戻ってきた。
+          // 自分が送った行が戻ってきたときに消えていた(v8.78)。
+          // 列を足したあとも、古いGASにつないでいる間は空で来るので、
+          // 「来たほうを優先し、無ければ手元を残す」は変えない
           reportMemo: inc.reportMemo || old.reportMemo || ""
         } : itemToWork(inc));
         wChanged++;
@@ -3615,6 +3658,7 @@ function App() {
     authKey,
     setAuthKey,
     testConnection,
+    ledgerCheck,
     cloudSave,
     cloudLoad,
     syncShared,
@@ -9326,7 +9370,16 @@ function SettingsTab(p) {
       width: "100%",
       marginTop: 12
     }
-  }, "接続テスト"), /*#__PURE__*/React.createElement("p", {
+  }, "接続テスト"), /*#__PURE__*/React.createElement("button", {
+    onClick: p.ledgerCheck,
+    style: {
+      ...S.smallSecondary,
+      width: "100%",
+      marginTop: 8
+    }
+  }, "🧾 台帳の照合(開発用)"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "「台帳の照合」は、「防除記録」シートを「作業」シートから作り直せるかを見るためのものです(読むだけで、シートは書き換えません)。食い違いが 0 のままなら、端末が台帳へ別に送る仕組みをやめられます。"), /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "チームコードは、一緒に作業する端末で同じ文字列にします。大文字と小文字は区別されます。共有パスワードはGAS側でスクリプトプロパティ SHARED_SECRET を設定しているときだけ使います。未設定なら空欄で動きますが、その場合はURLを知っている人なら誰でも書き込めます。"), secHead("２　データ共有(圃場・薬剤)"), /*#__PURE__*/React.createElement("button", {
     onClick: p.syncShared,

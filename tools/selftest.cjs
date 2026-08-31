@@ -1217,6 +1217,20 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     (src.match(/labelsVisible\(p\.showLabels, zoom\), zoom, p\.onlyTarget/g) || []).length, 2);
 }
 
+// ── 台帳を作業シートから作る下ごしらえ(v9.04・提案D) ──
+// 「防除記録」の列で唯一作業シートに無かったのが実績メモ。
+// これを送らないと、台帳の備考を作業シートから作れない。
+{
+  eq("実績メモを送る", src.includes('reportMemo: w.reportMemo || "",'), true);
+  eq("受け取った実績メモを入れる", src.includes('reportMemo: it.reportMemo || "",'), true);
+  // 古いGASはこの列を返さない。空で上書きしないこと(v8.78 で一度壊している)
+  eq("無ければ手元を残す",
+    src.includes('reportMemo: inc.reportMemo || old.reportMemo || ""'), true);
+  eq("照合を手で呼べる", src.includes('type: "ledgerCheck",'), true);
+  eq("照合は書き込まない(ボタンの案内に明記)",
+    src.includes("読むだけで、シートは書き換えません"), true);
+}
+
 // ── 重なる札を間引く(v9.02) ────────────────────
 // 倍率のしきい値(v9.00)だけでは重なりを止められない。倍率15では30aの圃場でも
 // 27px しかないのに札は 60〜90px あるので、170圃場を引いて見ると札が

@@ -354,6 +354,10 @@ const WORK_HEADERS = [
   "水量mL",   // 21
   "備考",     // 22
   "並び順", // 23 その日の中での位置
+  // v9.04 で追加。台帳(防除記録)の「備考」は、散布済のときは実績メモを使う。
+  // 作業シートにこの列が無いと、台帳を作業シートから作り直せない(提案D)。
+  // 末尾に足すこと。途中に入れると既存の行の値が列ごとずれる。
+  "実績メモ", // 24
 ];
 const WORK_ID_COL = 0, WORK_EDIT_COL = 14, WORK_AT_COL = 15;
 
@@ -483,7 +487,7 @@ function getRecSheet_(name, headers, headBg) {
 // 14 は v8.97 で追加。これまで抜けており、入れた日付がシート側で Date に
 // 変換されていた(吹き出しに "Thu Aug 27 2026 ..." が出ていたのはこれ)。
 // 刻まで入った ISO を置くには、文字列のまま保たないとタイムゾーンがずれる。
-const WORK_TEXT_COLS = [3, 14, 15, 16];
+const WORK_TEXT_COLS = [3, 14, 15, 16, 25];
 // 圃場マスタと薬剤マスタにも同じ手当てが要る。編集日時・更新日時は ISO 文字列だが、
 // 書式が固定されていないとシートが日付として解釈して Date で返す。
 // atIso_ が読み側で吸収するようになったが、そもそも化けさせない方が確実(1始まり)。
@@ -592,6 +596,7 @@ function workRow_(w, team, at) {
     Number(w.waterMl) || "",
     safeCell_(w.memo || ""),
     (w.seq === 0 || Number(w.seq)) ? Number(w.seq) : "",
+    safeCell_(w.reportMemo || ""),
   ];
 }
 
@@ -623,6 +628,8 @@ function workObj_(r) {
     waterMl: r[21] === "" ? 0 : Number(r[21]),
     memo: String(r[22] || ""),
     seq: r[23] === "" ? "" : Number(r[23]),
+    // v9.04。古いシートにはこの列が無く undefined になるので、空に寄せる
+    reportMemo: String(r[24] == null ? "" : r[24]),
   };
 }
 
@@ -1060,6 +1067,132 @@ function buildRow_(data, status) {
   ];
 }
 
+// ══════════ 台帳を作業シートから作る(提案D・第2段) ══════════
+//
+// 「防除記録」シートの列は、すべて「作業」シートにもある。
+//   受信日時→更新日時 / 記録ID→作業ID / 散布日→作業日 / 記録者→記録者 /
+//   圃場→圃場名 / 作物→作物 / 面積→実績面積a か 面積a / 薬剤数→薬剤数 /
+//   薬剤内容→薬剤内容 / 総量→総量L / 水量→水量mL÷1000 / 実散布量→実績L /
+//   状態→状態(done なら散布済) / 報告日→実績入力日時 / 備考→実績メモ か 備考 /
+//   チームコード→チームコード
+// 記録IDと作業IDは同じもの(どちらもアプリが日付＋圃場IDから決める)。
+// 最後に残っていた「実績メモ」も v9.04 で作業シートに足した。
+//
+// つまり台帳は作業シートから作り直せる。そうすれば、
+//   ・端末が record / report / unreport を送る必要がなくなる
+//   ・作業シートと台帳が食い違うことがなくなる(今は別々に書いている)
+// が、台帳は人が読む・印刷する「元帳」なので、確かめずに切り替えない。
+// ここでは作るだけ。今の台帳と突き合わせる ledgerCheck から使う。
+//
+// ★ここに書き込む処理を足さないこと。読み取り(doRead_)から呼ぶため、
+//   ロックを取らずに走る。
+function ledgerRowFromWork_(r) {
+  const done = String(r[5] || "") === "done";
+  // 面積は実績面積を優先する。実績が入っていなければ登録上の面積。
+  // 台帳の buildRow_ / report と同じ順番にすること
+  const area = Number(r[8]) || Number(r[18]) || "";
+  return [
+    // 受信日時。台帳は「受け取った時刻」、作業シートは「更新日時」。
+    // どちらも「サーバーが最後に書いた時刻」なので同じものを指す
+    atIso_(r[WORK_AT_COL]),
+    String(r[0]),
+    ymd_(r[2]),
+    String(r[11] || ""),
+    String(r[4] || ""),
+    String(r[17] || ""),
+    area,
+    Number(r[9]) || 0,
+    String(r[10] || ""),
+    Number(r[20]) || 0,
+    Math.round(Number(r[21]) || 0) / 1000, // mL→L
+    done ? (Number(r[7]) || "") : "",
+    done ? "散布済" : "調合済",
+    done ? ymd_(r[13]) : "",
+    // 散布済のときは実績メモを優先する(台帳の buildRow_ と同じ)
+    String((done ? (r[24] || r[22]) : r[22]) || ""),
+    String(r[1] || ""),
+  ];
+}
+
+// 台帳の1行を、突き合わせできる形にそろえる。
+// シートから読むと数値が Date や文字列で返ることがあるので、
+// 見た目の値ではなく「同じ意味か」で比べる。
+const LEDGER_NUM_COLS = [6, 7, 9, 10, 11];   // 面積 / 薬剤数 / 総量 / 水量 / 実散布量
+const LEDGER_DATE_COLS = [2, 13];            // 散布日 / 報告日
+// 受信日時(0)は比べない。台帳は「その行を書いた時刻」、作業シートは
+// 「その作業を最後に書いた時刻」で、同じ行でも必ずずれる。
+// 台帳を作り直す判断には関係しない。
+const LEDGER_SKIP_COLS = [0];
+function ledgerNorm_(row) {
+  const out = [];
+  for (let i = 0; i < HEADERS.length; i++) {
+    if (LEDGER_SKIP_COLS.indexOf(i) >= 0) { out.push(""); continue; }
+    const v = row[i];
+    if (LEDGER_DATE_COLS.indexOf(i) >= 0) { out.push(ymd_(v) || ""); continue; }
+    if (LEDGER_NUM_COLS.indexOf(i) >= 0) {
+      const n = Number(v);
+      out.push(v === "" || v === null || v === undefined || isNaN(n) ? "" : String(n));
+      continue;
+    }
+    // 数式インジェクション対策で先頭に付くアポストロフィは、
+    // getValue では返らない。ここでは素の文字列として比べる
+    out.push(String(v == null ? "" : v));
+  }
+  return out;
+}
+
+// 今の台帳と、作業シートから作り直した台帳を突き合わせる。読み取りだけ。
+// 返すのは件数と、違いの見本(最大20件)。
+function ledgerCheck_(team) {
+  const wk = getWorkSheet_();
+  const lg = getSheet_();
+  const made = {};   // 記録ID → 作り直した行
+  if (wk.getLastRow() >= 2) {
+    const rows = wk.getRange(2, 1, wk.getLastRow() - 1, WORK_HEADERS.length).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r[0] && r[0] !== 0) continue;
+      if (team && String(r[1]) !== String(team)) continue;
+      if (r[16]) continue; // 削除済み
+      made[String(r[0])] = ledgerRowFromWork_(r);
+    }
+  }
+  const have = {};
+  if (lg.getLastRow() >= 2) {
+    const rows = lg.getRange(2, 1, lg.getLastRow() - 1, HEADERS.length).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r[COL.ID - 1] && r[COL.ID - 1] !== 0) continue;
+      const rt = String(r[COL.TEAM - 1] == null ? "" : r[COL.TEAM - 1]);
+      // チーム欄が空の行は古い行。どのチームのものか分からないので、
+      // 突き合わせの対象には入れるが、チーム違いとしては数えない
+      if (team && rt && rt !== String(team)) continue;
+      have[String(r[COL.ID - 1])] = r;
+    }
+  }
+  const sample = [];
+  let same = 0, differ = 0, onlyWork = 0, onlyLedger = 0;
+  const push = o => { if (sample.length < 20) sample.push(o); };
+  for (const id in made) {
+    if (!have[id]) { onlyWork++; push({ id: id, why: "台帳に無い" }); continue; }
+    const a = ledgerNorm_(made[id]);
+    const b = ledgerNorm_(have[id]);
+    let hit = -1;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) { hit = i; break; }
+    if (hit < 0) { same++; continue; }
+    differ++;
+    push({ id: id, why: HEADERS[hit], made: a[hit], ledger: b[hit] });
+  }
+  for (const id in have) {
+    if (!made[id]) { onlyLedger++; push({ id: id, why: "作業シートに無い" }); }
+  }
+  return {
+    same: same, differ: differ,
+    onlyWork: onlyWork, onlyLedger: onlyLedger,
+    sample: sample,
+  };
+}
+
 // ── 読み取り専用の処理 ──
 // 呼び出し元(doPost)で合言葉の照合を済ませてから入る。ここでは認証しない。
 // シートに書き込む処理を絶対に足さないこと。ロックを取らずに走るため、
@@ -1110,6 +1243,15 @@ function doRead_(type, data) {
     });
   }
 
+  // 台帳を作業シートから作り直せるかの下見(提案D)。書き込みはしない。
+  // シートを丸ごと2枚読むので、自動では呼ばない。設定タブのボタンから手で呼ぶ。
+  if (type === "ledgerCheck") {
+    if (!data.team) return json_({ ok: false, error: "team required" });
+    const r = ledgerCheck_(data.team);
+    r.ok = true;
+    return json_(r);
+  }
+
   return json_({ ok: false, error: "unknown type" });
 }
 
@@ -1132,6 +1274,7 @@ function doPost(e) {
   }
   const headType = head.type || "record";
   if (headType === "pull" || headType === "progress" || headType === "cloudLoad" ||
+      headType === "ledgerCheck" ||
       headType === "chemdbLoad") {
     try {
       return doRead_(headType, head);
@@ -1277,6 +1420,7 @@ function doGet() {
     // 古いGASのまま進捗マップを開くと unknown type が返るだけで理由が分からない。
     features: ["record", "report", "unreport", "chemdbLoad", "cloudSave", "cloudLoad",
                "pushFields", "pushWorks", "pushChems", "pull", "progress", "workPlan",
+               "ledgerCheck", "workReportMemo",
                "pushRecords"],
   });
 }
