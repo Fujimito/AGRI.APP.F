@@ -77,31 +77,41 @@
     .print-only { display: block !important; }
   }
   /* 圃場名の札。下に塗りと衛星写真が来るので、暗い無彩色にして文字を読ませる。
-     leaflet.css の .leaflet-tooltip はこの <style> より後に読み込まれるので、
-     同じ強さのセレクタでは負ける。必ず .leaflet-tooltip と重ねて指定すること。 */
-  .leaflet-tooltip.field-label { background: rgba(20,26,20,0.86); color:#fff; border:none; font-weight:700; font-size:12px; padding:2px 6px; box-shadow:none; white-space:nowrap; }
-  .leaflet-tooltip.field-label::before { display:none; }
+     v9.01 でツールチップをやめ、divIcon のマーカーにした。
+     ツールチップは中央寄せのために1枚ごとに実寸を測り、
+     170枚で 886ms かかっていた(divIcon なら 17ms)。
+     外側の .field-label は 0×0 にし、中の .fl-inner を transform で中央に寄せる。
+     こうすればブラウザに大きさを測らせずに中央揃えにできる。 */
+  .leaflet-marker-icon.field-label {
+    width:0 !important; height:0 !important; margin:0 !important;
+    background:none; border:none;
+    /* 札がクリックを食うと、圃場を押しても吹き出しが開かない */
+    pointer-events:none;
+  }
+  .field-label .fl-inner {
+    position:absolute; left:0; top:0; transform:translate(-50%,-50%);
+    display:block; white-space:nowrap;
+    background: rgba(20,26,20,0.86); color:#fff; border-radius:3px;
+    font-weight:700; font-size:12px; padding:2px 6px; line-height:1.25;
+  }
   /* 圃場名と面積は行を分ける。名前に数字が入ると
      「嘉島60 29.17 a」のようにどこまでが名前か読めない */
-  .leaflet-tooltip.field-label .fl-name { display:block; line-height:1.25; }
-  .leaflet-tooltip.field-label .fl-crop { font-weight:600; color:#D8E6DC; }
-  .leaflet-tooltip.field-label .fl-area { display:block; font-weight:600; font-size:11px; color:#BFE3CD; line-height:1.2; }
-  /* Googleマップ版の面積は別の札なので、名前の下へずらす */
-  .gm-field-area { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); transform: translateY(13px); }
+  .field-label .fl-name { display:block; line-height:1.25; }
+  .field-label .fl-crop { font-weight:600; color:#D8E6DC; }
+  .field-label .fl-area { display:block; font-weight:600; font-size:11px; color:#BFE3CD; line-height:1.2; }
   /* 実施済みのときだけ出る、済ませた人の名前 */
-  .leaflet-tooltip.field-label .fl-by { display:block; font-weight:600; font-size:11px; color:#FFE9A8; line-height:1.2; }
-  /* Googleマップ版の記録者名は3枚目の札なので、面積のさらに下へ */
-  .gm-field-by { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); transform: translateY(26px); }
+  .field-label .fl-by { display:block; font-weight:600; font-size:11px; color:#FFE9A8; line-height:1.2; }
   /* 面積で札の大きさを分ける。小さい圃場の札が大きな圃場と
      同じ大きさだと、寄ったときに小さいほうだけ目立つ */
-  .leaflet-tooltip.field-label.fl-lg { font-size:13px; padding:3px 7px; }
-  .leaflet-tooltip.field-label.fl-md { font-size:12px; padding:2px 6px; }
-  .leaflet-tooltip.field-label.fl-sm { font-size:11px; padding:1px 5px; }
-  .leaflet-tooltip.field-label.fl-lg .fl-area,
-  .leaflet-tooltip.field-label.fl-lg .fl-by { font-size:12px; }
-  .leaflet-tooltip.field-label.fl-sm .fl-area,
-  .leaflet-tooltip.field-label.fl-sm .fl-by { font-size:10px; }
-  .leaflet-tooltip.field-label .fl-box { display: block; }
+  .field-label.fl-lg .fl-inner { font-size:13px; padding:3px 7px; }
+  .field-label.fl-md .fl-inner { font-size:12px; padding:2px 6px; }
+  .field-label.fl-sm .fl-inner { font-size:11px; padding:1px 5px; }
+  .field-label.fl-lg .fl-area, .field-label.fl-lg .fl-by { font-size:12px; }
+  .field-label.fl-sm .fl-area, .field-label.fl-sm .fl-by { font-size:10px; }
+  /* Googleマップ版の面積は別の札なので、名前の下へずらす */
+  .gm-field-area { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); transform: translateY(13px); }
+  /* Googleマップ版の記録者名は3枚目の札なので、面積のさらに下へ */
+  .gm-field-by { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); transform: translateY(26px); }
   /* Googleマップ版の札は背景を持てないので、縁取りで読ませる */
   .gm-field-label { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); }
   .vtx-icon { background:transparent; border:none; }

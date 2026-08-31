@@ -326,7 +326,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("進捗 今日の未実施は前日の済より上(今日やることを優先して見せる)",
     t.PROGRESS_RANK.planned > t.PROGRESS_RANK.donePrev, true);
   eq("進捗 対象外が最下位", t.PROGRESS_RANK.donePrev > t.PROGRESS_RANK.none, true);
-  eq("さかのぼる日数は3日", t.PROGRESS_CARRY_DAYS, 3);
+  eq("さかのぼる日数は2日(今日と前日)", t.PROGRESS_CARRY_DAYS, 2);
   // サーバーから来る状態(planned / mixed / done)と、旧版の local を寄せる
   eq("進捗 done は実施済", t.toMapStatus("done"), "done");
   eq("進捗 local(未送信)は実施済", t.toMapStatus("local"), "done");
@@ -1103,7 +1103,19 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     (src.match(/showLabel && zoom >= LABEL_MIN_ZOOM \+ lsz\.step/g) || []).length, 2);
   eq("圃場登録タブは帯で描き直す",
     (src.match(/labelBandOf\(zoom, LABEL_MIN_ZOOM\)/g) || []).length, 2);
-  eq("札の大きさを CSS に渡す", src.includes('"field-label fl-" + lsz.size'), true);
+  eq("札の大きさを CSS に渡す", src.includes('className: "field-label fl-" + sizeClass'), true);
+  // ── 札の作り方(v9.01) ──
+  // permanent ツールチップは1枚ごとに実寸を測るため、170枚で 886ms。
+  // divIcon なら 17ms(ブラウザで実測)。戻すとスマホが数秒止まる。
+  eq("札は divIcon で作る", src.includes("const makeFieldLabel = (L, latlng, html, sizeClass)"), true);
+  eq("大きさを測らせない(iconSize は null)", src.includes("iconSize: null"), true);
+  eq("札はクリックを食わない", src.includes("interactive: false,") && src.includes("keyboard: false"), true);
+  eq("圃場の札に permanent ツールチップを使わない",
+    src.includes('permanent: true,') && src.includes('direction: "center"'), false);
+  eq("両方の Leaflet 地図で使う(2か所)",
+    (src.match(/makeFieldLabel\(L, f\.center \|\| polygonCenter\(f\.polygon\)/g) || []).length, 2);
+  eq("札を消すのを忘れていない",
+    src.includes("if (cur.label) grp.removeLayer(cur.label);"), true);
   // ここが最初の実装で抜けていた。署名が全体の on/off だけだったため、
   // 倍率を 16 → 17 に上げても小さい圃場が一度も描き直されなかった
   eq("署名にも圃場ごとの判定を入れる",
@@ -1237,7 +1249,10 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("works が無くても落ちない", c(null, day, 3), []);
   // 日数を変えられる
   eq("2日ぶんなら前々日は見ない", c([W(1, "2026-08-27", false)], day, 2), []);
-  eq("既定は3日", c([W(1, "2026-08-27", false)], day), [1]);
+  // 既定は PROGRESS_CARRY_DAYS(=2)。選んでいる日は 2026-08-29 なので、
+  // 見るのは 08-28 まで。前々日(08-27)は入らない
+  eq("既定は今日と前日だけ", c([W(1, "2026-08-27", false)], day), []);
+  eq("前日のやり残しは既定で拾う", c([W(1, "2026-08-28", false)], day), [1]);
 }
 
 // ── 引き継ぎが画面まで届いているか(ソースの形) ────────

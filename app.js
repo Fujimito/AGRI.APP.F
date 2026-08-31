@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.00";
+const APP_VERSION = "v9.01";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -8468,12 +8468,9 @@ function LeafletMapTab(p) {
         // 名前に数字が入る圃場(「嘉島60」など)で面積と続きの数字に見える。
         // 名前は受け取った文字列でもあるので、必ずエスケープしてからHTMLに入れる。
         // fl-box で包むのは、名前と面積を一つの块にまとめるため。
-        const labelText = '<span class="fl-box"><span class="fl-name">' + escapeHtml(f.name) + (f.crop ? '<span class="fl-crop"> / ' + escapeHtml(f.crop) + '</span>' : "") + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span></span>';
-        poly.bindTooltip(labelText, {
-          permanent: true,
-          direction: "center",
-          className: "field-label fl-" + lsz.size
-        });
+        const labelText = '<span class="fl-name">' + escapeHtml(f.name) + (f.crop ? '<span class="fl-crop"> / ' + escapeHtml(f.crop) + '</span>' : "") + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>';
+        // ツールチップではなく divIcon。理由は makeFieldLabel のところ(v9.01)
+        makeFieldLabel(L, f.center || polygonCenter(f.polygon), labelText, lsz.size).addTo(grp);
       }
       poly.on("click", () => {
         startEditPoly(f);
@@ -9582,9 +9579,19 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v9.00",
+    ver: "v9.01",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "⚡ 札を出しているときの重さを直しました。札の作り方を変え、**170枚で 886ms → 17ms(52倍)** になりました(ブラウザで実測)",
+      "🔍 原因: Leaflet の札(ツールチップ)は中央に寄せるために1枚ごとに自分の大きさをブラウザに測らせていました。枚数が増えると二乗的に遅くなります(30枚 65ms / 60枚 244ms / 128枚 995ms)。大きさを測らせない作り方に変えました(30枚 2.3ms / 60枚 6.3ms / 128枚 11.4ms)",
+      "※ 見た目は変わっていません。進捗地図と圃場登録タブの両方に入っています",
+      "📅 進捗地図がさかのぼる日数を 3日 → **2日(今日と前日)** にしました。青(前日までに済)に出るのも、「やり残しを引き継ぐ」の対象も、前日1日だけになります",
+      "🧪 検査を 496 → 503 件に増やしました"
+    ]
+  }, {
+    ver: "v9.00",
+    date: "2026-08",
     notes: [
       "🏷 札を出す倍率を、圃場の広さで分けました。大きい圃場(30a以上)は今までどおり、中くらい(10～30a)はもう一段、小さい圃場(10a未満)はもう二段寄ってから出ます",
       "🔍 引いた状態では、札のほうが圃場より大きくなっていました。倍率15では 5a の圃場は一辺 5.6px、5a の圃場に 60～90px の札が付くため、隣と重なってどれがどれか分からなくなっていました",
@@ -10426,7 +10433,12 @@ const PROGRESS_ORDER = ["done", "planned", "donePrev", "none"];
 //   尊重するかによる。未検証。効かない場合は1時間あたり約6MBになる。
 // ※ GAS の実行時間と往復そのもの(通常0.5〜3秒)は測れていない。
 //   ただし読む量が同じなので、範囲を広げたことでは増えないはず。
-const PROGRESS_CARRY_DAYS = 3;
+// 進捗地図がさかのぼる日数(選んでいる日を含む)。
+// 2 = 今日と前日だけ。v9.00 までは 3 だったが、青(前日までに済)は
+// 前の日1日で十分という現場の判断で 2 にした(v9.01)。
+// この値は「地図の青」と「引き継ぎの対象」の両方に効く。
+// 大きくするとそのぶんだけサーバーから取る行が増える。
+const PROGRESS_CARRY_DAYS = 2;
 // サーバーから来る状態は planned / mixed / done の3種類(Code.gs の「状態」列)。
 // 地図は実施済かどうかしか見ないので、ここで2つに寄せる。
 const toMapStatus = st => st === "done" || st === "local" ? "done" : "planned";
@@ -10455,6 +10467,37 @@ const PROGRESS_LABEL_MIN_ZOOM = 15;
 // 倍率のしきい値だけでは、寄った状態で圃場が密なときに逃げ道がない。
 // 手で消せるようにする(既定は従来どおり出す)。
 const labelsVisible = (on, zoom) => on !== false && zoom >= PROGRESS_LABEL_MIN_ZOOM;
+
+// ── 札はツールチップではなく divIcon で作る(v9.01) ──
+//
+// Leaflet の permanent ツールチップは、中央寄せの位置を決めるために
+// 1枚ごとに offsetWidth / offsetHeight を読む。これが同期のレイアウトを
+// 強制するため、枚数に対して二乗的に遅くなる。
+//
+// 実測(Leaflet 1.9.4 / Chromium / 375px幅の入れ物、中央値):
+//   枚数   札なし   ツールチップ   divIcon
+//     30    1.0ms     64.8ms      2.3ms
+//     60    2.9ms    243.6ms      6.3ms
+//    128    6.6ms    995.1ms     11.4ms
+//    170    6.2ms    886.3ms     17.1ms
+// 170枚で 886ms → 17ms(52倍)。スマホはこれより数倍遅いので、
+// 従来は1回の描き直しで数秒止まっていたと見られる(実機は未計測)。
+//
+// divIcon は大きさを測らない(位置はアンカーだけで決まる)。
+// 中央寄せは CSS の transform で行うので、見た目は変わらない。
+// iconSize を null にして外側を 0×0 にし、中の span をずらす。
+//
+// interactive:false は必須。札がクリックを食うと、圃場を押しても
+// 吹き出しが開かなくなる(札は圃場の真上に重なっている)。
+const makeFieldLabel = (L, latlng, html, sizeClass) => L.marker(latlng, {
+  icon: L.divIcon({
+    className: "field-label fl-" + sizeClass,
+    html: '<span class="fl-inner">' + html + "</span>",
+    iconSize: null
+  }),
+  interactive: false,
+  keyboard: false
+});
 
 // ── 面積ごとに札を出す倍率を分ける ──
 //
@@ -10809,7 +10852,11 @@ function ProgressLeafletCanvas(p) {
     const d = diffDraw(prevSig, nextSig);
     d.drop.forEach(id => {
       const cur = drawn.get(id);
-      if (cur) grp.removeLayer(cur.layer);
+      if (cur) {
+        grp.removeLayer(cur.layer);
+        // 札を消し忘れると、圃場だけ消えて名前が宙に浮く
+        if (cur.label) grp.removeLayer(cur.label);
+      }
       drawn.delete(id);
     });
     d.draw.forEach(id => {
@@ -10828,6 +10875,8 @@ function ProgressLeafletCanvas(p) {
       // 小さい圃場の札はもう少し寄ってから出す(v9.00)。
       // 引いた状態では札のほうが圃場より大きく、隣と重なって読めない
       const lsz = labelSizeOf(f.areaA);
+      // 札は圃場とは別のレイヤになるので、消すときのために覚えておく
+      let label = null;
       if (showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + lsz.step) {
         // 圃場名は他の端末から受け取った文字列でもあるので、必ずエスケープしてから
         // 札のHTMLに入れる(そのまま入れるとXSSになる)
@@ -10836,13 +10885,11 @@ function ProgressLeafletCanvas(p) {
         // 実施済みのときだけ、済ませた人の名前を3行目に出す(v8.97)。
         // 名前も他の端末から受け取った文字列なので必ずエスケープする
         const byText = labelByText(key, st && st.by);
-        poly.bindTooltip('<span class="fl-box"><span class="fl-name">' + escapeHtml((c.mark ? c.mark + " " : "") + f.name) + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>' + (byText ? '<span class="fl-by">' + escapeHtml(byText) + '</span>' : '') + '</span>', {
-          permanent: true,
-          direction: "center",
-          // 大きさで文字の大きさも変える。同じ大きさだと、寄ったときに
-          // 小さい圃場の札だけが目立って大きな圃場を見失う
-          className: "field-label fl-" + lsz.size
-        });
+        // 大きさで文字の大きさも変える。同じ大きさだと、寄ったときに
+        // 小さい圃場の札だけが目立って大きな圃場を見失う
+        label = makeFieldLabel(L, f.center || polygonCenter(f.polygon),
+          '<span class="fl-name">' + escapeHtml((c.mark ? c.mark + " " : "") + f.name) + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>' + (byText ? '<span class="fl-by">' + escapeHtml(byText) + '</span>' : ''),
+          lsz.size).addTo(grp);
       }
       poly.on("click", () => p.onSelect({
         field: f,
@@ -10850,6 +10897,7 @@ function ProgressLeafletCanvas(p) {
       }));
       drawn.set(id, {
         layer: poly,
+        label: label,
         sig: nextSig.get(id)
       });
     });

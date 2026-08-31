@@ -416,6 +416,19 @@ flowchart TD
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
 
   <div class="fail">
+    <h3>札1枚ごとにブラウザに実寸を測らせていた</h3>
+    <p class="ver">v9.01 で修正 / ブラウザで実測</p>
+    <dl>
+      <dt>症状</dt><dd>札を出していると、スマホ・タブレットで地図が重い。</dd>
+      <dt>機構</dt><dd>Leaflet の permanent ツールチップは、<code>direction:"center"</code> の位置を決めるために <code>_updatePosition</code> で <code>offsetWidth</code> / <code>offsetHeight</code> を読む。これが<strong>同期のレイアウトを強制</strong>し、札を作るたびに発生する。枚数に対して<strong>二乗的</strong>に遅くなる。</dd>
+      <dt>実測</dt><dd>Leaflet 1.9.4 / Chromium / 375px幅の入れ物。同じ HTML・同じ CSS で、作り方だけを変えて比べた(中央値、5回)。<table><tr><th>枚数</th><th>札なし</th><th>ツールチップ</th><th>divIcon</th></tr><tr><td>30</td><td>1.0ms</td><td>64.8ms</td><td><strong>2.3ms</strong></td></tr><tr><td>60</td><td>2.9ms</td><td>243.6ms</td><td><strong>6.3ms</strong></td></tr><tr><td>128</td><td>6.6ms</td><td>995.1ms</td><td><strong>11.4ms</strong></td></tr><tr><td>170</td><td>6.2ms</td><td>886.3ms</td><td><strong>17.1ms</strong></td></tr></table><strong>170枚で 886ms → 17ms(52倍)。</strong>スマホはこれより数倍遅いので、従来は1回の描き直しで数秒止まっていたと見られる(実機は未計測)。</dd>
+      <dt>対処</dt><dd><code>makeFieldLabel()</code>。<code>L.divIcon</code> のマーカーにする。divIcon は大きさを測らない(位置はアンカーだけで決まる)。<strong>中央寄せは CSS で行う</strong>: 外側を 0×0 にし、中の <code>.fl-inner</code> を <code>transform:translate(-50%,-50%)</code> でずらす。見た目は変わらない。</dd>
+      <dt>忘れやすい点</dt><dd>(1) <code>interactive:false</code> と <code>pointer-events:none</code>。札は圃場の真上に重なるので、クリックを食うと吹き出しが開かない。(2) 札は圃場と<strong>別のレイヤ</strong>になるので、差分描画で消すときに両方消すこと。片方だけ消すと名前が宙に浮く。</dd>
+      <dt>未解決</dt><dd>速さは直ったが、<strong>170圃場を一番引いた状態で見ると、札同士が重なって地図が見えない</strong>。倍率16 で 30a の圃場は 27px、札は 60～90px あるので、面積でしきい値を分けても重なりは残る。札の重なりを見て間引く仕組みが要る。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>札のしきい値を変えたのに、小さい圃場の札が永久に出なかった</h3>
     <p class="ver">v9.00 で修正 / 実機の地図を動かして発覚</p>
     <dl>
