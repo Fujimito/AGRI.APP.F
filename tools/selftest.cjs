@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "labelByText", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -1006,6 +1006,46 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("CSV は数式インジェクション対策をかける",
     src.includes('if (/^[=+' + String.fromCharCode(92) + '-@]/.test(t)) t = "' + String.fromCharCode(39) + '" + t;'), true);
   eq("Excel 向けに BOM を付ける", src.includes('"' + String.fromCharCode(92) + 'uFEFF" + lines.join'), true);
+}
+
+// ── 記録者名が端末ごとに違っていた(v8.99) ────
+// 送るときにこの端末の名前で上書きしていたため、by が
+// 「作業した人」ではなく「最後に送った端末」になっていた。
+{
+  const out = t.outgoingBy;
+  eq("名前が無ければこの端末の記録者名", out({}, "Aさん"), "Aさん");
+  eq("既に付いている名前は上書きしない", out({ by: "Bさん" }, "Aさん"), "Bさん");
+  eq("他端末の作業を触っても名前は変わらない",
+    out({ fromTeam: true, by: "Bさん" }, "Aさん"), "Bさん");
+  eq("記録者名が未設定でも落ちない", out({}, undefined), "");
+  eq("作業が無くても落ちない", out(null, "Aさん"), "Aさん");
+
+  // 実際に起きていたずれの再現。
+  // A が済ませ→B が受け取る→B が数量を直す→B が送る→A が受け取る
+  {
+    // A の手元(実施済みを押したときに by が付く)
+    const onA = { id: 1, reported: true, by: "Aさん" };
+    const sentByA = { by: out(onA, "Aさん") };
+    eq("A が送る名前", sentByA.by, "Aさん");
+    // B が受け取る
+    const onB = { id: 1, reported: true, fromTeam: true, by: sentByA.by };
+    eq("B の画面でも A", t.workBy(onB, "Bさん"), "Aさん");
+    // B が数量を直して送り直す
+    const sentByB = { by: out(onB, "Bさん") };
+    eq("B が送っても A のまま", sentByB.by, "Aさん");
+    // A が受け取り直す
+    const backOnA = { id: 1, reported: true, fromTeam: true, by: sentByB.by };
+    eq("A の画面も A のまま", t.workBy(backOnA, "Aさん"), "Aさん");
+  }
+  // 呼び側の配線
+  eq("送信は outgoingBy を通す", src.includes("by: outgoingBy(w, recorder),"), true);
+  eq("送信で recorder を直に入れていない",
+    src.includes("      by: recorder," + String.fromCharCode(10) + "      deviceId,"), false);
+  eq("実施済みを押したときに名前を付ける",
+    src.includes("reportAt: nowIso()," + String.fromCharCode(10) + "        // 実施済みを押した人"), true);
+  eq("取り消しで名前も消す", src.includes('reportAt: "",') && src.includes('by: "",'), true);
+  eq("実績を直しても名前は変えない",
+    src.includes("by: w.by || recorder" + String.fromCharCode(10) + "    } : w);"), true);
 }
 
 // ── 札に出す記録者名(v8.97) ──────────────────

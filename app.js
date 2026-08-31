@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v8.98";
+const APP_VERSION = "v8.99";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -778,6 +778,13 @@ const geoHintFor = (state, hasFix) => {
 //
 // 自分で作った作業には by を持たせていない(送るときに付けている)ので、
 // そのときだけこの端末の記録者名を使う。
+// サーバーへ送るときの記録者名。
+//
+// 既に名前が付いていればそのまま運ぶ。この端末の名前で上書きしない。
+// 上書きすると by が「作業した人」ではなく「最後に送った端末」になり、
+// 他の端末の作業を少し触っただけで名前が入れ替わる。
+// 手元の控えとサーバーの控えがずれ、端末ごとに違う名前が出る(v8.99)。
+const outgoingBy = (w, recorder) => String((w && w.by) || recorder || "");
 const workBy = (w, recorder) => {
   if (!w) return "";
   if (w.fromTeam) return String(w.by || "");
@@ -2000,6 +2007,9 @@ function App() {
           reportMemo: "",
           reportDate: "",
           reportAt: "",
+          // 実施していないことにしたのだから、済ませた人も消す。
+          // 残すと、押し直したときに前の人の名前が残る(v8.99)
+          by: "",
           reportSynced: false,
           // 既にシートへ「散布済」で送ってあるなら、取り消しも送らないと
           // アプリは未実施・シートは散布済という食い違いが黙って残る
@@ -2016,8 +2026,10 @@ function App() {
         reportAreaA: parseFloat(f.areaA) || "",
         reportDate: today(),
         // 実施した刻(ISO)。同じ日に2人が同じ圃場を済ませたとき、
-        // どちらが先かを決めるのに使う。reportDate は日付しか無く決められない(v8.97)
-        reportAt: nowIso()
+        // どちらが後かを決めるのに使う。reportDate は日付しか無く決められない(v8.97)
+        reportAt: nowIso(),
+        // 実施済みを押した人。ここで一度だけ付け、あとは運ぶ(v8.99)
+        by: recorder
       };
     }));
     // 進捗マップの色をその場で他の端末へ届ける。圏外なら未送信のまま残る
@@ -2187,8 +2199,10 @@ function App() {
       reportAreaA: parseFloat(resolveWork(w).areaA) || "",
       reportMemo: rep.memo || "",
       reportDate: today(),
-      // 後から数量を直しても、最初に済ませた刻は動かさない(v8.97)
-      reportAt: w.reportAt || nowIso()
+      // 後から数量を直しても、済ませた刻と人は動かさない。
+      // 数字の訂正は「実施した」ことと別の話(v8.97 / v8.99)
+      reportAt: w.reportAt || nowIso(),
+      by: w.by || recorder
     } : w);
     setWorksSave(next);
     flash("実績を保存しました。作業終了後に一括送信してください");
@@ -2246,6 +2260,7 @@ function App() {
         reportMemo: (rep.memo ? rep.memo + " " : "") + "【連続散布 " + names + " 合計" + fmt(totalSprayed, 2) + "L を面積比按分】",
         reportDate: today(),
         reportAt: w.reportAt || nowIso(),
+        by: w.by || recorder,
         flightGroupId: groupId
       };
     });
@@ -2643,7 +2658,12 @@ function App() {
       reportAreaA: w.reportAreaA || "",
       chemCount: (w.chems || []).length,
       chemText: (w.chems || []).map(c => (c.name || "(無名)") + "(" + (c.ratio || "?") + "倍)").join(" / "),
-      by: recorder,
+      // ここを recorder にすると、by が「作業した人」ではなく
+      // 「最後に送った端末」になる。他の端末がやった作業を
+      // この端末が少しでも触ると、サーバーの名前がこちらに入れ替わる。
+      // その結果、端末ごとに違う名前が出る(v8.99 で直した)。
+      // 名前を付けるのは「実施済みを押したとき」だけで、あとは運ぶ。
+      by: outgoingBy(w, recorder),
       deviceId,
       // 刻まで入った ISO を優先する。古いデータには日付しか無い(v8.97)
       reportedAt: w.reported ? w.reportAt || w.reportDate || "" : "",
@@ -9290,14 +9310,17 @@ function SettingsTab(p) {
       ...S.btnRow,
       marginTop: 10
     }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: p.cloudSave,
-    disabled: p.syncing,
-    style: {
-      ...S.smallSecondary,
-      padding: "13px 0"
-    }
-  }, "☁↑ 端末→共有へ保存"), /*#__PURE__*/React.createElement("button", {
+  },
+  // 「☁↑ 端末→共有へ保存」は v8.99 で外した。
+  //
+  // 全データを1セル(上陀45,000文字)に入れる作りで、170圃場なら
+  // 1日ぶんで 96,587文字(実測)。上限の2倍で、**押しても必ず失敗する**。
+  // 加えて、他の端末があとから足したものを消す。
+  //
+  // 読込(cloudLoad)は残してある。過去に保存した小さいデータを
+  // 取り出す道を塞ぐ理由がない。GAS側の cloudSave も残してあるので、
+  // 古い版のアプリからは今までどおり保存できる。
+  /*#__PURE__*/React.createElement("button", {
     onClick: p.cloudLoad,
     disabled: p.syncing,
     style: {
@@ -9309,7 +9332,9 @@ function SettingsTab(p) {
       ...S.note,
       color: "#A15E08"
     }
-  }, "この2つは、圃場・薬剤・作業リストを丸ごと入れ替える古い方式です。他の端末があとから足したものを消します。上の「🔁 今すぐ同期する」で済むので、普段は使わないでください。古い版の端末から移すときだけ使います。")), /*#__PURE__*/React.createElement("p", {
+  }, "圃場・薬剤・作業リストを丸ごと入れ替える古い方式です。この端末の中身は置き換わり、他の端末があとから足したものは消えます。古い版の端末から移すときだけ使ってください。"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "※ 対になっていた「☁↑ 端末→共有へ保存」は v8.99 で外しました。全データを1つのセル(上限 45,000文字)に入れる作りで、170圃場なら1日ぶんで 96,587文字になり、押しても必ず失敗しました。共有は上の「🔁 今すぐ同期する」で行います。")), /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "共有・送信される内容は、圃場名・作物・面積・圃場の位置情報(地図で囲んだ緯度経度)・地区・薬剤・作業記録・記録者名と、この端末を区別するための端末ID(初回起動時に作られる意味のない文字列で、機種や電話番号とは無関係です)です。作業者の現在地は送信しません。送信先はあなたが設定したGoogleスプレッドシートだけで、このアプリの作者を含む第三者には送信されません。"))), /*#__PURE__*/React.createElement("section", {
     style: S.card
@@ -9550,9 +9575,20 @@ function SettingsTab(p) {
   }, item.desc)))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("バージョン履歴", openSec.history, () => toggleSec("history")), openSec.history && [{
-    ver: "v8.98",
+    ver: "v8.99",
     date: "2026-08",
     isNew: true,
+    notes: [
+      "🐞 端末ごとに違う作業者名が出ていた不具合を直しました。作業を送るときに、すでに付いている記録者名をその端末の名前で上書きしていたためです",
+      "🔍 具体例: A が済ませた圃場を B が受け取り、B が数量を直すと、サーバーの名前が B に入れ替わりました。B の手元は A のままなので、A の画面には B、B の画面には A が出る状態になっていました",
+      "👤 今後は「実施済みを押したとき」に一度だけ名前を付け、あとはそのまま運びます。数量を直しても変わりません。取り消したときは名前も消え、押し直した人の名前になります",
+      "⚠ すでにサーバーに入っている間違った名前は自動では直りません。その圃場の「散布済」を一度取り消して押し直すと、押した人の名前になります",
+      "🗑 設定タブの「☁↑ 端末→共有へ保存」を外しました。全データを1つのセル(上限 45,000文字)に入れる作りで、170圃場なら1日ぶんで 96,587文字(実測)になり、押しても必ず失敗していました。「☁↓ 共有→端末へ読込」は残してあります",
+      "🧪 検査を 452 → 466 件に増やしました"
+    ]
+  }, {
+    ver: "v8.98",
+    date: "2026-08",
     notes: [
       "⚡ 進捗の取得と差分取得が、毎回「作業」シートを全部読んでいたのをやめました。日付の列を先に見て、要る行だけを読みます。170圃場を100日使った想定で 408,000セル → 29,264セル(実測)。シーズン後半に進捗地図が重くなるのを防ぎます",
       "⚡ 台帳(防除記録)への送信をまとめ送りにしました。170圃場に実績を入れた日は、従来 340回の往復を順番に待っていましたが、7回になります。※スプレッドシート側の Code.gs を差し替えて再デプロイしてください(古いままでも自動で従来の1件ずつに戻ります)",

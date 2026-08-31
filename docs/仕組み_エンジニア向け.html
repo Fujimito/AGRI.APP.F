@@ -416,6 +416,29 @@ flowchart TD
   <p class="sub">実際に起きた失敗。設計意図より、こちらのほうが引き継ぐ人の役に立つ。</p>
 
   <div class="fail">
+    <h3>by が「作業した人」ではなく「最後に送った端末」になっていた</h3>
+    <p class="ver">v8.99 で修正 / 利用者からの報告で発覚</p>
+    <dl>
+      <dt>症状</dt><dd>同じ圃場なのに、<strong>端末ごとに違う作業者名が出る</strong>。</dd>
+      <dt>機構</dt><dd><code>workToItem</code> が <code>by: recorder</code>(この端末の名前)を<strong>無条件に</strong>入れていた。送る対象は <code>pendingOf</code>(= 手元で編集されたもの)なので、<strong>他の端末から受け取った作業を少しでも触ると、サーバーの名前がこちらに入れ替わる</strong>。</dd>
+      <dt>なぜ「違う」のか</dt><dd>手元の控えとサーバーの控えがずれるため。<br>A が済ませる(サーバー by=A) → B が受け取る(B の手元 by=A) → <strong>B が数量を直すと B の送信でサーバー by=B になるが、B の手元は A のまま</strong> → A が受け取ると A の画面は B。<br>結果、<strong>A の画面に B、B の画面に A</strong> という逆転が起きる。</dd>
+      <dt>対処</dt><dd><code>outgoingBy(w, recorder)</code> = <code>w.by || recorder</code>。<strong>名前を付けるのは「実施済みを押したとき」の1回だけ</strong>で、あとは運ぶだけにする。取り消しでは <code>by</code> も消す(押し直した人の名前になる)。</dd>
+      <dt>既存データ</dt><dd><strong>自動では直らない</strong>。サーバーに入っている間違った名前は、その圃場の散布済を一度取り消して押し直すと直る。</dd>
+      <dt>教訓</dt><dd>1つの列に<strong>2つの意味</strong>を乗せていた。送信側では「誰が送ったか」、表示側では「誰が作業したか」。共有する値は、<strong>誰がいつ書くのかを一つに決める</strong>。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>押しても必ず失敗するボタンが残っていた</h3>
+    <p class="ver">v8.99 で外した</p>
+    <dl>
+      <dt>機構</dt><dd>「☁↑ 端末→共有へ保存」(<code>cloudSave</code>)は全データを1セルに入れる。シートの1セルは5万文字が上限で、余裕を見て 45,000文字で断っている。</dd>
+      <dt>実測</dt><dd>170圃場の works を JSON にした長さ。1日ぶん <strong>96,587文字</strong> / 3日 289,955 / 10日 967,444。<strong>1日ですでに上限の2倍</strong>で、押せば必ず「大きすぎます」で終わる。</dd>
+      <dt>対処</dt><dd>ボタンだけ外した。<strong>読込(<code>cloudLoad</code>)と GAS 側の <code>cloudSave</code> は残してある</strong>。過去に保存した小さいデータを取り出す道を塞ぐ理由がなく、古い版のアプリを壊す理由もない。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>510件を返すために 408,000セル読んでいた</h3>
     <p class="ver">v8.98 で修正 / 張りぼてで実測</p>
     <dl>
