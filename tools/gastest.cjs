@@ -897,6 +897,107 @@ const F2 = {
      post(ctx, { type: "report", team: TEAM }).error, "invalid payload");
 }
 
+// ── 22. 台帳を作業シートから作り直す(提案D・第3段) ──────────
+// 追記と更新だけ。行は消さない。受信日時は書き換えない。
+{
+  const ctx = makeContext({});
+  const mk = (id, day, done, by, name) => ({
+    id: id, workDate: day, fieldId: 1, fieldName: name,
+    status: done ? "done" : "planned", plannedL: 10,
+    sprayedL: done ? 33 : 0, reportAreaA: done ? 12 : "",
+    chemCount: 0, chemText: "", crop: "水稲", areaA: 12, chems: [],
+    totalL: 0, waterMl: 0, memo: "", reportMemo: "", seq: 0,
+    by: by, deviceId: "d1",
+    reportedAt: done ? day + "T04:00:00.000Z" : "",
+    updatedAt: day + "T04:00:00.000Z",
+  });
+  post(ctx, { type: "pushWorks", team: TEAM, items: [
+    mk(101, "2026-08-20", true, "田中", "北の田"),
+    mk(102, "2026-08-20", false, "藤本", "南の田"),
+    mk(103, "2026-08-21", true, "田中", "東の田"),
+  ]});
+  // 台帳に1件だけ、記録者を間違えた行を先に入れておく
+  // (実データで75件出た「送った端末の名前が入る」のと同じ形)
+  post(ctx, { type: "record", team: TEAM, recorder: "藤本",
+              record: { id: 101, date: "2026-08-20", field: "北の田", crop: "水稲",
+                        areaA: 12, chems: [], totalL: 0, waterMl: 0, memo: "" } });
+  const lg = ctx.SHEET_STATE.getSheetByName("防除記録");
+  const before = lg.getRange(2, 1).getValue();   // 受信日時
+  eq("台帳の記録者は送った端末の名前になっている", lg.getRange(2, 4).getValue(), "藤本");
+
+  // ── 下見(1セルも書かない) ──
+  // 「書かないつもり」では足りない。台帳は元帳なので、書いたセル数を数える
+  lg._writeCells = 0;
+  const wk = ctx.SHEET_STATE.getSheetByName("作業");
+  wk._writeCells = 0;
+  const dry = post(ctx, { type: "ledgerRebuild", team: TEAM, dryRun: true });
+  eq("下見は1セルも書かない", [lg._writeCells, wk._writeCells], [0, 0]);
+  eq("下見の結果", [dry.ok, dry.dryRun, dry.added, dry.updated, dry.untouched], [true, true, 2, 1, 0]);
+  eq("直る列が分かる", dry.cols.map(c => c.col).sort(),
+     ["記録者", "実散布量(L)", "報告日", "状態"].sort());
+  eq("下見では行が増えていない", lg.getLastRow(), 2);
+  eq("下見では記録者も変わっていない", lg.getRange(2, 4).getValue(), "藤本");
+
+  // ── 本番 ──
+  const run = post(ctx, { type: "ledgerRebuild", team: TEAM });
+  eq("作り直しの結果", [run.ok, run.dryRun, run.added, run.updated], [true, false, 2, 1]);
+  eq("行が増えた", lg.getLastRow(), 4);
+  eq("記録者が実施した人に直る", lg.getRange(2, 4).getValue(), "田中");
+  eq("状態が散布済に直る", lg.getRange(2, 13).getValue(), "散布済");
+  eq("実散布量が入る", lg.getRange(2, 12).getValue(), 33);
+  eq("受信日時は書き換えない", lg.getRange(2, 1).getValue(), before);
+
+  // ── もう一度やっても何も動かない ──
+  const again = post(ctx, { type: "ledgerRebuild", team: TEAM });
+  eq("2回目は何も変わらない", [again.added, again.updated, again.untouched], [0, 0, 3]);
+  eq("行数も変わらない", lg.getLastRow(), 4);
+
+  // ── 照合が通る ──
+  const c = post(ctx, { type: "ledgerCheck", team: TEAM });
+  eq("作り直したあとは食い違いが無い", [c.same, c.differ, c.onlyWork, c.onlyLedger], [3, 0, 0, 0]);
+
+  // ── 台帳にしか無い行は消さない ──
+  lg.appendRow(["", "9999", "2026-08-01", "藤本", "昔の田", "", "", 0, "", 0, 0, "", "調合済", "", "", TEAM]);
+  const keep = post(ctx, { type: "ledgerRebuild", team: TEAM });
+  eq("台帳にしか無い行は数えるだけ", keep.kept, 1);
+  eq("消していない", lg.getLastRow(), 5);
+  eq("中身もそのまま", lg.getRange(5, 5).getValue(), "昔の田");
+
+  // ── 削除済みの作業は台帳に足さない ──
+  post(ctx, { type: "pushWorks", team: TEAM, items: [Object.assign(mk(104, "2026-08-22", true, "田中", "消した田"),
+    { deleted: true, updatedAt: "2026-08-22T05:00:00.000Z" })] });
+  const del = post(ctx, { type: "ledgerRebuild", team: TEAM });
+  eq("削除済みは足さない", del.added, 0);
+
+  // ── 別のチームの作業は混ぜない ──
+  post(ctx, { type: "pushWorks", team: "NCT", items: [mk(201, "2026-08-20", true, "前川", "他所の田")] });
+  const other = post(ctx, { type: "ledgerRebuild", team: TEAM });
+  eq("別チームは足さない", other.added, 0);
+  const nct = post(ctx, { type: "ledgerRebuild", team: "NCT", dryRun: true });
+  eq("そのチームで呼べば足りない行が見える", nct.added, 1);
+
+  // ── シートの行数を超えても落ちない ──
+  // 実データでは 254 行足す見込み。行を確保せずに書くと途中で止まる
+  {
+    const many = [];
+    for (let i = 0; i < 300; i++) many.push(mk(30000 + i, "2026-08-25", i % 2 === 0, "田中", "圓" + i));
+    post(ctx, { type: "pushWorks", team: TEAM, items: many.slice(0, 150) });
+    post(ctx, { type: "pushWorks", team: TEAM, items: many.slice(150) });
+    // シートの行数を実物より狭くして、確保を忘れたら落ちることを見る
+    lg.maxRows = lg.getLastRow() + 10;
+    const big = post(ctx, { type: "ledgerRebuild", team: TEAM });
+    eq("300行足せる", big.added, 300);
+    eq("行が入っている", lg.getLastRow(), 5 + 300);
+    const c2 = post(ctx, { type: "ledgerCheck", team: TEAM });
+    eq("足したあとも食い違わない", c2.differ, 0);
+  }
+
+  eq("ledgerRebuild は team 必須",
+     post(ctx, { type: "ledgerRebuild" }).error, "team required");
+  eq("features に載っている",
+     (JSON.parse(ctx.doGet().getContent()).features || []).indexOf("ledgerRebuild") >= 0, true);
+}
+
 // ─────────── 結果 ───────────
 if (fails.length) {
   console.error("\n  ✗ " + fails.length + " 件失敗 / " + (pass + fails.length) + " 件中\n");

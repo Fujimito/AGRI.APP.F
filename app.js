@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.06";
+const APP_VERSION = "v9.07";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2487,6 +2487,7 @@ function App() {
   // 切り替える前に、実物で「同じものが作れるか」を見る。読むだけで書かない。
   // シートを丸ごと2枚読むので、自動では呼ばない(このボタンからだけ)。
   const [ledgerReport, setLedgerReport] = useState(() => load(LEDGER_CHECK_KEY, null));
+  const [ledgerPlan, setLedgerPlan] = useState(() => load(LEDGER_PLAN_KEY, null));
   const ledgerCheck = async () => {
     if (!syncReady()) {
       flash(notReadyMsg());
@@ -2518,6 +2519,57 @@ function App() {
     setLedgerReport(j);
     flash((j.differ || j.onlyWork || j.onlyLedger ? "⚠ " : "✅ ") +
       "照合しました。結果は設定タブの「送信・共有」に出しています");
+  };
+
+  // ── 台帳を作業シートから作り直す(提案D) ──
+  //
+  // 台帳は印刷して残す元帳なので、いきなり書かない。
+  // 先に下見(dryRun)を出して、何が足りて何が直るかを見せてから実行する。
+  // 行は消さない。台帳にしか無い行(古い版で入れた記録)はそのまま残る。
+  const ledgerRebuild = async dryRun => {
+    if (!syncReady()) {
+      flash(notReadyMsg());
+      return;
+    }
+    if (!dryRun) {
+      const d = ledgerPlan;
+      if (!d || !d.ok) {
+        flash("先に「下見」を押してください");
+        return;
+      }
+      if (!window.confirm(
+        "「防除記録」シートを作業シートに合わせます。\n\n" +
+        "・足す行 " + d.added + " 件\n" +
+        "・直す行 " + d.updated + " 件\n" +
+        "・触らない行 " + (d.untouched + d.kept) + " 件\n\n" +
+        "行は消しません。受信日時も書き換えません。\n" +
+        "元に戻す機能はありません。スプレッドシートの版履歴から戻せます。\n\n" +
+        "実行しますか？")) return;
+    }
+    flash(dryRun ? "下見しています…" : "台帳を作り直しています…");
+    const j = await post({
+      type: "ledgerRebuild",
+      team: teamCode.trim(),
+      dryRun: !!dryRun
+    }, 1);
+    if (!j) {
+      flash("実行できません(電波を確認してください)");
+      return;
+    }
+    if (!j.ok) {
+      const old = j.error === "unknown type" || j.error === "invalid payload";
+      flash(old
+        ? "スプレッドシート側のスクリプトが古い版です。Code.gs を貼り直して「新バージョン」でデプロイしてください"
+        : "実行できません(" + (j.error || "不明") + ")");
+      return;
+    }
+    j.at = new Date().toISOString();
+    save(LEDGER_PLAN_KEY, j);
+    setLedgerPlan(j);
+    flash((dryRun ? "下見しました: " : "✅ 作り直しました: ") +
+      "足す " + j.added + " 件 / 直す " + j.updated + " 件 / 触らない " +
+      (j.untouched + j.kept) + " 件");
+    if (!dryRun) ledgerCheck();
   };
 
   const testConnection = async () => {
@@ -3665,6 +3717,8 @@ function App() {
     testConnection,
     ledgerCheck,
     ledgerReport,
+    ledgerRebuild,
+    ledgerPlan,
     cloudSave,
     cloudLoad,
     syncShared,
@@ -9140,6 +9194,29 @@ function collapsibleHead(title, isOpen, onClick) {
 // その「はず」を実データで確かめるための表示で、地図の見た目には関係しない。
 // 何日か使って「差分 0 回」のままなら、progress を外してよい。
 // 外したら、この表示ごと消すこと。
+// ── 台帳の作り直しの下見を出す(v9.07) ──
+//
+// 元帳を書き換えるので、何が起きるかを先に見せる。
+function ledgerPlanBlock(j) {
+  if (!j || !j.ok) return null;
+  return /*#__PURE__*/React.createElement("div", {
+    style: { ...S.note, background: "#FFF8E7", borderRadius: 6, padding: 10, marginTop: 8 }
+  },
+    /*#__PURE__*/React.createElement("div", { style: { fontWeight: 700 } },
+      j.dryRun ? "下見の結果(まだ書いていません)" : "作り直しました"),
+    /*#__PURE__*/React.createElement("div", null,
+      "足す " + j.added + " 件 / 直す " + j.updated + " 件 / そのまま " + j.untouched +
+      " 件 / 台帳にしか無い(触らない) " + j.kept + " 件"),
+    (j.cols || []).length ? /*#__PURE__*/React.createElement("div", { style: { marginTop: 6 } },
+      /*#__PURE__*/React.createElement("div", { style: { fontWeight: 700 } }, "直る列"),
+      /*#__PURE__*/React.createElement("table", { style: { fontSize: 12, borderCollapse: "collapse" } },
+        /*#__PURE__*/React.createElement("tbody", null, j.cols.map(c =>
+          /*#__PURE__*/React.createElement("tr", { key: c.col },
+            /*#__PURE__*/React.createElement("td", { style: { padding: "2px 8px 2px 0" } }, c.col),
+            /*#__PURE__*/React.createElement("td", { style: { padding: "2px 0", textAlign: "right", fontWeight: 700 } }, c.n + " 件"))))))
+      : null);
+}
+
 // ── 台帳の照合の結果を表で出す(v9.06) ──
 //
 // 件数だけでは直しようがない。「どの列が何件違うか」と、
@@ -9423,7 +9500,21 @@ function SettingsTab(p) {
       width: "100%",
       marginTop: 8
     }
-  }, "🧾 台帳の照合(開発用)"), /*#__PURE__*/React.createElement("p", {
+  }, "🧾 台帳の照合(開発用)"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.ledgerRebuild(true),
+    style: {
+      ...S.smallSecondary,
+      width: "100%",
+      marginTop: 6
+    }
+  }, "🔍 台帳の作り直し(下見・書きません)"), p.ledgerPlan && p.ledgerPlan.ok && /*#__PURE__*/React.createElement("button", {
+    onClick: () => p.ledgerRebuild(false),
+    style: {
+      ...S.smallSecondary,
+      width: "100%",
+      marginTop: 6
+    }
+  }, "✍ 下見のとおりに作り直す(足す " + p.ledgerPlan.added + " / 直す " + p.ledgerPlan.updated + ")"), ledgerPlanBlock(p.ledgerPlan), /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "「台帳の照合」は、「防除記録」シートを「作業」シートから作り直せるかを見るためのものです(読むだけで、シートは書き換えません)。食い違いが 0 のままなら、端末が台帳へ別に送る仕組みをやめられます。"), ledgerReportBlock(p.ledgerReport), /*#__PURE__*/React.createElement("p", {
     style: S.note
@@ -10669,6 +10760,7 @@ const progressEntries = (items, works, from, to, recorder) => {
 // ここがずれても色は変わらないが、吹き出しも見比べる対象なので入れる。
 const PROGRESS_DIFF_KEY = "tankmix:progressdiff";
 const LEDGER_CHECK_KEY = "tankmix:ledgercheck";
+const LEDGER_PLAN_KEY = "tankmix:ledgerplan";
 const PROGRESS_DIFF_KEYS = ["status", "by", "at", "sprayedL", "areaA", "prevDate"];
 const progressMapDiff = (a, b) => {
   const out = [];

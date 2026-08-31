@@ -93,6 +93,8 @@ class FakeSheet {
         return out;
       },
       setValues(vals) {
+        // 書いたセル数も数える(「下見なのに書いていないか」を見張るため)
+        sh._writeCells = (sh._writeCells || 0) + nr * nc;
         for (let i = 0; i < nr; i++) {
           if (!sh.rows[r0 + i]) sh.rows[r0 + i] = [];
           for (let j = 0; j < nc; j++) sh.rows[r0 + i][c0 + j] = coerceIn(vals[i][j], sh._isText(c0 + j));
@@ -101,6 +103,7 @@ class FakeSheet {
       },
       getValue() { return sh._cell(r0, c0); },
       setValue(v) {
+        sh._writeCells = (sh._writeCells || 0) + 1;
         if (!sh.rows[r0]) sh.rows[r0] = [];
         sh.rows[r0][c0] = coerceIn(v, sh._isText(c0));
         return range;

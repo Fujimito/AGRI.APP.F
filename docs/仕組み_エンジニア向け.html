@@ -421,7 +421,17 @@ flowchart TD
   <p><strong>1つだけ足りなかった。</strong>「実績メモ」の列が作業シートに無かった。<code>itemToWork</code> が必ず空を入れていたのはこのため。<strong>v9.04 で列24として末尾に足した</strong>。</p>
   <p><strong>切り替える前に照合する。</strong><code>ledgerRowFromWork_()</code> が作業行から台帳行を作り、<code>ledgerCheck</code>(読み取りのみ)が今の台帳と突き合わせて <code>一致 / 食い違い / 台帳に無い / 作業に無い</code> の件数と、違った列を返す。設定タブ→送信・共有の「🧾 台帳の照合(開発用)」から呼ぶ。<strong>シートは書き換えない。</strong>2枚とも丸ごと読むので自動では呼ばない。</p>
   <p><strong>照合で実際に食い違いが1つ見つかった。</strong><code>unreport</code> は実散布量と報告日は消すが、<strong>備考に入れた実績メモは消さない</strong>。そのため実績を取り消しても台帳には実績メモが残る。作業シートから作り直すと予定のメモになる。<code>unreport</code> の送りものは <code>{id}</code> だけで予定のメモを知らないので、<strong>台帳側だけでは直せない</strong>(消すことしかできない)。この食い違いは提案Dを通せば無くなるので直さず、テストで固めてある(<code>gastest</code> 20番)。</p>
-  <p><strong>切り替えるときにやること。</strong>食い違い 0 を確かめたうえで、(1) <code>syncPending</code> の台帳送信をやめる (2) <code>applyRecord_</code> / <code>pushRecords</code> / <code>buildRow_</code> / <code>findRow_</code> / <code>claimRow_</code> と <code>record</code> / <code>report</code> / <code>unreport</code> を消す (3) 台帳を <code>ledgerRowFromWork_</code> から書き出す関数に置き換える。<strong>既存の行は消さないこと。</strong>古い版で入れた記録は作業シートに無く(<code>onlyLedger</code> に出る)、消すと戻せない。</p>
+  <p><strong>実データで照合した結果(2026-08-31)。</strong>一致 92 / 食い違い 83 / 台帳に無い 258 / 作業に無い 113。<strong>食い違いの内訳は 記録者 75 / 状態 6 / 面積 2</strong>。</p>
+  <div class="note">
+    <span class="t">食い違いの原因は3つとも「台帳を別経路で送っていること」</span>
+    <p><strong>記録者 75件。</strong>台帳の記録者は <code>data.recorder</code>(= <code>localStorage["tankmix:recorder"]</code>、<strong>送信した端末の名前</strong>)、作業シートの記録者は <code>w.by</code>(<strong>実施済を押した人</strong>)。<strong>別のものを書いている。</strong>v8.99 で「端末ごとに作業者名が違う」を直したとき、作業シート側だけ直して台帳側を直していなかった。</p>
+    <p><strong>台帳に無い 258件・状態 6件。</strong>作業シートは変更のたびに自動で送られるが、台帳は <code>syncPending</code> で送られ、しかも<strong>「いま選んでいる作業日」の未送信だけ</strong>が対象(<code>w.workDate === workDate</code>)。さらに他の端末から受け取った作業は <code>synced:true / reportSynced:true</code> になる(意図的。「台帳へ送るのは、その作業をした端末の役目」)。<strong>元の端末が送らなかった台帳の行は、誰も送らない。</strong></p>
+    <p class="sub"><strong>読み違えた点。</strong>最初、「台帳に無い作業がすべて『薬剤なし』」を手がかりだと書いたが、<strong>作業シートは生存542行すべてが薬剤なし</strong>(薬剤JSON 全行空・総量L・水量mL 0行)だった。あの内訳は何も語っていなかった。実データを見るまで分からなかった。</p>
+  </div>
+  <p><strong>作り直し(v9.07)。</strong><code>ledgerRebuild</code>。作業シートを元に台帳の行を<strong>足す・直す</strong>。<strong>行は消さない</strong>&mdash;&mdash;台帳にしか無い113件(古い版で入れた記録・作業シートから消えた作業)はそのまま残す。<strong>受信日時も書き換えない</strong>(<code>ledgerNorm_</code> が両方 <code>""</code> にするので比較で必ず弾かれる)。削除済みの作業は足さない。チームが違う行は触らない。</p>
+  <p><strong>元帳なので、いきなり書かない。</strong><code>dryRun</code> で「足す/直す/そのまま/触らない」の件数と直る列を先に返す。<strong>下見を取っていなければ実行ボタンが出ない</strong>し、実行前に件数入りの確認を出す。下見が1セルも書いていないことは、ハーネスに書き込みセル数の数取り(<code>_writeCells</code>)を足して<strong>機械で確かめている</strong>&mdash;&mdash;「書かないつもり」では足りない。</p>
+  <p><strong>行の確保を忘れない。</strong>実データでは 254 行足す見込み。<code>ensureRows_</code> を呼ばずにシートの行数を超えて書くと例外になり、作り直しが途中で止まる。</p>
+  <p><strong>次にやること。</strong>作り直したあと <code>ledgerCheck</code> が食い違い 0 を出すのを確かめてから、(1) <code>pushWorks</code> のあとに、いま押し込んだ作業ぶんだけ台帳を更新する (2) <code>syncPending</code> の台帳送信をやめる (3) <code>applyRecord_</code> / <code>pushRecords</code> / <code>buildRow_</code> / <code>findRow_</code> / <code>claimRow_</code> と <code>record</code> / <code>report</code> / <code>unreport</code> を消す。<strong>(1) を先にやること。</strong>順番を逆にすると、その間の実績が台帳に残らない。</p>
 
   <h3>日付が化ける</h3>
   <p>スプレッドシートは <code>"2026-08-27"</code> をセルに入れた時点で <code>Date</code> と解釈する。読み戻すと <code>Date</code> オブジェクトになり、テキスト書式の列へ書き戻すと <code>"Mon Jul 13 2026 00:00:00 GMT+0900"</code> になる。<code>WORK_TEXT_COLS</code> で書式を固定しつつ、<code>ymd_()</code> が <code>Date</code>・ISO文字列・化けた文字列のどれでも <code>yyyy-MM-dd</code> に戻す。</p>
@@ -442,6 +452,17 @@ flowchart TD
       <dt>対処</dt><dd><code>makeFieldLabel()</code>。<code>L.divIcon</code> のマーカーにする。divIcon は大きさを測らない(位置はアンカーだけで決まる)。<strong>中央寄せは CSS で行う</strong>: 外側を 0×0 にし、中の <code>.fl-inner</code> を <code>transform:translate(-50%,-50%)</code> でずらす。見た目は変わらない。</dd>
       <dt>忘れやすい点</dt><dd>(1) <code>interactive:false</code> と <code>pointer-events:none</code>。札は圃場の真上に重なるので、クリックを食うと吹き出しが開かない。(2) 札は圃場と<strong>別のレイヤ</strong>になるので、差分描画で消すときに両方消すこと。片方だけ消すと名前が宙に浮く。</dd>
       <dt>残っていた問題</dt><dd>速さは直ったが、<strong>170圃場を一番引いた状態で見ると、札同士が重なって地図が見えない</strong>。倍率16 で 30a の圃場は 27px、札は 60～90px あるので、面積でしきい値を分けても重なりは残る。<strong>v9.02 で間引きを入れた</strong>(下)。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>git checkout しただけでテストが2件落ちた(改行)</h3>
+    <p class="ver">v9.07 で修正</p>
+    <dl>
+      <dt>症状</dt><dd><code>git checkout -- app.js</code> で作業中の変更を捨てただけで、<code>selftest</code> が2件落ちた。中身は HEAD と同じなのに落ちる。</dd>
+      <dt>機構</dt><dd><code>selftest</code> には「app.js にこの並びで書かれているか」を<strong>文字列で</strong>見る検査がいくつもあり、改行(<code>\n</code>)を含む。Windows の git は checkout のときに <strong>LF を CRLF に変換</strong>するので、<code>\n</code> が <code>\r\n</code> になって一致しなくなる。それまで通っていたのは、編集を Python から LF で書いていたため。</dd>
+      <dt>対処</dt><dd>読み込んだ時点で CRLF を LF に揃える(<code>nl()</code>)。<strong>検査したいのは中身であって改行ではない。</strong></dd>
+      <dt>忘れやすい点</dt><dd>この手の検査は「自分の書き方では通るが、普通に clone した人では落ちる」という形で壊れる。<strong>手元で通ったことは、他所で通る根拠にならない。</strong></dd>
     </dl>
   </div>
 

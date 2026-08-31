@@ -13,7 +13,13 @@ const path = require("path");
 const vm = require("vm");
 
 const APP = path.join(__dirname, "..", "app.js");
-const src = fs.readFileSync(APP, "utf8");
+// 改行は LF に揃えてから見る。
+// このファイルには「app.js にこの並びで書かれているか」を文字列で見る検査が
+// いくつもある。Windows で git checkout すると CRLF に変換されるため、
+// 揃えずに比べると「中身は正しいのにテストだけ落ちる」ことになる。
+// 実際に v9.06 のあと git checkout しただけで2件落ちた。
+const nl = t => t.split(String.fromCharCode(13) + String.fromCharCode(10)).join(String.fromCharCode(10));
+const src = nl(fs.readFileSync(APP, "utf8"));
 
 // 取り出したい名前。app.js のトップレベルにある純粋な計算だけを対象にする
 const EXPORTS = [
@@ -1231,6 +1237,18 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("結果を表で出す", src.includes("ledgerReportBlock(p.ledgerReport)"), true);
   eq("結果を残す", src.includes("save(LEDGER_CHECK_KEY, j);"), true);
   eq("列ごとの件数を見る", src.includes('tally("食い違った列", j.byCol)'), true);
+  // ── 台帳の作り直し(v9.07) ──
+  // 元帳を書き換えるので、先に下見を出してから実行する
+  eq("下見を先に呼べる", src.includes("p.ledgerRebuild(true)"), true);
+  eq("実行も呼べる", src.includes("p.ledgerRebuild(false)"), true);
+  // 下見を取っていなければ実行させない
+  eq("下見なしでは実行しない",
+    src.includes('flash("先に「下見」を押してください");'), true);
+  // 実行前に件数を見せて確認を取る
+  eq("実行前に確認を取る", src.includes("window.confirm("), true);
+  eq("行を消さないと書いてある",
+    src.includes("行は消しません。受信日時も書き換えません。"), true);
+  eq("下見の結果を出す", src.includes("ledgerPlanBlock(p.ledgerPlan)"), true);
   eq("照合は書き込まない(ボタンの案内に明記)",
     src.includes("読むだけで、シートは書き換えません"), true);
 }
@@ -1629,7 +1647,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 }
 
 // ── 版数の整合(sw.js と揃っているか) ───────────────────
-const sw = fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8");
+const sw = nl(fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8"));
 const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];
 eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
 

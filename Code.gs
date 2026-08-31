@@ -1218,6 +1218,103 @@ function ledgerCheck_(team) {
   };
 }
 
+// ══════════ 台帳を作業シートから作り直す(提案D・第3段) ══════════
+//
+// ledgerCheck が「同じものが作れる」と言えるようになるまで、実データを
+// 揃えるための処理。作業シートを元に、台帳の行を足す・直す。
+//
+// ★行は消さない。台帳にしか無い行(古い版で入れた記録・作業シートから
+//   消えた作業)は、そのまま残す。消すと戻せない。
+// ★受信日時は上書きしない。既にある行の受信日時は「実際に受け取った時刻」
+//   で、作り直しの時刻に書き換えると意味が変わる。
+//
+// 書き込むので doPost のロックの中から呼ぶこと。
+// dryRun のときは1セルも書かず、何が起きるかだけ返す。
+function ledgerRebuild_(team, dryRun) {
+  const wk = getWorkSheet_();
+  const lg = getSheet_();
+  const W = HEADERS.length;
+
+  // 作業シートから作り直した行を集める
+  const made = {};
+  const order = [];
+  if (wk.getLastRow() >= 2) {
+    const rows = wk.getRange(2, 1, wk.getLastRow() - 1, WORK_HEADERS.length).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      if (!r[0] && r[0] !== 0) continue;
+      if (team && String(r[1]) !== String(team)) continue;
+      if (r[16]) continue; // 削除済みは台帳に足さない(既にある行は消さない)
+      const id = String(r[0]);
+      if (!made[id]) order.push(id);
+      made[id] = ledgerRowFromWork_(r);
+    }
+  }
+
+  // 今の台帳を丸ごと読む。1回の setValues で書き戻すため、
+  // 触らない行も含めて手元に持つ
+  const last = lg.getLastRow();
+  const cur = last >= 2 ? lg.getRange(2, 1, last - 1, W).getValues() : [];
+  const rowOf = {};
+  for (let i = 0; i < cur.length; i++) {
+    const id = cur[i][COL.ID - 1];
+    if (id === "" || id === null || id === undefined) continue;
+    const rt = String(cur[i][COL.TEAM - 1] == null ? "" : cur[i][COL.TEAM - 1]);
+    // チーム欄が空の行は古い行。どのチームのものか分からないので拾っておく
+    // (findRow_ の第2段と同じ扱い)
+    if (team && rt && rt !== String(team)) continue;
+    if (!(id in rowOf)) rowOf[String(id)] = i;
+  }
+
+  let added = 0, updated = 0, untouched = 0;
+  const cols = [];   // 直した列の内訳
+  const bump = k => { for (let i = 0; i < cols.length; i++) if (cols[i].col === k) { cols[i].n++; return; } cols.push({ col: k, n: 1 }); };
+  const append = [];
+
+  for (let k = 0; k < order.length; k++) {
+    const id = order[k];
+    const want = made[id];
+    if (!(id in rowOf)) {
+      added++;
+      if (!dryRun) append.push(want.map(safeCell_));
+      continue;
+    }
+    const i = rowOf[id];
+    const have = cur[i];
+    const a = ledgerNorm_(want), b = ledgerNorm_(have);
+    let hit = false;
+    for (let c = 0; c < W; c++) {
+      if (a[c] === b[c]) continue;
+      hit = true;
+      bump(HEADERS[c]);
+      // 受信日時(LEDGER_SKIP_COLS)はここに来ない。ledgerNorm_ が
+      // 両方とも "" にするので、上の a[c] === b[c] で必ず弾かれる。
+      // 台帳の受信日時は「実際に受け取った時刻」なので、作り直しても変えない。
+      have[c] = safeCell_(want[c]);
+    }
+    if (hit) updated++; else untouched++;
+  }
+
+  // 書くのはここだけ。下見は1セルも書かない(gastest で数えて確かめている)
+  if (!dryRun && (updated || added)) {
+    // 足す分の行を先に確保する。シートの行数を超えて書くと
+    // 例外になり、作り直しが途中で止まる(実データで 254 行足す見込み)
+    ensureRows_(lg, 1 + cur.length + append.length);
+    if (cur.length) lg.getRange(2, 1, cur.length, W).setValues(cur);
+    if (append.length) lg.getRange(2 + cur.length, 1, append.length, W).setValues(append);
+    // 日付ごとの色分けは行が増えたときだけ。作り直しは行数が大きく動く
+    if (append.length) colorByDate_(lg);
+  }
+
+  return {
+    dryRun: !!dryRun,
+    added: added, updated: updated, untouched: untouched,
+    // 台帳にしか無い行。数えるだけで、触らない
+    kept: cur.length - (updated + untouched),
+    cols: cols.sort(function (x, y) { return y.n - x.n; }),
+  };
+}
+
 // ── 読み取り専用の処理 ──
 // 呼び出し元(doPost)で合言葉の照合を済ませてから入る。ここでは認証しない。
 // シートに書き込む処理を絶対に足さないこと。ロックを取らずに走るため、
@@ -1413,6 +1510,15 @@ function doPost(e) {
       return json_({ ok: true, results: results });
     }
 
+    // ── 台帳を作業シートから作り直す(提案D) ──
+    // 手で押したときだけ走る。dryRun なら1セルも書かない。
+    if (type === "ledgerRebuild") {
+      if (!data.team) return json_({ ok: false, error: "team required" });
+      const r = ledgerRebuild_(String(data.team), !!data.dryRun);
+      r.ok = true;
+      return json_(r);
+    }
+
     // 種類の判定を先にする(v9.05)。
     // ここが後ろだと、知らない種類はすべて record の中身の検査に落ちて
     // 「invalid payload」になる。アプリ側は「unknown type」を
@@ -1451,7 +1557,7 @@ function doGet() {
     // 古いGASのまま進捗マップを開くと unknown type が返るだけで理由が分からない。
     features: ["record", "report", "unreport", "chemdbLoad", "cloudSave", "cloudLoad",
                "pushFields", "pushWorks", "pushChems", "pull", "progress", "workPlan",
-               "ledgerCheck", "workReportMemo",
+               "ledgerCheck", "ledgerRebuild", "workReportMemo",
                "pushRecords"],
   });
 }
