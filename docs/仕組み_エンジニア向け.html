@@ -424,7 +424,22 @@ flowchart TD
       <dt>実測</dt><dd>Leaflet 1.9.4 / Chromium / 375px幅の入れ物。同じ HTML・同じ CSS で、作り方だけを変えて比べた(中央値、5回)。<table><tr><th>枚数</th><th>札なし</th><th>ツールチップ</th><th>divIcon</th></tr><tr><td>30</td><td>1.0ms</td><td>64.8ms</td><td><strong>2.3ms</strong></td></tr><tr><td>60</td><td>2.9ms</td><td>243.6ms</td><td><strong>6.3ms</strong></td></tr><tr><td>128</td><td>6.6ms</td><td>995.1ms</td><td><strong>11.4ms</strong></td></tr><tr><td>170</td><td>6.2ms</td><td>886.3ms</td><td><strong>17.1ms</strong></td></tr></table><strong>170枚で 886ms → 17ms(52倍)。</strong>スマホはこれより数倍遅いので、従来は1回の描き直しで数秒止まっていたと見られる(実機は未計測)。</dd>
       <dt>対処</dt><dd><code>makeFieldLabel()</code>。<code>L.divIcon</code> のマーカーにする。divIcon は大きさを測らない(位置はアンカーだけで決まる)。<strong>中央寄せは CSS で行う</strong>: 外側を 0×0 にし、中の <code>.fl-inner</code> を <code>transform:translate(-50%,-50%)</code> でずらす。見た目は変わらない。</dd>
       <dt>忘れやすい点</dt><dd>(1) <code>interactive:false</code> と <code>pointer-events:none</code>。札は圃場の真上に重なるので、クリックを食うと吹き出しが開かない。(2) 札は圃場と<strong>別のレイヤ</strong>になるので、差分描画で消すときに両方消すこと。片方だけ消すと名前が宙に浮く。</dd>
-      <dt>未解決</dt><dd>速さは直ったが、<strong>170圃場を一番引いた状態で見ると、札同士が重なって地図が見えない</strong>。倍率16 で 30a の圃場は 27px、札は 60～90px あるので、面積でしきい値を分けても重なりは残る。札の重なりを見て間引く仕組みが要る。</dd>
+      <dt>残っていた問題</dt><dd>速さは直ったが、<strong>170圃場を一番引いた状態で見ると、札同士が重なって地図が見えない</strong>。倍率16 で 30a の圃場は 27px、札は 60～90px あるので、面積でしきい値を分けても重なりは残る。<strong>v9.02 で間引きを入れた</strong>(下)。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>倍率のしきい値では、札の重なりは止められない</h3>
+    <p class="ver">v9.02 で対処 / ブラウザで実測</p>
+    <dl>
+      <dt>症状</dt><dd>引いた状態で札が連なり、圃場の色も衛星写真も隠れる。</dd>
+      <dt>機構</dt><dd>札の大きさは倍率で変わらない(60～90px 固定)が、圃場は倍率で小さくなる。倍率15 では 30a の圃場でも 27px しかない。<strong>しきい値をどう動かしても「札のほうが圃場より大きい」という関係は変わらない</strong>ので、v9.00 の面積別しきい値では減らせても無くせない。</dd>
+      <dt>対処</dt><dd><code>thinLabels()</code>。札を置く座標に外形を並べ、<strong>重なるものを落とす</strong>。<strong>大きい圃場を優先</strong>して残す(引いた状態で目印になるのは大きい圃場のため)。面積が同じときは id 順で決める&mdash;&mdash;並び順で結果が変わると、45秒ごとの取り直しのたびに出たり消えたりしてちらつく。</dd>
+      <dt>大きさは測らない</dt><dd>ここで <code>offsetWidth</code> を読むと v9.01 で消した同期レイアウトが戻る。CSS の <code>font-size</code> と <code>padding</code> から見積もる(<code>labelBoxOf()</code>)。1文字の幅はラテン・数字 0.58em、それ以外 1em。<strong>実測との差は 170枚で 幅 &minus;0.1〜+2.0px(平均 +0.8)、高さ &minus;0.7〜+0.3px(平均 &minus;0.2)</strong>。わずかに広く見積もるので、判定は重なりを残す側ではなく落とす側に倒れる。</dd>
+      <dt>座標は絶対座標で</dt><dd>Leaflet は <code>map.project(latlng, floor(zoom))</code>、Google は <code>fromLatLngToPoint() &times; 2^floor(zoom)</code>。<strong>画面座標を使うと、地図を動かすたびに間引きが計算し直されて札が出たり消えたりする</strong>。絶対座標なら倍率が変わったときだけ変わる。</dd>
+      <dt>実測</dt><dd>170圃場(5a/15a/40a を混ぜた格子)・1280&times;720。<table><tr><th>倍率</th><th>しきい値を通った札</th><th>実際に出た札</th><th>重なり</th></tr><tr><td>15</td><td>57</td><td><strong>28</strong></td><td>0</td></tr><tr><td>16</td><td>114</td><td><strong>93</strong></td><td>0</td></tr><tr><td>17</td><td>170</td><td>170</td><td>0</td></tr></table>間引き自体の費用: 170枚 0.3ms / 400枚 1.1ms / 1000枚 3.9ms(中央値9回)。描き直しの 17ms に対して無視できる。</dd>
+      <dt>忘れやすい点</dt><dd>(1) <strong>間引いた結果を差分描画の署名に入れる</strong>。入れないと、隣の圃場が実施済みになって札が広がったときに、押し出されたすべき札が残り続ける。(2) 圃場登録タブの地図は「帯」(<code>labelBandOf</code>)で描き直しを間引いていたが、<strong>間引きは倍率ごとに結果が変わるので帯では足りない</strong>。<code>Math.floor(zoom)</code> を直接見るように変えた(帯のままだと、寄っても落とされたままの札が出てこない)。</dd>
+      <dt>未検証</dt><dd>Google マップ版(APIキーがなく動かせない)。実機(iPhone / タブレット)。実際の圃場は格子でなく不定形なので、実運用では上の表より多く落ちるはず。</dd>
     </dl>
   </div>
 

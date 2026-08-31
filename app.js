@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.01";
+const APP_VERSION = "v9.02";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -7508,9 +7508,30 @@ function GoogleMapTab(p) {
     });
     fieldOverlaysRef.current = [];
     const showLabel = zoom >= LABEL_MIN_ZOOM;
-    p.fields.forEach(f => {
-      if (!f.polygon || f.polygon.length < 3) return;
-      if (hidden.indexOf(f.id) >= 0) return;
+    // Leaflet 版と同じ間引き(v9.02)。getProjection は準備できるまで null で、
+    // そのときは間引かない(札は従来どおり出る)。Google 版は未検証
+    const proj = mapRef.current.getProjection ? mapRef.current.getProjection() : null;
+    const scale = Math.pow(2, Math.floor(zoom));
+    const shown = p.fields.filter(f => f.polygon && f.polygon.length >= 3 && hidden.indexOf(f.id) < 0);
+    const cand = [];
+    shown.forEach(f => {
+      const lsz = labelSizeOf(f.areaA);
+      if (!(showLabel && zoom >= LABEL_MIN_ZOOM + lsz.step) || !proj) return;
+      const box = fieldLabelBox(f.name + (f.crop ? " / " + f.crop : ""),
+        fieldAreaText(f, p.areaUnitKey), "", lsz.size);
+      const ctr = f.center || polygonCenter(f.polygon);
+      const wp = proj.fromLatLngToPoint(new g.LatLng(ctr[0], ctr[1]));
+      cand.push({
+        id: String(f.id),
+        x: wp.x * scale,
+        y: wp.y * scale,
+        w: box.w,
+        h: box.h,
+        pri: labelPriOf(f.areaA)
+      });
+    });
+    const keep = proj ? thinLabels(cand) : null;
+    shown.forEach(f => {
       const st = FIELD_COLOR;
       const path = f.polygon.map(pt => ({
         lat: pt[0],
@@ -7529,9 +7550,10 @@ function GoogleMapTab(p) {
         startEditPoly(f);
       });
       fieldOverlaysRef.current.push(poly);
-      // 小さい圃場の札はもう少し寄ってから出す(v9.00)
+      // 小さい圃場の札はもう少し寄ってから出す(v9.00)。
+      // さらに、重なる札は落とす(v9.02)
       const lsz = labelSizeOf(f.areaA);
-      if (showLabel && zoom >= LABEL_MIN_ZOOM + lsz.step) {
+      if (showLabel && zoom >= LABEL_MIN_ZOOM + lsz.step && (!keep || keep.has(String(f.id)))) {
         const c = f.center || polygonCenter(f.polygon);
         const label = new g.Marker({
           position: {
@@ -7577,11 +7599,10 @@ function GoogleMapTab(p) {
         fieldOverlaysRef.current.push(areaLabel);
       }
     });
-    // 拡大縮小のたびに全部の圃場を描き直すと、圃場が多い端末でカクツく。
-    // zoom を使っているのは「札を出すかどうか」だけなので、
-    // しきい値をまたいだときだけ描き直す。
-  // 帯(大だけ / 大・中 / 全部)が変わったときだけ描き直す(v9.00)
-  }, [ready, p.fields, labelBandOf(zoom, LABEL_MIN_ZOOM), hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
+    // 間引きの結果は倍率で変わるので、帯(v9.00)ではなく倍率そのものを見る。
+    // 帯のままだと、倍率を上げても間引きが計算し直されず、
+    // 十分に寄っても落とされたままの札が出てこない
+  }, [ready, p.fields, Math.floor(zoom), hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
 
   // 作図中の頂点・線を再描画
   React.useEffect(() => {
@@ -8451,9 +8472,28 @@ function LeafletMapTab(p) {
     const grp = layersRef.current.fields;
     grp.clearLayers();
     const showLabel = zoom >= LABEL_MIN_ZOOM;
-    p.fields.forEach(f => {
-      if (!f.polygon || f.polygon.length < 3) return;
-      if (hidden.indexOf(f.id) >= 0) return;
+    const shown = p.fields.filter(f => f.polygon && f.polygon.length >= 3 && hidden.indexOf(f.id) < 0);
+    // 進捗地図と同じ間引き(v9.02)。先に候補を集めて、重なるものを落とす
+    const cand = [];
+    shown.forEach(f => {
+      // 小さい圃場の札はもう少し寄ってから出す(v9.00)
+      const lsz = labelSizeOf(f.areaA);
+      if (!(showLabel && zoom >= LABEL_MIN_ZOOM + lsz.step)) return;
+      const box = fieldLabelBox(f.name + (f.crop ? " / " + f.crop : ""),
+        fieldAreaText(f, p.areaUnitKey), "", lsz.size);
+      const ctr = f.center || polygonCenter(f.polygon);
+      const pt = mapRef.current.project([ctr[0], ctr[1]], Math.floor(zoom));
+      cand.push({
+        id: String(f.id),
+        x: pt.x,
+        y: pt.y,
+        w: box.w,
+        h: box.h,
+        pri: labelPriOf(f.areaA)
+      });
+    });
+    const keep = thinLabels(cand);
+    shown.forEach(f => {
       const st = FIELD_COLOR;
       const poly = L.polygon(f.polygon, {
         color: st.stroke,
@@ -8461,26 +8501,24 @@ function LeafletMapTab(p) {
         fillColor: st.fill,
         fillOpacity: st.opacity
       }).addTo(grp);
-      // 小さい圃場の札はもう少し寄ってから出す(v9.00)
-      const lsz = labelSizeOf(f.areaA);
-      if (showLabel && zoom >= LABEL_MIN_ZOOM + lsz.step) {
+      if (keep.has(String(f.id))) {
         // 圃場名と面積を別の行にする。同じ行に並べると、
         // 名前に数字が入る圃場(「嘉島60」など)で面積と続きの数字に見える。
         // 名前は受け取った文字列でもあるので、必ずエスケープしてからHTMLに入れる。
-        // fl-box で包むのは、名前と面積を一つの块にまとめるため。
         const labelText = '<span class="fl-name">' + escapeHtml(f.name) + (f.crop ? '<span class="fl-crop"> / ' + escapeHtml(f.crop) + '</span>' : "") + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>';
         // ツールチップではなく divIcon。理由は makeFieldLabel のところ(v9.01)
-        makeFieldLabel(L, f.center || polygonCenter(f.polygon), labelText, lsz.size).addTo(grp);
+        makeFieldLabel(L, f.center || polygonCenter(f.polygon), labelText, labelSizeOf(f.areaA).size).addTo(grp);
       }
       poly.on("click", () => {
         startEditPoly(f);
       });
     });
-    // 拡大縮小のたびに全部の圃場を描き直すと、圃場が多い端末でカクツく。
-    // zoom を使っているのは「札を出すかどうか」だけなので、
-    // しきい値をまたいだときだけ描き直す。
-  // 帯(大だけ / 大・中 / 全部)が変わったときだけ描き直す(v9.00)
-  }, [ready, p.fields, labelBandOf(zoom, LABEL_MIN_ZOOM), hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
+    // 間引きの結果は倍率で変わるので、帯(v9.00)ではなく倍率そのものを見る。
+    // 帯のままだと、倍率を上げても間引きが計算し直されず、
+    // 十分に寄っても落とされたままの札が出てこない。
+    // 整数の倍率が変わったときだけ描き直す。全部作り直しても
+    // 170圃場で 17ms(v9.01の実測)なので、これで足りる
+  }, [ready, p.fields, Math.floor(zoom), hidden, p.areaUnitKey]); // 単位を変えたら札も描き直す
 
   // 作図中ポリゴンの再描画
   React.useEffect(() => {
@@ -10544,17 +10582,83 @@ const labelSizeOf = areaA => {
 };
 // この圃場の札を今の倍率で出すか。
 // on は手動の入切(「🏷 札なし」)。これが優先する。
-// 今の倍率で「どこまでの大きさの札を出しているか」を返す。
-// 0 = 一つも出さない / 1 = 大だけ / 2 = 大・中 / 3 = 全部。
-// 圃場登録タブの地図は差分描画をしておらず丸ごと作り直すので、
-// 倍率をそのまま依存に入れると拡大縮小のたびに全部作り直してカクツく。
-// この帯を依存に入れれば、しきい値をまたいだときだけ走る。
-const labelBandOf = (zoom, base) => {
-  const n = Math.floor(zoom) - base + 1;
-  return n < 0 ? 0 : n > 3 ? 3 : n;
-};
+// v9.01 までは「帯(大だけ/大・中/全部)」を作って描き直しの回数を減らしていたが、
+// v9.02 の間引きは倍率ごとに結果が変わるので、帯では足りなくなった(帯のままだと
+// 十分に寄っても落とされた札が出てこない)。今は Math.floor(zoom) を直接見る。
 const fieldLabelVisible = (on, zoom, areaA, base) =>
   on !== false && zoom >= (base === undefined ? PROGRESS_LABEL_MIN_ZOOM : base) + labelSizeOf(areaA).step;
+
+// ── 札の重なりを見て間引く(v9.02) ──
+//
+// 倍率のしきい値(v9.00)だけでは、引いた状態で札が重なるのを
+// 止められない。倍率15では30aの圓場でさえ地図上 27px しかないのに
+// 札は 60～90px あるので、「札のほうが圓場より大きい」という関係は
+// しきい値をどう動かしても変わらない。170圓場を一番引いた状態で見ると
+// 札が連なって地図が見えなくなる。
+//
+// そこで札を実際に置く位置に並べ、重なるものを落とす。
+// 大きい圓場を優先して残す（引いた状態で目印になるのは大きい圓場）。
+//
+// 札の大きさは測らない。測ると v9.01 で消した同期レイアウトが戻る。
+// CSS の font-size と padding から見積もる。
+const LABEL_FONT = {
+  lg: { name: 13, sub: 12, padX: 7, padY: 3 },
+  md: { name: 12, sub: 11, padX: 6, padY: 2 },
+  sm: { name: 11, sub: 10, padX: 5, padY: 1 }
+};
+// 1文字の幅を em で見積もる。ラテン・数字は半幅、それ以外(和字・記号)は全幅。
+// 間引きの判定にしか使わないので、多少ずれても見た目は変わらない。
+const LABEL_EM_NARROW = 0.58;
+const textEmWidth = t => {
+  const s = String(t == null ? "" : t);
+  let w = 0;
+  for (let i = 0; i < s.length; i++) w += s.charCodeAt(i) < 0x250 ? LABEL_EM_NARROW : 1;
+  return w;
+};
+// 行の配列から札の外形(px)を見積もる。sub:true は小さい行(面積・記録者名)。
+const labelBoxOf = (lines, size) => {
+  const f = LABEL_FONT[size] || LABEL_FONT.md;
+  let w = 0, h = 0;
+  (lines || []).forEach(ln => {
+    const fs = ln.sub ? f.sub : f.name;
+    const x = textEmWidth(ln.text) * fs;
+    if (x > w) w = x;
+    h += Math.round(fs * (ln.sub ? 1.2 : 1.25));
+  });
+  return { w: Math.round(w) + f.padX * 2, h: h + f.padY * 2 };
+};
+// 圓場の札1枚分。中身は描画側と揃えること。
+// 揃っていないと、実際より狭い札として判定し、重なったまま残る。
+const fieldLabelBox = (nameText, areaText, byText, size) => labelBoxOf(
+  [{ text: nameText }, { text: areaText, sub: true }].concat(
+    byText ? [{ text: byText, sub: true }] : []),
+  size);
+// 重なる札を落とす。x,y は札の中心(px)、pri が大きいものを残す。
+// pri が同じときは id 順。並び順で結果が変わると、45秒ごとの取り直しの
+// たびに出たり消えたりする（ちらつきに見える）。
+const thinLabels = items => {
+  const kept = [];
+  const out = new Set();
+  (items || []).slice().sort((a, b) =>
+    (b.pri - a.pri) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+  ).forEach(it => {
+    const l = it.x - it.w / 2, r = it.x + it.w / 2,
+      t = it.y - it.h / 2, b = it.y + it.h / 2;
+    for (let i = 0; i < kept.length; i++) {
+      const k = kept[i];
+      if (l < k.r && k.l < r && t < k.b && k.t < b) return;
+    }
+    kept.push({ l: l, r: r, t: t, b: b });
+    out.add(it.id);
+  });
+  return out;
+};
+// 間引きの優先度。面積が大きいほど先に残る。
+// 面積が未登録のものは labelSizeOf と揃えて「大」扱いにする。
+const labelPriOf = areaA => {
+  const a = parseFloat(areaA);
+  return isFinite(a) && a > 0 ? a : LABEL_SIZE_BREAKS[0].min;
+};
 
 // ── 差分描画 ──
 //
@@ -10824,8 +10928,9 @@ function ProgressLeafletCanvas(p) {
     // 引いてしまい、今日の圃場が点にしか見えなくなる。
     const targetBounds = [];
     // まず「今回描くべきもの」を作る。ここではまだ地図に触らない
-    const want = new Map();  // キー → { f, st, sig }
-    const nextSig = new Map();
+    const want = new Map();  // キー → { f, st, key, label }
+    // 札を出す候補。このあと重なりを見て間引く(v9.02)
+    const cand = [];
     (p.fields || []).forEach(f => {
       if (!f.polygon || f.polygon.length < 3) return;
       // キーは文字列で統一(statusByField 側と揃える)。数値と文字列が混ざると
@@ -10835,13 +10940,49 @@ function ProgressLeafletCanvas(p) {
       const key = st ? st.status : "none";
       if (p.onlyTarget && key === "none") return;
       if (key !== "none") targetBounds.push(f.polygon);
-      const sig = fieldDrawSig(f, st, showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + labelSizeOf(f.areaA).step, p.areaUnitKey);
-      nextSig.set(id, sig);
-      want.set(id, {
+      const w = {
         f,
         st,
-        key
+        key,
+        label: null
+      };
+      want.set(id, w);
+      // 小さい圃場の札はもう少し寄ってから出す(v9.00)
+      const lsz = labelSizeOf(f.areaA);
+      if (!(showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + lsz.step)) return;
+      const c0 = PROGRESS_STATES[key] || PROGRESS_STATES.none;
+      // 札の中身はここで作って描画側で使い回す。
+      // 2か所で作ると、間引きの判定に使った大きさと実際の札がずれる
+      w.label = {
+        size: lsz.size,
+        name: (c0.mark ? c0.mark + " " : "") + f.name,
+        area: fieldAreaText(f, p.areaUnitKey),
+        // 実施済みのときだけ、済ませた人の名前を3行目に出す(v8.97)
+        by: labelByText(key, st && st.by)
+      };
+      const box = fieldLabelBox(w.label.name, w.label.area, w.label.by, lsz.size);
+      const ctr = f.center || polygonCenter(f.polygon);
+      // project は見ている場所によらない絶対座標を返すので、
+      // 地図を動かしても間引きの結果が変わらない(動かすたびに
+      // 出たり消えたりすると読めない)。倍率は整数に丸める
+      const pt = mapRef.current.project([ctr[0], ctr[1]], Math.floor(zoom));
+      cand.push({
+        id: id,
+        x: pt.x,
+        y: pt.y,
+        w: box.w,
+        h: box.h,
+        pri: labelPriOf(f.areaA)
       });
+    });
+    // 重なる札を落とす(v9.02)。倍率のしきい値だけでは重なりが残る
+    const keep = thinLabels(cand);
+    const nextSig = new Map();
+    want.forEach((w, id) => {
+      if (w.label && !keep.has(id)) w.label = null;
+      // 間引いた結果を署名に入れる。入れないと、隣の圃場が実施済みになって
+      // 札が広がったときに、押し出されたすべき札が残り続ける
+      nextSig.set(id, fieldDrawSig(w.f, w.st, !!w.label, p.areaUnitKey));
     });
 
     // 前回との差だけを地図に当てる。45秒ごとの取り直しで中身が変わって
@@ -10872,24 +11013,18 @@ function ProgressLeafletCanvas(p) {
         fillColor: c.fill,
         fillOpacity: key === "none" ? 0.3 : 0.55
       }).addTo(grp);
-      // 小さい圃場の札はもう少し寄ってから出す(v9.00)。
-      // 引いた状態では札のほうが圃場より大きく、隣と重なって読めない
-      const lsz = labelSizeOf(f.areaA);
-      // 札は圃場とは別のレイヤになるので、消すときのために覚えておく
+      // 札は圃場とは別のレイヤになるので、消すときのために覚えておく。
+      // 出すかどうかと中身は上で決め済み(倍率のしきい値と重なりの間引き)
       let label = null;
-      if (showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + lsz.step) {
-        // 圃場名は他の端末から受け取った文字列でもあるので、必ずエスケープしてから
-        // 札のHTMLに入れる(そのまま入れるとXSSになる)
-        // 地図タブと同じ形。名前と面積を行で分ける。
-        // 名前に数字が入る圃場だと、同じ行に並べた面積と続きの数字に見える。
-        // 実施済みのときだけ、済ませた人の名前を3行目に出す(v8.97)。
-        // 名前も他の端末から受け取った文字列なので必ずエスケープする
-        const byText = labelByText(key, st && st.by);
-        // 大きさで文字の大きさも変える。同じ大きさだと、寄ったときに
-        // 小さい圃場の札だけが目立って大きな圃場を見失う
+      const lb = w.label;
+      if (lb) {
+        // 圃場名も記録者名も他の端末から受け取った文字列なので、
+        // 必ずエスケープしてから札のHTMLに入れる(そのまま入れるとXSSになる)。
+        // 名前と面積は行を分ける。名前に数字が入る圃場だと、
+        // 同じ行に並べた面積と続きの数字に見える
         label = makeFieldLabel(L, f.center || polygonCenter(f.polygon),
-          '<span class="fl-name">' + escapeHtml((c.mark ? c.mark + " " : "") + f.name) + '</span><span class="fl-area">' + escapeHtml(fieldAreaText(f, p.areaUnitKey)) + '</span>' + (byText ? '<span class="fl-by">' + escapeHtml(byText) + '</span>' : ''),
-          lsz.size).addTo(grp);
+          '<span class="fl-name">' + escapeHtml(lb.name) + '</span><span class="fl-area">' + escapeHtml(lb.area) + '</span>' + (lb.by ? '<span class="fl-by">' + escapeHtml(lb.by) + '</span>' : ''),
+          lb.size).addTo(grp);
       }
       poly.on("click", () => p.onSelect({
         field: f,
@@ -11186,7 +11321,11 @@ function ProgressGoogleCanvas(p) {
     // Leaflet版と同じ差分描画。45秒ごとの取り直しで中身が変わって
     // いなければ、地図に1つも触らない(v8.91)
     const want = new Map();
-    const nextSig = new Map();
+    const cand = [];
+    // getProjection は地図の準備ができるまで null。null のときは間引かない
+    // (間引けないだけで、札は従来どおり出る)
+    const proj = mapRef.current.getProjection ? mapRef.current.getProjection() : null;
+    const scale = Math.pow(2, Math.floor(zoom));
     (p.fields || []).forEach(f => {
       if (!f.polygon || f.polygon.length < 3) return;
       const id = String(f.id);
@@ -11194,12 +11333,39 @@ function ProgressGoogleCanvas(p) {
       const key = st ? st.status : "none";
       if (p.onlyTarget && key === "none") return;
       if (key !== "none") targetBounds.push(f.polygon);
-      nextSig.set(id, fieldDrawSig(f, st, showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + labelSizeOf(f.areaA).step, p.areaUnitKey));
-      want.set(id, {
+      const w = {
         f,
         st,
-        key
+        key,
+        showLabel: false
+      };
+      want.set(id, w);
+      const lsz = labelSizeOf(f.areaA);
+      if (!(showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + lsz.step)) return;
+      w.showLabel = true;
+      if (!proj) return;
+      // Leaflet 側と同じ間引き(v9.02)。Google の札は3枚に分かれていて
+      // 背景も余白もないので、大きさの見積りは Leaflet 側の流用。
+      // Google マップ版は API キーがなく未検証
+      const c0 = PROGRESS_STATES[key] || PROGRESS_STATES.none;
+      const box = fieldLabelBox((c0.mark ? c0.mark + " " : "") + f.name,
+        fieldAreaText(f, p.areaUnitKey), labelByText(key, st && st.by), lsz.size);
+      const ctr = f.center || polygonCenter(f.polygon);
+      const wp = proj.fromLatLngToPoint(new g.LatLng(ctr[0], ctr[1]));
+      cand.push({
+        id: id,
+        x: wp.x * scale,
+        y: wp.y * scale,
+        w: box.w,
+        h: box.h,
+        pri: labelPriOf(f.areaA)
       });
+    });
+    const keep = proj ? thinLabels(cand) : null;
+    const nextSig = new Map();
+    want.forEach((w, id) => {
+      if (w.showLabel && keep && !keep.has(id)) w.showLabel = false;
+      nextSig.set(id, fieldDrawSig(w.f, w.st, w.showLabel, p.areaUnitKey));
     });
     const drawn = drawnRef.current;
     const prevSig = new Map();
@@ -11237,7 +11403,8 @@ function ProgressGoogleCanvas(p) {
       }));
       mine.push(poly);
       const lsz = labelSizeOf(f.areaA);
-      if (showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + lsz.step) {
+      // 出すかどうかは上で決め済み(倍率のしきい値と重なりの間引き)
+      if (w.showLabel) {
         const ctr = f.center || polygonCenter(f.polygon);
         // 透明アイコン+ラベルだけのマーカー。Googleマップ側は文字列として
         // 扱うのでHTMLにはならない(Leaflet側のエスケープに当たる処理は不要)

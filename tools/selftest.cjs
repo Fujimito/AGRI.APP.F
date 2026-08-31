@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "labelBandOf", "LABEL_SIZE_BREAKS", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -1071,8 +1071,6 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   // 圃場登録タブの地図は基準が 16。基準を渡せること
   eq("基準を 16 にすれば大は 16 から", [vis(true, 15, 30, 16), vis(true, 16, 30, 16)], [false, true]);
   eq("基準 16 で小さい圃場は 18", [vis(true, 17, 5, 16), vis(true, 18, 5, 16)], [false, true]);
-  // 帯
-  eq("帯は 0～3", [t.labelBandOf(13, 15), t.labelBandOf(15, 15), t.labelBandOf(16, 15), t.labelBandOf(17, 15), t.labelBandOf(20, 15)], [0, 1, 2, 3, 3]);
   eq("中くらいは 15 では出ない", vis(true, 15, 10), false);
   eq("中くらいは 16 で出る", vis(true, 16, 10), true);
   eq("小さい圃場は 16 では出ない", vis(true, 16, 5), false);
@@ -1095,14 +1093,20 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   }
   // 描画側の配線
   // 進捗地図(2) ＋ 圃場登録タブの地図(2) で 4か所
+  // 進捗2 + 圃場登録2 の候補集めに各1、Google の2つは描画側でも文字の
+  // 大きさを決めるのに使うのでもう1つずつ。計6
   eq("4つの地図すべてで使う",
-    (src.match(/const lsz = labelSizeOf\(f\.areaA\);/g) || []).length, 4);
+    (src.match(/const lsz = labelSizeOf\(f\.areaA\);/g) || []).length, 6);
   eq("進捗地図は基準 15",
     (src.match(/showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM \+ lsz\.step/g) || []).length, 2);
+  // 候補集めで 2、Google は描画側でも同じ判定を使うので 3
   eq("圃場登録タブは基準 16",
-    (src.match(/showLabel && zoom >= LABEL_MIN_ZOOM \+ lsz\.step/g) || []).length, 2);
-  eq("圃場登録タブは帯で描き直す",
-    (src.match(/labelBandOf\(zoom, LABEL_MIN_ZOOM\)/g) || []).length, 2);
+    (src.match(/showLabel && zoom >= LABEL_MIN_ZOOM \+ lsz\.step/g) || []).length, 3);
+  // v9.02: 間引きは倍率ごとに結果が変わるので、帯では足りない。
+  // 帯に戻すと、寄っても落とされたままの札が出てこない
+  eq("圃場登録タブは倍率そのもので描き直す",
+    (src.match(/Math\.floor\(zoom\), hidden, p\.areaUnitKey/g) || []).length, 2);
+  eq("帯(labelBandOf)は残っていない", src.includes("labelBandOf"), false);
   eq("札の大きさを CSS に渡す", src.includes('className: "field-label fl-" + sizeClass'), true);
   // ── 札の作り方(v9.01) ──
   // permanent ツールチップは1枚ごとに実寸を測るため、170枚で 886ms。
@@ -1116,12 +1120,106 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     (src.match(/makeFieldLabel\(L, f\.center \|\| polygonCenter\(f\.polygon\)/g) || []).length, 2);
   eq("札を消すのを忘れていない",
     src.includes("if (cur.label) grp.removeLayer(cur.label);"), true);
-  // ここが最初の実装で抜けていた。署名が全体の on/off だけだったため、
-  // 倍率を 16 → 17 に上げても小さい圃場が一度も描き直されなかった
-  eq("署名にも圃場ごとの判定を入れる",
-    (src.match(/fieldDrawSig\(f, st, showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM \+ labelSizeOf\(f\.areaA\)\.step, p\.areaUnitKey\)/g) || []).length, 2);
+  // ここが v9.00 の実装で抜けていた。署名が全体の on/off だけだったため、
+  // 倍率を 16 → 17 に上げても小さい圃場が一度も描き直されなかった。
+  // v9.02 では間引きの結果まで署名に入れる(入れないと、隣が実施済みになって
+  // 札が広がったときに、押し出されたすべき札が残り続ける)
+  eq("署名に間引きの結果まで入れる",
+    (src.match(/fieldDrawSig\(w\.f, w\.st, (!!w\.label|w\.showLabel), p\.areaUnitKey\)/g) || []).length, 2);
   eq("倍率を変えたら描き直す",
     (src.match(/labelsVisible\(p\.showLabels, zoom\), zoom, p\.onlyTarget/g) || []).length, 2);
+}
+
+// ── 重なる札を間引く(v9.02) ────────────────────
+// 倍率のしきい値(v9.00)だけでは重なりを止められない。倍率15では30aの圃場でも
+// 27px しかないのに札は 60〜90px あるので、170圃場を引いて見ると札が
+// 連なって地図が見えなくなる。
+{
+  const box = t.labelBoxOf, thin = t.thinLabels, em = t.textEmWidth;
+
+  // 1文字の幅の見積り。和字は全角、ラテン・数字は半角
+  eq("和字は1em", em("あいう"), 3);
+  eq("数字は半角", em("123"), 3 * 0.58);
+  eq("混ざっても足す", Math.round(em("田60") * 100) / 100, Math.round((1 + 0.58 * 2) * 100) / 100);
+  eq("空でも落ちない", [em(""), em(null), em(undefined)], [0, 0, 0]);
+  // 記号(✅など)は全角扱い。半角にすると札を狭く見積もって重なりが残る
+  eq("記号は全角扱い", em("✅"), 1);
+
+  // 札の外形。CSS(index.html の .fl-inner)と揃っていること
+  {
+    const b = box([{ text: "あいうえお" }, { text: "10.0 a", sub: true }], "lg");
+    // 幅 = 一番長い行(5em × 13px) + 左右の余白 7px × 2
+    eq("大の幅", b.w, 5 * 13 + 14);
+    // 高さ = 13×1.25 + 12×1.2 + 上下の余白 3px × 2
+    eq("大の高さ", b.h, Math.round(13 * 1.25) + Math.round(12 * 1.2) + 6);
+  }
+  eq("小さい札のほうが小さい",
+    box([{ text: "あいう" }], "sm").w < box([{ text: "あいう" }], "lg").w, true);
+  eq("行が増えれば高くなる",
+    box([{ text: "あ" }, { text: "い", sub: true }], "md").h >
+      box([{ text: "あ" }], "md").h, true);
+  eq("一番長い行で幅が決まる",
+    box([{ text: "あ" }, { text: "あいうえお", sub: true }], "md").w >
+      box([{ text: "あ" }, { text: "い", sub: true }], "md").w, true);
+  eq("知らない大きさは中扱い", box([{ text: "あ" }], "xx").w, box([{ text: "あ" }], "md").w);
+  eq("行が無くても落ちない", [box([], "md").w, box(null, "md").w], [12, 12]);
+
+  // 圃場1枚ぶん。記録者名の行があると高くなる
+  eq("記録者名の行があると高い",
+    t.fieldLabelBox("あ", "10 a", "藤本", "md").h > t.fieldLabelBox("あ", "10 a", "", "md").h, true);
+
+  // 間引き本体
+  const it = (id, x, y, pri) => ({ id: id, x: x, y: y, w: 100, h: 20, pri: pri });
+  eq("離れていれば全部残る",
+    [...thin([it("a", 0, 0, 1), it("b", 500, 0, 1)])].sort(), ["a", "b"]);
+  eq("重なれば大きい圃場が残る",
+    [...thin([it("small", 0, 0, 5), it("big", 10, 0, 50)])], ["big"]);
+  eq("順番を変えても結果は同じ",
+    [...thin([it("big", 10, 0, 50), it("small", 0, 0, 5)])], ["big"]);
+  // 面積が同じなら id 順。並び順で変わると45秒ごとの取り直しでちらつく
+  eq("面積が同じなら id 順で決める",
+    [...thin([it("b", 10, 0, 9), it("a", 0, 0, 9)])], ["a"]);
+  // 縦にずれていれば重ならない。札は横長なので、縦の判定が要る
+  eq("縦にずれていれば残る",
+    [...thin([it("a", 0, 0, 1), it("b", 10, 40, 1)])].sort(), ["a", "b"]);
+  eq("接しているだけなら残す(境目がぴったり)",
+    [...thin([it("a", 0, 0, 1), it("b", 100, 0, 1)])].sort(), ["a", "b"]);
+  eq("3枚重なっても残るのは1枚",
+    [...thin([it("a", 0, 0, 3), it("b", 10, 0, 2), it("c", 20, 0, 1)])], ["a"]);
+  // 落とした札は場所を取らない。取ると、落とした先で余計に落ちる
+  eq("落とした札は場所を取らない",
+    [...thin([it("a", 0, 0, 3), it("b", 10, 0, 2), it("c", 130, 0, 1)])].sort(), ["a", "c"]);
+  eq("空でも落ちない", [[...thin([])], [...thin(null)]], [[], []]);
+  eq("元の配列を壊さない", (() => {
+    const src2 = [it("b", 10, 0, 1), it("a", 0, 0, 9)];
+    thin(src2);
+    return src2.map(x => x.id);
+  })(), ["b", "a"]);
+
+  // 優先度。面積が未登録のものは labelSizeOf と揃えて「大」扱い
+  eq("面積がそのまま優先度", t.labelPriOf(30), 30);
+  eq("未登録は大扱い", t.labelPriOf(""), t.LABEL_SIZE_BREAKS[0].min);
+  eq("0 も大扱い", t.labelPriOf(0), t.LABEL_SIZE_BREAKS[0].min);
+  eq("文字列の数字も読む", t.labelPriOf("12.5"), 12.5);
+
+  // 配線。4つの地図すべてで間引くこと
+  eq("4つの地図すべてで間引く",
+    (src.match(/thinLabels\(cand\)/g) || []).length, 4);
+  // 見ている場所によらない座標で判定する。画面座標だと地図を動かすたびに
+  // 出たり消えたりして読めない
+  eq("Leaflet は project の絶対座標で判定する",
+    (src.match(/\.project\(\[ctr\[0\], ctr\[1\]\], Math\.floor\(zoom\)\)/g) || []).length, 2);
+  eq("Google は fromLatLngToPoint × 2^倍率",
+    (src.match(/proj\.fromLatLngToPoint\(new g\.LatLng\(ctr\[0\], ctr\[1\]\)\)/g) || []).length, 2);
+  // getProjection は地図の準備ができるまで null。そのときは間引かない
+  eq("Google は準備前でも札を出す",
+    (src.match(/const keep = proj \? thinLabels\(cand\) : null;/g) || []).length, 2);
+  // 大きさは測らない。測ると v9.01 で消した同期レイアウトが戻る
+  // コメントの中には「なぜ読まないか」の説明があるので、コードの行だけ見る
+  eq("大きさを測らない(offsetWidth を読まない)",
+    src.split(String.fromCharCode(10))
+      .filter(l => !l.trim().startsWith("//")).join(String.fromCharCode(10))
+      .includes("offsetWidth"), false);
 }
 
 // ── 札に出す記録者名(v8.97) ──────────────────
@@ -1138,9 +1236,10 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   // 描画側。Leaflet と Google の両方で使うこと
   eq("Leaflet の札で使う", src.includes('labelByText(key, st && st.by)'), true);
   eq("Leaflet はエスケープしてから入れる(XSS)",
-    src.includes("escapeHtml(byText)") && src.includes("fl-by"), true);
-  eq("Google 側でも使う(2か所)",
-    (src.match(/labelByText\(key, st && st\.by\)/g) || []).length, 2);
+    src.includes("escapeHtml(lb.by)") && src.includes("fl-by"), true);
+  // Leafletの候補集め / Googleの候補集め / Googleの描画で 3か所
+  eq("Google 側でも使う",
+    (src.match(/labelByText\(key, st && st\.by\)/g) || []).length, 3);
   eq("差分描画の署名に記録者名が入っている(入っていないと札が古いまま)",
     src.includes('st ? st.by || "" : "",'), true);
 }
@@ -1338,10 +1437,13 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   const L = src.slice(src.indexOf("function ProgressLeafletCanvas"), src.indexOf("function ProgressGoogleCanvas"));
   const G = src.slice(src.indexOf("function ProgressGoogleCanvas"), src.indexOf("function ProgressMapTab"));
   [["Leaflet", L], ["Google", G]].forEach(([name, body]) => {
-    // 第3引数は「この圃場の札を今の倍率で出すか」。全体の on/off を渡すと、
-    // 倍率を上げても署名が変わらず小さい圃場の札が永久に出ない(v9.00)
+    // 第3引数は「この圃場の札を今の倍率で実際に出すか」。全体の on/off を渡すと、
+    // 倍率を上げても署名が変わらず小さい圃場の札が永久に出ない(v9.00)。
+    // 間引き(v9.02)の結果もここに入る
     eq(name + " は署名で比べる",
-      body.includes("fieldDrawSig(f, st, showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM + labelSizeOf(f.areaA).step, p.areaUnitKey)"), true);
+      /fieldDrawSig\(w\.f, w\.st, (!!w\.label|w\.showLabel), p\.areaUnitKey\)/.test(body), true);
+    eq(name + " は重なる札を間引く",
+      body.includes("thinLabels(cand)"), true);
     eq(name + " は差分を取る", body.includes("diffDraw(prevSig, nextSig)"), true);
     eq(name + " は消すぶんと作るぶんを分けて当てる",
       body.includes("d.drop.forEach") && body.includes("d.draw.forEach"), true);
