@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.02";
+const APP_VERSION = "v9.03";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -9083,6 +9083,27 @@ function collapsibleHead(title, isOpen, onClick) {
     }
   }, isOpen ? "▲" : "▼"));
 }
+// ── 進捗地図の照合の結果を出す(v9.03・提案A の下ごしらえ) ──
+//
+// 進捗地図は同じ間隔で pull と progress の両方を呼んでいる。pull で来る作業に
+// progress が返すものが全部入っているなら progress は要らない。
+// その「はず」を実データで確かめるための表示で、地図の見た目には関係しない。
+// 何日か使って「差分 0 回」のままなら、progress を外してよい。
+// 外したら、この表示ごと消すこと。
+function progressDiffLine() {
+  const d = load(PROGRESS_DIFF_KEY, null);
+  if (!d || !d.runs) return null;
+  const ok = !d.diffs;
+  return /*#__PURE__*/React.createElement("p", {
+    style: { ...S.note, marginTop: 8 }
+  }, "進捗地図の照合(開発用): ", /*#__PURE__*/React.createElement("strong", null,
+    "照合 " + d.runs + " 回 / 差分 " + (d.diffs || 0) + " 回"),
+    ok ? " — サーバーの進捗を使わず、受信した作業だけで同じ地図が作れています。"
+       : " — 違いが出ています: " + (d.sample || []).map(x =>
+           "圃場" + x.field + "(" + x.why + (x.a === undefined ? "" :
+             " 進捗=" + String(x.a) + " / 受信=" + String(x.b)) + ")").join("、"));
+}
+
 function SettingsTab(p) {
   const [newCrop, setNewCrop] = useState("");
   // APIキーは肩越しに見られると悪用されるので、既定では伏せて表示する。
@@ -9554,7 +9575,7 @@ function SettingsTab(p) {
     style: S.card
   }, collapsibleHead("アプリの更新", openSec.update, () => toggleSec("update")), openSec.update && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.updateNow
-  }, "この端末のバージョン ", /*#__PURE__*/React.createElement("strong", null, APP_VERSION)), /*#__PURE__*/React.createElement("button", {
+  }, "この端末のバージョン ", /*#__PURE__*/React.createElement("strong", null, APP_VERSION)), progressDiffLine(), /*#__PURE__*/React.createElement("button", {
     onClick: p.forceUpdate,
     style: {
       ...S.primaryBtn,
@@ -10484,6 +10505,91 @@ const toMapStatus = st => st === "done" || st === "local" ? "done" : "planned";
 // 映るが、そのぶんGASの実行回数と通信量が増える。45秒は未計測の暫定値。
 // 圃場名の札を出しはじめる倍率。Leaflet版とGoogle版で揃える
 const PROGRESS_LABEL_MIN_ZOOM = 15;
+
+
+// ── 進捗地図の土台を作る(v9.03で関数に出した) ──
+//
+// サーバーの progress が返した内容(items)を土台にし、この端末にしかない
+// 未送信の実績(works)を上へ重ねる。同じ作業が両方に出るので作業IDで畳み、
+// あとから入れる works が勝つ。散布済を外した直後は手元が正しいため。
+//
+// 古い Code.gs は作業IDを返さない。そのときは重ねられず二重に数えるが、
+// 分かれるのは「手元だけ済」の途中の状態だけで、出るのは赤(安全側)。
+//
+// items を空で呼べば「pull で受け取った作業だけ」で同じものが作れる。
+// 提案A(progress をやめて pull に寄せる)の突き合わせに使う。
+const progressEntries = (items, works, from, to, recorder) => {
+  const byWork = new Map();
+  let anon = 0;
+  const put = (id, fieldId, wd, st) => {
+    const key = id === undefined || id === null || id === "" ? "?" + ++anon : String(id);
+    byWork.set(key, Object.assign({}, st, {
+      // どの日の作業か。日をまたいで畳むので、これが無いと
+      // 前の日の実績と今日の実績を区別できない(v8.95)
+      workDate: String(wd || ""),
+      // 圃場IDはサーバー経由だと数値、端末側も数値だが、過去の版で文字列に
+      // なったデータが混ざりうる。取り違えると同じ圃場が2件に割れて、
+      // 片方が地図に出ない。キーは文字列に揃えて突き合わせる。
+      fieldKey: String(fieldId)
+    }));
+  };
+  (items || []).forEach(it => put(it.id, it.fieldId, it.workDate, {
+    status: toMapStatus(it.status || "planned"),
+    by: it.by || "",
+    at: it.at || "",
+    // 最後に済ませた人を選ぶための刻。古い Code.gs は返さない(空になる)
+    atTime: it.atTime || "",
+    sprayedL: it.sprayedL || 0,
+    areaA: it.areaA || "",
+    pending: false
+  }));
+  (works || []).forEach(w => {
+    if (!w.workDate || w.workDate < from || w.workDate > to) return;
+    put(w.id, w.fieldId, w.workDate, {
+      status: w.reported ? "done" : "planned",
+      // 他の端末から受け取った作業は、その端末の記録者名を使う。手元を後に
+      // 重ねるので、ここで recorder を入れるとサーバーの名前を潰す(v8.97)
+      by: workBy(w, recorder),
+      at: w.reportDate || "",
+      atTime: w.reportAt || "",
+      sprayedL: parseFloat(w.sprayedL) || 0,
+      areaA: w.reportAreaA || "",
+      // この端末で入れたが、まだ送れていない実績。色は変えず件数だけ出す
+      pending: !!(w.reported && w.updatedAt && w.updatedAt !== w.pushedAt)
+    });
+  });
+  return Array.from(byWork.values());
+};
+
+// ── 2つの土台を突き合わせる(提案A の下ごしらえ・v9.03) ──
+//
+// progress をやめて pull だけにしてよいかは、理屈では決められない。
+// 実際のデータで「同じものが出るか」を見てから外す。
+// 地図に出しているのは a のほう。b は works だけで作ったもの。
+// 見るのは地図の見た目を決める項目だけ。at や sprayedL は吹き出しの中身で、
+// ここがずれても色は変わらないが、吹き出しも見比べる対象なので入れる。
+const PROGRESS_DIFF_KEY = "tankmix:progressdiff";
+const PROGRESS_DIFF_KEYS = ["status", "by", "at", "sprayedL", "areaA", "prevDate"];
+const progressMapDiff = (a, b) => {
+  const out = [];
+  const keys = new Set();
+  (a || new Map()).forEach((v, k) => keys.add(k));
+  (b || new Map()).forEach((v, k) => keys.add(k));
+  Array.from(keys).sort().forEach(k => {
+    const x = a && a.get(k), y = b && b.get(k);
+    if (!x && !y) return;
+    if (!x) { out.push({ field: k, why: "pullだけにある" }); return; }
+    if (!y) { out.push({ field: k, why: "progressだけにある" }); return; }
+    for (let i = 0; i < PROGRESS_DIFF_KEYS.length; i++) {
+      const key = PROGRESS_DIFF_KEYS[i];
+      if (String(x[key] == null ? "" : x[key]) !== String(y[key] == null ? "" : y[key])) {
+        out.push({ field: k, why: key, a: x[key], b: y[key] });
+        return;
+      }
+    }
+  });
+  return out;
+};
 
 
 // 圃場名・面積の札を出すか。
@@ -11722,58 +11828,42 @@ function ProgressMapTab(p) {
   // サーバーから来た内容を土台にし、この端末にしかない未送信の実績を上へ重ねる。
   // 自分で入れた実績が、送信するまで地図に出ないのはかえって迷うため。
   const statusByField = React.useMemo(() => {
-    // まず作業ごとに1件へまとめ、そのあと圃場ごとに畳む。
+    // 中身は progressEntries にある。まず作業ごとに1件へまとめ、
+    // そのあと圃場ごとに畳む。
     // v8.82までは圃場ごとに「状態の大きい方」を採っていたため、
     // 同じ日に同じ圃場を二度入れると(午前と午後で分けた等)、
     // 片方が済んだ時点でもう片方が未実施でも緑になっていた。
     // 緑は「終わった」と読まれるので、残りが見えないのは危ない(v8.83)。
-    const byWork = new Map();
-    let anon = 0;
-    const put = (id, fieldId, wd, st) => {
-      // 同じ作業がスナップショットと手元の両方に出るので、作業IDで重ねる。
-      // 手元を後に入れるのでこちらが勝つ。散布済を外した直後は手元が正しい。
-      // 古い Code.gs は作業IDを返さない。そのときは重ねられず二重に数えるが、
-      // 分かれるのは「手元だけ済」の途中の状態だけで、出るのは赤(安全側)。
-      const key = id === undefined || id === null || id === "" ? "?" + ++anon : String(id);
-      byWork.set(key, {
-        ...st,
-        // どの日の作業か。日をまたいで畳むので、これが無いと
-        // 前の日の実績と今日の実績を区別できない(v8.95)
-        workDate: String(wd || ""),
-        // 圃場IDはサーバー経由だと数値、端末側も数値だが、過去の版で文字列に
-        // なったデータが混ざりうる。取り違えると同じ圃場が2件に割れて、
-        // 片方が地図に出ない。キーは文字列に揃えて突き合わせる。
-        fieldKey: String(fieldId)
-      });
-    };
-    (snap.items || []).forEach(it => put(it.id, it.fieldId, it.workDate, {
-      status: toMapStatus(it.status || "planned"),
-      by: it.by || "",
-      at: it.at || "",
-      // 先に済ませた人を選ぶための刻。古い Code.gs は返さない(空になる)
-      atTime: it.atTime || "",
-      sprayedL: it.sprayedL || 0,
-      areaA: it.areaA || "",
-      pending: false
-    }));
-    (p.works || []).forEach(w => {
-      if (!w.workDate || w.workDate < fetchFrom || w.workDate > fetchTo) return;
-      put(w.id, w.fieldId, w.workDate, {
-        status: w.reported ? "done" : "planned",
-        // 他の端末から受け取った作業は、その端末の記録者名を使う。手元を後に
-        // 重ねるので、ここで p.recorder を入れるとサーバーの名前を潰す(v8.97)
-        by: workBy(w, p.recorder),
-        at: w.reportDate || "",
-        atTime: w.reportAt || "",
-        sprayedL: parseFloat(w.sprayedL) || 0,
-        areaA: w.reportAreaA || "",
-        // この端末で入れたが、まだ送れていない実績。色は変えず件数だけ出す
-        pending: !!(w.reported && w.updatedAt && w.updatedAt !== w.pushedAt)
-      });
-    });
-    // 圃場ごとに1色へ畳む。今日ぶんと前の日ぶんの扱いは foldProgress にある
-    return foldProgress(Array.from(byWork.values()), p.workDate);
+    return foldProgress(
+      progressEntries(snap.items, p.works, fetchFrom, fetchTo, p.recorder),
+      p.workDate);
   }, [snap, p.works, fetchFrom, fetchTo, p.recorder]);
+
+  // ── 提案A の下ごしらえ: progress をやめて pull だけにできるか照合する ──
+  //
+  // 進捗地図を開いている間、この端末は同じ間隔で pull と progress の
+  // 両方を呼んでいる。pull で受け取った作業には progress が返すものが
+  // すべて入っているはずなので、progress は要らないはず——という「はず」を、
+  // 実データで確かめてから外す。
+  //
+  // ここでは地図の見た目は変えない。works だけで作った結果を裏で作り、
+  // 違いがあったときだけ記録する。設定タブに出る。
+  React.useEffect(() => {
+    if (!p.active) return;
+    const onlyWorks = foldProgress(
+      progressEntries([], p.works, fetchFrom, fetchTo, p.recorder),
+      p.workDate);
+    const d = progressMapDiff(statusByField, onlyWorks);
+    const prev = load(PROGRESS_DIFF_KEY, { runs: 0, diffs: 0, last: null, sample: [] });
+    const next = {
+      runs: (prev.runs || 0) + 1,
+      diffs: (prev.diffs || 0) + (d.length ? 1 : 0),
+      last: new Date().toISOString(),
+      // 直近の違いだけ残す。全部貯めると localStorage を食う
+      sample: d.length ? d.slice(0, 10) : (prev.sample || [])
+    };
+    save(PROGRESS_DIFF_KEY, next);
+  }, [statusByField, p.active]);
 
   const counts = React.useMemo(() => {
     const c = {

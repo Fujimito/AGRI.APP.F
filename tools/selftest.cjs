@@ -26,7 +26,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -487,8 +487,95 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.includes("put(it.id, it.fieldId, it.workDate, {"), true);
   eq("手元の作業IDを渡している", src.includes("put(w.id, w.fieldId, w.workDate, {"), true);
   // 畳む処理は v8.95 で foldProgress に切り出した(単体で検査できるように)
+  // v9.03 で progressEntries に出した。畳むのは引き続き foldProgress
+
+// ── 進捗地図の土台づくり(v9.03 で関数に出した) ──
+// progress の結果と、pull で受け取った作業を重ねる。作業IDで畳み、手元が勝つ。
+{
+  const E = t.progressEntries;
+  const item = o => Object.assign({ id: 1, fieldId: 7, workDate: "2026-08-31",
+    status: "planned", by: "", at: "", atTime: "", sprayedL: 0, areaA: "" }, o);
+  const work = o => Object.assign({ id: 1, fieldId: 7, workDate: "2026-08-31",
+    reported: false, by: "", reportDate: "", reportAt: "", sprayedL: 0,
+    reportAreaA: "", updatedAt: "", pushedAt: "" }, o);
+
+  eq("何も無ければ空", E([], [], "2026-08-30", "2026-08-31", "私"), []);
+  // 同じ作業IDなら1件に畳む。手元が後なので手元が勝つ
+  {
+    const r = E([item({ status: "done", by: "サーバー" })],
+      [work({ reported: false, by: "手元" })], "2026-08-30", "2026-08-31", "私");
+    eq("同じ作業IDは1件に畳む", r.length, 1);
+    eq("手元が勝つ(散布済を外した直後は手元が正しい)", [r[0].status, r[0].by], ["planned", "手元"]);
+  }
+  // 作業IDが違えば別の件として残る
+  eq("違う作業は別の件",
+    E([item({ id: 1 })], [work({ id: 2 })], "2026-08-30", "2026-08-31", "私").length, 2);
+  // 古い Code.gs は作業IDを返さない。畳めないので二重に数えるが、落ちない
+  eq("作業IDが無くても落ちない",
+    E([item({ id: "" }), item({ id: "" })], [], "2026-08-30", "2026-08-31", "私").length, 2);
+  // 圃場IDは文字列に揃える。揃えないと同じ圃場が2件に割れる
+  eq("圃場IDは文字列にする",
+    E([item({ fieldId: 7 })], [], "2026-08-30", "2026-08-31", "私")[0].fieldKey, "7");
+  // 範囲の外の作業は入れない
+  eq("範囲の外は入れない",
+    E([], [work({ workDate: "2026-08-01" })], "2026-08-30", "2026-08-31", "私"), []);
+  eq("日付が無い作業は入れない",
+    E([], [work({ workDate: "" })], "2026-08-30", "2026-08-31", "私"), []);
+  // サーバーの状態は toMapStatus を通す(mixed は planned 扱い)
+  eq("mixed は未実施として見る",
+    E([item({ status: "mixed" })], [], "2026-08-30", "2026-08-31", "私")[0].status, "planned");
+  // 未送信の印
+  eq("送っていない実績には印を付ける",
+    E([], [work({ reported: true, updatedAt: "b", pushedAt: "a" })], "2026-08-30", "2026-08-31", "私")[0].pending, true);
+  eq("送り済みなら印は付かない",
+    E([], [work({ reported: true, updatedAt: "a", pushedAt: "a" })], "2026-08-30", "2026-08-31", "私")[0].pending, false);
+  eq("サーバー由来には印を付けない",
+    E([item({ status: "done" })], [], "2026-08-30", "2026-08-31", "私")[0].pending, false);
+
+  // ── 提案A: progress を外せるかの照合 ──
+  // items を空にすると「pull で受け取った作業だけ」で作れる。
+  // 同じものが出るなら progress は要らない。
+  {
+    const f = t.foldProgress;
+    const w = work({ reported: true, by: "田中", reportDate: "2026-08-31",
+      reportAt: "2026-08-31T02:00:00.000Z", sprayedL: 300, reportAreaA: 12,
+      updatedAt: "a", pushedAt: "a" });
+    // サーバーが同じ内容を返している場合(pull が届いていれば必ずこうなる)
+    const both = f(E([item({ status: "done", by: "田中", at: "2026-08-31",
+      atTime: "2026-08-31T02:00:00.000Z", sprayedL: 300, areaA: 12 })], [w],
+      "2026-08-30", "2026-08-31", "私"), "2026-08-31");
+    const only = f(E([], [w], "2026-08-30", "2026-08-31", "私"), "2026-08-31");
+    eq("同じ内容なら差分は出ない", t.progressMapDiff(both, only), []);
+  }
+  {
+    const f = t.foldProgress, D = t.progressMapDiff;
+    const a = f(E([item({ status: "done", by: "田中" })], [], "2026-08-30", "2026-08-31", "私"), "2026-08-31");
+    const b = f(E([], [], "2026-08-30", "2026-08-31", "私"), "2026-08-31");
+    eq("progress にしか無ければ気づく", D(a, b), [{ field: "7", why: "progressだけにある" }]);
+    eq("pull にしか無ければ気づく", D(b, a), [{ field: "7", why: "pullだけにある" }]);
+  }
+  {
+    const f = t.foldProgress, D = t.progressMapDiff;
+    const a = f(E([], [work({ reported: true, by: "田中", updatedAt: "a", pushedAt: "a" })], "2026-08-30", "2026-08-31", "私"), "2026-08-31");
+    const b = f(E([], [work({ reported: true, by: "藤本", updatedAt: "a", pushedAt: "a" })], "2026-08-30", "2026-08-31", "私"), "2026-08-31");
+    const d = D(a, b);
+    eq("名前が違えば気づく", [d.length, (d[0] || {}).why, (d[0] || {}).a, (d[0] || {}).b], [1, "by", "田中", "藤本"]);
+  }
+  eq("空同士なら差分なし", t.progressMapDiff(new Map(), new Map()), []);
+  eq("片方が無くても落ちない", t.progressMapDiff(null, null), []);
+
+  // 配線。地図はこれまでどおり progress を土台にしている(まだ外していない)
+  eq("地図は progress を土台にしたまま",
+    src.includes("progressEntries(snap.items, p.works, fetchFrom, fetchTo, p.recorder),"), true);
+  eq("裏で works だけの結果も作る",
+    src.includes("progressEntries([], p.works, fetchFrom, fetchTo, p.recorder),"), true);
+  eq("照合の結果を残す", src.includes("save(PROGRESS_DIFF_KEY, next);"), true);
+  eq("設定タブに出す", src.includes("progressDiffLine()"), true);
+}
+
   eq("畳む処理は foldProgress に任せる",
-    src.includes("return foldProgress(Array.from(byWork.values()), p.workDate);"), true);
+    src.includes("return Array.from(byWork.values());") &&
+    src.includes("progressEntries(snap.items, p.works, fetchFrom, fetchTo, p.recorder),"), true);
   eq("1件でも未実施なら未実施",
     src.includes('v.status = v.doneCount === v.total ? "done" : "planned";'), true);
   eq("大きい方を採る古い判定が残っていない",
@@ -1261,7 +1348,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("記録者名が未設定でも落ちない", by({}, undefined), "");
   // 呼び側。ここを p.recorder に戻すと上の修正が無効になる
   eq("地図の状態は workBy を通す",
-    src.includes("by: workBy(w, p.recorder),"), true);
+    src.includes("by: workBy(w, recorder),"), true);
   eq("p.recorder を直に入れていない",
     src.includes('by: p.recorder || "",'), false);
 }

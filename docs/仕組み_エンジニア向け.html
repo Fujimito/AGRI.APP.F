@@ -387,6 +387,15 @@ flowchart TD
     <p>散布済のチェックを<strong>外した</strong>ときにサーバーの <code>done</code> が勝ち続けていたのも、同じ仕組みで直った。作業IDで重ねるときに手元が上書きするため、外した瞬間に赤へ戻る(実測で確認)。</p>
     <p class="sub"><strong>残っている制約。</strong>古い Code.gs は進捗に作業IDを返さないので重ねられず、手元だけ済んでいる途中の状態で二重に数える。出るのは赤で、安全側に倒れる。</p>
   </div>
+
+  <div class="note">
+    <span class="t">進行中 — <code>progress</code> をやめて <code>pull</code> に寄せる(v9.03 で照合を開始)</span>
+    <p><strong>今の形。</strong>進捗地図を開いている間、端末は<strong>同じ間隔で2回サーバーを呼んでいる</strong>&mdash;&mdash;<code>autoPullShared</code>(<code>pull</code>)と <code>refresh</code>(<code>progress</code>)。どちらも <code>pullSec</code> の間隔で走る。</p>
+    <p><strong>気づいたこと。</strong><code>progress</code> が返す項目は、<code>pull</code> が返す作業(<code>workObj_</code>)に<strong>すべて含まれている</strong>。<code>id / fieldId / workDate / status / sprayedL / by</code> はそのまま、<code>areaA</code> は <code>reportAreaA</code>、<code>at</code> は <code>reportedAt</code>、<code>atTime</code> は <code>reportedAtTime</code>。しかも地図はもともと <code>pull</code> 由来の <code>p.works</code> を上に重ねている(手元が勝つ)。<strong>つまり <code>progress</code> は要らないはず</strong>。</p>
+    <p><strong>「はず」で外さない。</strong>v9.03 では、地図の見た目は従来どおり(<code>progress</code> が土台)にしたまま、<strong>裏で「受信した作業だけ」で同じ地図を組み、違いがあれば記録する</strong>。設定タブ→アプリの更新に「照合 N 回 / 差分 M 回」と出る。<code>progressEntries(items, works, from, to, recorder)</code> の第1引数を空にすれば works だけの結果になる、という形にしてある。</p>
+    <p><strong>外すときにやること。</strong>差分 0 のまま何日か使えたら、(1) <code>fetchProgress</code> と <code>refresh</code> を <code>pullSharedSync</code> に置き換える (2) <code>snap</code> と <code>tankmix:progresssnap</code> を捨てる (3) Code.gs の <code>progress</code> と <code>progressItems_</code> を消す (4) この照合の仕組みと <code>progressDiffLine</code> ごと消す。<strong>片づけまでやって完了。</strong>照合だけ残すと、要らない計算が毎回走り続ける。</p>
+    <p class="sub"><strong>効き目の見込み(未実測)。</strong>地図を開いている間のサーバー呼び出しが半分になる。<code>progress</code> は1日ぶんで 4,274セル読み(v8.98 の実測)、<code>pull</code> は変化なしで 17,024セル読み。<strong>pull のほうが1回は重い</strong>ので、合計が減るかは実データで測ってから書くこと。減らないなら、外す理由は「経路がひとつになる」ことだけになる。</p>
+  </div>
 </section>
 
 <section>
