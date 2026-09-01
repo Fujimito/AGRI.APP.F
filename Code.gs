@@ -1166,7 +1166,10 @@ function ledgerSyncWorks_(rows, team) {
   // 記録IDとチームコードの列だけ読む。台帳の中身は読まない(S5)
   const ids  = last >= 2 ? lg.getRange(2, COL.ID,   last - 1, 1).getValues() : [];
   const tms  = last >= 2 ? lg.getRange(2, COL.TEAM, last - 1, 1).getValues() : [];
-  const rowOf = {};
+  // 記録IDが "__proto__" / "constructor" / "toString" などだと、素の {} では
+  // プロトタイプ鎖を拾って壊れる(v9.13 レビューで指摘・実測)。
+  // Object.create(null) で継承の無い辞書にする
+  const rowOf = Object.create(null);   // 記録ID → 台帳の行番号(既存行)
   for (var i = 0; i < ids.length; i++) {
     var id = ids[i][0];
     if (id === "" || id === null || id === undefined) continue;
@@ -1174,21 +1177,32 @@ function ledgerSyncWorks_(rows, team) {
     // チーム欄が空の行は古い行。どのチームのものか分からないので拾う
     // (findRow_ の第2段・ledgerRebuild_ と同じ扱い)
     if (team && rt && rt !== String(team)) continue;
-    if (!(String(id) in rowOf)) rowOf[String(id)] = i + 2;  // シートの行番号
+    var idKey = String(id);
+    if (!(idKey in rowOf)) rowOf[idKey] = i + 2;  // シートの行番号
   }
   var added = 0, updated = 0;
-  var append = [];
+  var append = [];                     // これから追加する行。まだシートには無い
+  // 記録ID → append の添字。同じ受信の中で同じ記録IDが複数回来たとき
+  // (upsertRows_ が畳んだ後でも、追加+更新の順で2件残ることがある)、
+  // 別行として2度足すと台帳は行を消さない方針(S3)なので二重行が
+  // 自動では戻らなくなる。append 側はまだ書いていないので、上書きで畳む
+  var appendAt = Object.create(null);
   for (var k = 0; k < rows.length; k++) {
     var r = rows[k];
     if (r[16]) continue;                 // 削除済みは台帳に足さない(S3)
     var want = ledgerRowFromWork_(r);    // S4: 照合と同じ関数を通す
     var key = String(r[0]);
+    if (key in appendAt) {
+      append[appendAt[key]] = want.map(safeCell_);
+      continue;
+    }
     if (key in rowOf) {
       // 受信日時(列1)は書き換えない(S2)。列2以降だけ書く
       lg.getRange(rowOf[key], 2, 1, W - 1)
         .setValues([want.slice(1).map(safeCell_)]);
       updated++;
     } else {
+      appendAt[key] = append.length;
       append.push(want.map(safeCell_));
       added++;
     }
@@ -1597,12 +1611,18 @@ function doPost(e) {
         return json_({ ok: false, error: "too many", max: PUSH_MAX, got: list.length });
       }
       if (type === "pushFields") {
-        return json_(upsertRows_(getFieldSheet_(), FIELD_HEADERS, FIELD_ID_COL, FIELD_EDIT_COL,
-                                 list, fieldRow_, data.team, "圃場"));
+        const rf = upsertRows_(getFieldSheet_(), FIELD_HEADERS, FIELD_ID_COL, FIELD_EDIT_COL,
+                               list, fieldRow_, data.team, "圃場");
+        // 応答に行の中身を載せない(要らないうえに重い)。圃場マスタの9列目は
+        // ポリゴンJSONで、PUSH_MAX(300件)ぶん載ると往復とも重くなる(v9.13 レビュー)
+        delete rf.applied;
+        return json_(rf);
       }
       if (type === "pushChems") {
-        return json_(upsertRows_(getChemSheet_(), CHEM_HEADERS, CHEM_ID_COL, CHEM_EDIT_COL,
-                                 list, chemRow_, data.team, null));
+        const rc = upsertRows_(getChemSheet_(), CHEM_HEADERS, CHEM_ID_COL, CHEM_EDIT_COL,
+                               list, chemRow_, data.team, null);
+        delete rc.applied;   // 応答に行の中身を載せない(要らないうえに重い)
+        return json_(rc);
       }
       const res = upsertRows_(getWorkSheet_(), WORK_HEADERS, WORK_ID_COL, WORK_EDIT_COL,
                               list, workRow_, data.team, null);

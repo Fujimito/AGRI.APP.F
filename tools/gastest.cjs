@@ -1219,8 +1219,12 @@ const F2 = {
   const c1 = post(ctx, { type: "ledgerCheck", team: TEAM });
   eq("record を送らなくても照合が一致する", [c1.differ, c1.onlyWork], [0, 0]);
 
-  // S2 の検査用に、受信日時(列1)を覚えておく
-  const stamp1 = lg.getRange(row9201, 1).getValue();
+  // S2 の検査。jstStamp_ は秒精度なので、1回目と2回目の pushWorks が
+  // 同じ秒に走ると「値が変わらない」だけでは違反を見逃す(レビュー指摘・実測)。
+  // 列1に判定用の番兵(あり得ない値)を直接入れておき、2回目の送信後も
+  // その番兵が残っていることで「列1に一切書いていない」ことを確かめる
+  const SENTINEL = "SENTINEL-S2";
+  lg.getRange(row9201, 1).setValue(SENTINEL);
 
   // 3. 同じ作業をもう一度 pushWorks すると、台帳の行が増えない(更新になる)
   const r2 = post(ctx, { type: "pushWorks", team: TEAM, items: [
@@ -1231,8 +1235,11 @@ const F2 = {
   eq("台帳の行数は増えない", lg.getLastRow(), 2);
   eq("実散布量は更新される", lg.getRange(row9201, 12).getValue(), 19);
 
-  // 4. 更新のとき、台帳の受信日時(列1)は変わらない(S2)
-  eq("受信日時は書き換えない", lg.getRange(row9201, 1).getValue(), stamp1);
+  // 4. 更新のとき、台帳の受信日時(列1)は変わらない(S2)。
+  // 番兵がそのまま残っていることで、列1に一切書いていないと分かる
+  eq("受信日時は書き換えない(番兵が残る)", lg.getRange(row9201, 1).getValue(), SENTINEL);
+  // 後始末。番兵を普通の受信日時の見た目に戻しておく(以降のテストに影響させない)
+  lg.getRange(row9201, 1).setValue("2026-08-24 12:00:00");
 
   // 5. deleted: true の作業を送っても、台帳の行は消えない(S3)
   const r3 = post(ctx, { type: "pushWorks", team: TEAM, items: [
@@ -1290,6 +1297,116 @@ const F2 = {
     eq("台帳から読むのは記録IDとチームコードの列だけ",
        lg._readCells, 16 + 2 * (before - 1));
     eq("行数は変わらない(更新のはず)", lg.getLastRow(), before);
+  }
+
+  // Important-6(v9.13 レビュー): 新しく書く値にも safeCell_ を通す。
+  // §23 の検査は「読んで書き戻す」ときの数式インジェクション対策だったが、
+  // ledgerSyncWorks_ は自分で作った(=ledgerRowFromWork_ の戻り)値を書く側でも
+  // safeCell_ を通す必要がある。触らない行が数式にならないことだけを見ると、
+  // 触らない行はそもそも書かないので自明に通ってしまう(レビュー指摘・実測)。
+  //
+  // ここが本題: ledgerRowFromWork_ が組み立てる列のほとんどは、作業シート側の
+  // workRow_ が書く時点で既に safeCell_ を通っている(記録者・圃場名・作物・
+  // 薬剤内容・備考・チームコードなど)。なので圃場名を数式にして送っても、
+  // ledgerSyncWorks_ 自身が safeCell_ を外していても既に保護済みのまま
+  // 通ってしまい、検査として無意味になる(実際に手元で確認した。後述)。
+  // 「記録ID」列だけは workRow_ 側でも safeCell_ を通していない
+  // (`String(w.id)` のみ)。つまり記録IDを数式になりうる文字列にすれば、
+  // ledgerSyncWorks_ 自身が safeCell_ を通しているかどうかだけで結果が
+  // 変わる、正しい検査になる
+  {
+    const EVIL_ID = '=IMPORTXML("http://evil-id","//id")';
+    // 追加のとき
+    post(ctx, { type: "pushWorks", team: TEAM, items: [
+      mk(EVIL_ID, "2026-08-27", true, "田中", "数式ID圃場"),
+    ]});
+    const rowEvilId = findLgRow(EVIL_ID);
+    eq("追加: 数式になりうる記録IDでも見つかる", rowEvilId > 0, true);
+    eq("追加: 記録ID列が数式にならない", lg._isFormulaAt(rowEvilId, 2), false);
+    eq("追加: 記録IDの中身は正しく入る(文字列として)",
+       lg.getRange(rowEvilId, 2).getValue(), EVIL_ID);
+
+    // 更新のとき(同じ記録IDで、別の数式になりうる圃場名を添えて送る)
+    post(ctx, { type: "pushWorks", team: TEAM, items: [
+      Object.assign(mk(EVIL_ID, "2026-08-27", true, "田中", "更新後の圃場"), {
+        updatedAt: "2026-08-27T05:00:00.000Z" }),
+    ]});
+    eq("更新: 記録ID列が数式にならない", lg._isFormulaAt(rowEvilId, 2), false);
+    eq("更新: 記録IDの中身は変わらない(文字列として)",
+       lg.getRange(rowEvilId, 2).getValue(), EVIL_ID);
+  }
+
+  // Important-4(v9.13 レビュー): 記録IDが __proto__ / constructor / toString でも、
+  // 素の {} が持つ継承されたプロパティを拾って壊れないこと。
+  // (rowOf を Object.create(null) にしたことの検査。この露出は今回新しく入ったもの)
+  //
+  // 専用の ctx2 で行う。ledgerCheck_ の dup 判定(別関数・別のバグ・今回の
+  // 変更対象外)にも同じ「素の {} に __proto__/constructor/toString を
+  // キーとして入れる」弱点が別途あることをこのテスト中に見つけたため
+  // (このテスト自身のIDでその弱点を踏んでしまい、あとに続く §24 の
+  // ledgerCheck を使った検査を汚染する)。ledgerCheck_ 側は今回のブリーフの
+  // 対象外(ledgerSyncWorks_ ではない)なので直さず、ここでは影響を切り離す
+  {
+    const ctx2 = makeContext({});
+    ["__proto__", "constructor", "toString"].forEach(pid => {
+      const r = post(ctx2, { type: "pushWorks", team: TEAM, items: [
+        mk(pid, "2026-08-28", true, "田中", "特殊ID" + pid),
+      ]});
+      eq("記録ID " + pid + " でも例外にならず追加できる",
+         [r.ok, r.ledgerAdded, r.ledgerUpdated], [true, 1, 0]);
+      const lg2 = ctx2.SHEET_STATE.getSheetByName("防除記録");
+      let row2 = -1;
+      for (let r2i = 2; r2i <= lg2.getLastRow(); r2i++) {
+        if (String(lg2.getRange(r2i, 2).getValue()) === pid) { row2 = r2i; break; }
+      }
+      eq("記録ID " + pid + " の行が実在する", row2 > 0, true);
+      eq("記録ID " + pid + " の中身が正しい",
+         lg2.getRange(row2, 5).getValue(), "特殊ID" + pid);
+      // もう一度同じIDで送っても、追加ではなく更新になる(継承先の値を
+      // 誤って「既存行」と見なしていないか・逆に「無い」と見なして
+      // 増やし続けていないかの両方を見る)
+      const r2 = post(ctx2, { type: "pushWorks", team: TEAM, items: [
+        Object.assign(mk(pid, "2026-08-28", true, "田中", "特殊ID" + pid), {
+          updatedAt: "2026-08-28T05:00:00.000Z" }),
+      ]});
+      eq("記録ID " + pid + " の2回目は更新になる(追加は0)",
+         [r2.ledgerAdded, r2.ledgerUpdated], [0, 1]);
+    });
+  }
+
+  // Important-3(v9.13 レビュー): 同一送信の中に同じ記録IDが複数回来ても、
+  // 台帳が二重行にならないこと。upsertRows_ は同一IDを1行に畳むが、
+  // その過程で applied には「追加された行」と「その直後に更新した行」の
+  // 2件が入る(1件目は仮の値、2件目が本当の値)。ledgerSyncWorks_ が
+  // これをそのまま2行として足すと、台帳は行を消さない方針(S3)なので
+  // 自動では戻らない二重行になる
+  {
+    const r = post(ctx, { type: "pushWorks", team: TEAM, items: [
+      mk(9401, "2026-08-29", false, "田中", "最初の値"),
+      Object.assign(mk(9401, "2026-08-29", true, "田中", "最後の値"), {
+        updatedAt: "2026-08-29T05:00:00.000Z" }),
+    ]});
+    eq("作業シート側は1行に畳まれる(追加1・更新1)", [r.added, r.updated], [1, 1]);
+    eq("台帳も1行だけ増える(追加は1、更新は0)", [r.ledgerAdded, r.ledgerUpdated], [1, 0]);
+    const c = post(ctx, { type: "ledgerCheck", team: TEAM });
+    eq("重なった記録IDが台帳に残らない(dup=0)", c.dup, 0);
+    const row9401 = findLgRow(9401);
+    eq("台帳の中身は最後に送った値になっている(先勝ちの仮の値が残らない)",
+       [lg.getRange(row9401, 5).getValue(), lg.getRange(row9401, 13).getValue()],
+       ["最後の値", "散布済"]);
+  }
+
+  // Important-2(v9.13 レビュー・裁定): pushFields / pushChems の応答からも
+  // applied を落とす。fieldRow_ の9列目はポリゴンJSONで、PUSH_MAX(300件)ぶん
+  // 応答に乗ると往復とも重くなる(ブリーフの「他の呼び出し元は使わないので
+  // 影響しない」は応答本文の大きさを見落としていた、というのがレビューの裁定)
+  {
+    const rf = post(ctx, { type: "pushFields", team: TEAM, items: [F1] });
+    eq("pushFields の応答にも applied を載せない", "applied" in rf, false);
+    const rc = post(ctx, { type: "pushChems", team: TEAM,
+      items: [{ id: "薬剤X", name: "薬剤X", use: "殺菌剤", form: "水和剤",
+                updatedAt: "2026-08-01T00:00:00.000Z", by: "藤本", deviceId: "d" }] });
+    eq("pushChems の応答にも applied を載せない", "applied" in rc, false);
   }
 
   eq("features に ledgerFromWorks が載っている",
