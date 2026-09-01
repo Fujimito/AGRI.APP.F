@@ -771,7 +771,20 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
 
   if (updated > 0 || added > 0 || purged > 0) {
     ensureRows_(sh, rows.length + 1);   // +1 は見出し行
-    sh.getRange(2, 1, rows.length, width).setValues(rows);
+    // ★ 必ず safeCell_ を通してから書き戻すこと(ledgerRebuild_ と同じ理由)。
+    //
+    // rows の大半は getValues で読んだだけの行で、差し替えたのは一部。
+    // だが setValues に渡す配列は全部「こちらが書く値」になる。
+    // 数式化を止める先頭のアポストロフィは getValues では戻らないので、
+    // "=IMPORTXML(...)" という素の文字列として読め、そのまま書くと
+    // Sheets が生きた数式として再解釈する。
+    //
+    // ここは圃場・作業・薬剤のすべての押し込みが通る。端末は 1.5 秒の
+    // debounce で自動送信するので、実質つねに走っている。しかもシートは
+    // 全チームの行を含むので、自分の押し込みで別チームの行まで再点火する。
+    // safeCell_ は数値・Date・安全な文字列を素通しするので、何度通しても良い。
+    sh.getRange(2, 1, rows.length, width).setValues(
+      rows.map(function (row) { return row.map(safeCell_); }));
     // 掃除で減ったぶん、下に古い行が残る。行ごと消す
     const extra = (last - 1) - rows.length;
     if (extra > 0) sh.deleteRows(2 + rows.length, extra);

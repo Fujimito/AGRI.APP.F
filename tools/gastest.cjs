@@ -1074,6 +1074,73 @@ const F2 = {
      (JSON.parse(ctx.doGet().getContent()).features || []).indexOf("ledgerRebuild") >= 0, true);
 }
 
+// ── 23. 押し込み(upsertRows_)も、読んで書き戻している(v9.12) ──────
+//
+// upsertRows_ はシートを丸ごと読み、一部を差し替えて丸ごと書き戻す。
+// 先頭のアポストロフィ(数式インジェクション対策)は getValues では戻らないので、
+// 素のまま setValues すると Sheets が生きた数式として再解釈する。
+//
+// v9.09 で ledgerRebuild_ の同じ欠陥を直したが、こちらを見ていなかった。
+// しかも ledgerRebuild_ は手で押したときだけ走るのに対し、こちらは
+// 圃場・作業・薬剤の押し込みすべてが通る。端末は1.5秒の debounce で
+// 自動送信するので、実質つねに走っている。
+//
+// 危ないのは「今回さわらない行」。同じ押し込みの中に1件でも変更があれば
+// 全行が書かれる。
+{
+  const ctx = makeContext({});
+  const EVIL = '=IMPORTXML("http://x","//y")';
+  const mk = (id, date, fieldName) => ({
+    id: id, workDate: date, fieldId: 3, fieldName: fieldName,
+    status: "planned", plannedL: 100, sprayedL: 0, reportAreaA: "",
+    chemCount: 0, chemText: "", crop: "水稲", areaA: 12.5,
+    chems: [], totalL: 0, waterMl: 0, memo: "", reportMemo: "",
+    seq: 0, by: "藤本", deviceId: "d1", reportedAt: "",
+    updatedAt: "2026-08-20T04:00:00.000Z",
+  });
+
+  // ── 圃場マスタ ──
+  post(ctx, { type: "pushFields", team: TEAM,
+              items: [Object.assign({}, F1, { id: 2001, name: EVIL })] });
+  const fs = ctx.SHEET_STATE.getSheetByName("圃場マスタ");
+  eq("圃場名: 入れた時点では数式ではない", fs._isFormulaAt(2, 3), false);
+  // 別の圃場を1件足す。2001 の行は触らないが、書き戻しには入る
+  post(ctx, { type: "pushFields", team: TEAM,
+              items: [Object.assign({}, F2, { id: 2002 })] });
+  eq("圃場名: 触っていない行を書き戻しても数式にならない", fs._isFormulaAt(2, 3), false);
+  eq("圃場名: 中身も変わらない", fs.getRange(2, 3).getValue(), EVIL);
+
+  // ── 作業 ──
+  post(ctx, { type: "pushWorks", team: TEAM,
+              items: [mk(2101, "2026-08-20", EVIL)] });
+  const ws = ctx.SHEET_STATE.getSheetByName("作業");
+  eq("圃場名(作業): 入れた時点では数式ではない", ws._isFormulaAt(2, 5), false);
+  post(ctx, { type: "pushWorks", team: TEAM,
+              items: [mk(2102, "2026-08-21", "普通の田")] });
+  eq("圃場名(作業): 触っていない行を書き戻しても数式にならない", ws._isFormulaAt(2, 5), false);
+  eq("圃場名(作業): 中身も変わらない", ws.getRange(2, 5).getValue(), EVIL);
+
+  // ── 薬剤マスタ ──
+  post(ctx, { type: "pushChems", team: TEAM,
+              items: [{ id: "c1", name: EVIL, use: "殺虫剤", form: "液剤",
+                        updatedAt: "2026-08-01T00:00:00.000Z", by: "藤本", deviceId: "d" }] });
+  const cs = ctx.SHEET_STATE.getSheetByName("薬剤マスタ");
+  eq("薬剤名: 入れた時点では数式ではない", cs._isFormulaAt(2, 3), false);
+  post(ctx, { type: "pushChems", team: TEAM,
+              items: [{ id: "c2", name: "普通の薬", use: "殺菌剤", form: "水和剤",
+                        updatedAt: "2026-08-01T00:00:00.000Z", by: "藤本", deviceId: "d" }] });
+  eq("薬剤名: 触っていない行を書き戻しても数式にならない", cs._isFormulaAt(2, 3), false);
+  eq("薬剤名: 中身も変わらない", cs.getRange(2, 3).getValue(), EVIL);
+
+  // 別チームの行も同じ書き戻しに乗る。自分のチームの押し込みで再点火しないこと
+  post(ctx, { type: "pushFields", team: "NCT",
+              items: [Object.assign({}, F1, { id: 2003, name: EVIL })] });
+  const nctRow = fs.getLastRow();
+  post(ctx, { type: "pushFields", team: TEAM,
+              items: [Object.assign({}, F1, { id: 2004, name: "別の田" })] });
+  eq("別チームの行も数式にならない", fs._isFormulaAt(nctRow, 3), false);
+}
+
 // ─────────── 結果 ───────────
 if (fails.length) {
   console.error("\n  ✗ " + fails.length + " 件失敗 / " + (pass + fails.length) + " 件中\n");

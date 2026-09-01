@@ -469,6 +469,18 @@ flowchart TD
   </div>
 
   <div class="fail">
+    <h3>同じ欠陥が、押し込みの本流にもあった</h3>
+    <p class="ver">v9.12 で修正 / 上の1件を直した3週間後に発見</p>
+    <dl>
+      <dt>機構</dt><dd><strong><code>upsertRows_</code> がまったく同じ形をしていた。</strong>シートを丸ごと読み(<code>getValues</code>)、届いた行だけ差し替え、丸ごと <code>setValues</code> で書き戻す。<code>safeCell_</code> は <code>workRow_</code> / <code>fieldRow_</code> / <code>chemRow_</code> の中、つまり<strong>「これから入れる値」にだけ</strong>掛かっていた。</dd>
+      <dt>なぜ上より重いか</dt><dd><code>ledgerRebuild_</code> は<strong>人が押したときだけ</strong>走る。<code>upsertRows_</code> は <strong>圃場・作業・薬剤の押し込みすべて</strong>が通り、端末は 1.5 秒の debounce で自動送信する。実質つねに走っている。同じ押し込みに1件でも変更があれば全行が書かれ、シートは全チームの行を含むので<strong>自分の送信で別チームの行まで再点火する</strong>。</dd>
+      <dt>対処</dt><dd><code>rows.map(row =&gt; row.map(safeCell_))</code>。上とまったく同じ1行。</dd>
+      <dt>教訓</dt><dd><strong>1件直したら、同じ形を数え上げること。</strong>v9.09 の時点で <code>setValues(</code> を全部見ていれば、その場で見つかっていた(<code>Code.gs</code> に8か所しかない)。「読んだ値を書き戻す箇所」は grep できる。<strong>直した欠陥の形は、次に同じものを探す道具になる。</strong>&mdash;&mdash; v9.10 の「片方だけ期間で絞る」、v9.11 の「定数を2か所に書く」も、いずれも<strong>1件目を直した直後に隣で見つかっている</strong>。3回続いたら、それは偶然ではなく手順の欠落。</dd>
+      <dt>検査</dt><dd>3つのシートそれぞれで「触らない行に <code>=IMPORTXML(...)</code> を仕込み、別の行を押し込んでから、数式になっていないこと」を見る。別チームの行も1件。直す前の状態で4件が落ちることを確認済み。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
     <h3>「どの列が何件違うか」が、実は「最初に違った列」しか数えていなかった</h3>
     <p class="ver">v9.09 で修正 / コードレビューで発見</p>
     <dl>
@@ -884,8 +896,8 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">595</td></tr>
-      <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">222</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">604</td></tr>
+      <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">232</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
     </tbody>
