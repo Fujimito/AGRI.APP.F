@@ -1767,9 +1767,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 
 // ── 版数の整合(sw.js と揃っているか) ───────────────────
 const sw = nl(fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8"));
-// v9.13a のように、同じ番号内の追補を英小文字1字で表すことがある(v9.13a)。
-// これまでの版は数字と "." だけだったので、末尾の英小文字は任意扱いにする
-const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+[a-z]?)"/) || [])[1];
+const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];
 eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
 
 // ── 結果 ─────────────────────────────────────────────

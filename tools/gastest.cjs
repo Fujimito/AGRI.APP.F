@@ -1514,6 +1514,77 @@ const F2 = {
   });
 }
 
+// ── 27. ledgerRebuild_ の made{}/rowOf{} がプロトタイプ鎖を拾う(v9.14) ──────────
+//
+// §26 で ledgerCheck_ の have{} を直したのと同じ弱点が、ledgerRebuild_ の
+// made{}/rowOf{} にも別途残っていた(v9.13 round 1 では ledgerSyncWorks_ の
+// rowOf だけを直し、この関数は素通しのままだった)。
+//
+// 記録IDが "__proto__" / "constructor" / "toString" のとき、素の {} は
+// Object.prototype から継承したプロパティを持つ。made 側は
+// `if (!made[id]) order.push(id)` が `made["constructor"]` の継承値(関数、
+// truthy)を拾って false になり、その記録IDが order に一度も入らない。
+// order に無ければ以降のループで一切参照されないので、台帳に既にある
+// 一致した行が「作り直しの対象にすらならない」まま kept(触らない行)に
+// 数えられてしまう。本来は中身が一致しているので untouched になるはず。
+{
+  const mk = (id, day, name) => ({
+    id: id, workDate: day, fieldId: 5, fieldName: name,
+    status: "done", plannedL: 20, sprayedL: 18, reportAreaA: 10,
+    chemCount: 0, chemText: "", crop: "大豆", areaA: 10, chems: [],
+    totalL: 0, waterMl: 0, memo: "", reportMemo: "実績", seq: 0,
+    by: "藤本", deviceId: "d1", reportedAt: day + "T04:00:00.000Z",
+    updatedAt: day + "T04:00:00.000Z",
+  });
+  ["__proto__", "constructor", "toString"].forEach(pid => {
+    const ctx = makeContext({});
+    // pushWorks で作業シートと台帳の両方に、内容が一致した行を作っておく
+    // (ledgerSyncWorks_ 側は §26 より前・v9.13 round 1 で既に直っているので、
+    // ここでは台帳の行は正しく1件だけできる)
+    post(ctx, { type: "pushWorks", team: TEAM, items: [mk(pid, "2026-08-24", "西の田")] });
+    const r = post(ctx, { type: "ledgerRebuild", team: TEAM, dryRun: true });
+    eq("記録ID " + pid + " は中身が一致しているので untouched=1",
+       r.untouched, 1);
+    eq("記録ID " + pid + " が作り直しの対象から漏れて kept にならない(kept=0)",
+       r.kept, 0);
+    eq("記録ID " + pid + " は足しても直してもいない(added=0,updated=0)",
+       [r.added, r.updated], [0, 0]);
+  });
+}
+
+// ── 28. ledgerCheck_ の made{} キーが正規化されていない(v9.14) ──────────
+//
+// ledgerSyncWorks_(§24)は台帳のキーに r[0] をそのまま使わず、
+// ledgerRowFromWork_ が正規化した後の want[1] を使う(先頭アポストロフィを
+// 剥がした「見た目の記録ID」で揃えるため)。ledgerCheck_ の made{} だけは
+// 今まで String(r[0])(正規化前の生の値)をキーにしていて、2つの関数が
+// 同じ記録IDに対して違うキーを作りうる。
+//
+// 記録IDの先頭にアポストロフィが2個続く("''x")と、1回目は safeCell_ が
+// 素通しし、2回目は Sheets が書き込み時に「以降を文字列にする」印として
+// 食う(gasharness.cjs の Locked と同じ、実物のスプレッドシートの挙動)。
+// 作業シート側は書き込みが1段(safeCell_ → 生シート)なのでアポストロフィが
+// 1個残るが、台帳側はさらに ledgerRowFromWork_ の正規化(1個剥がす)を
+// 経てから書くので、書き込みが実質2段になりアポストロフィが0個になる。
+// made を生の r[0] でキーにすると、この2段目の剥がしが反映されず、
+// have(台帳)のキーと食い違う。
+{
+  const ctx = makeContext({});
+  post(ctx, { type: "pushWorks", team: TEAM, items: [{
+    id: "''x", workDate: "2026-08-24", fieldId: 5, fieldName: "西の田",
+    status: "done", plannedL: 20, sprayedL: 18, reportAreaA: 10,
+    chemCount: 0, chemText: "", crop: "大豆", areaA: 10, chems: [],
+    totalL: 0, waterMl: 0, memo: "", reportMemo: "実績", seq: 0,
+    by: "藤本", deviceId: "d1", reportedAt: "2026-08-24T04:00:00.000Z",
+    updatedAt: "2026-08-24T04:00:00.000Z",
+  }] });
+  const c = post(ctx, { type: "ledgerCheck", team: TEAM });
+  eq("記録ID ''x は作業シート側と台帳側で同じ行として一致する(same=1)", c.same, 1);
+  eq("作業シート側だけの行にならない(onlyWork=0)", c.onlyWork, 0);
+  eq("台帳側だけの行にもならない(onlyLedger=0)", c.onlyLedger, 0);
+  eq("食い違いにもならない(differ=0)", c.differ, 0);
+}
+
 // ─────────── 結果 ───────────
 if (fails.length) {
   console.error("\n  ✗ " + fails.length + " 件失敗 / " + (pass + fails.length) + " 件中\n");

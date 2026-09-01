@@ -1274,7 +1274,13 @@ function ledgerCheck_(team) {
       if (!r[0] && r[0] !== 0) continue;
       if (team && String(r[1]) !== String(team)) continue;
       if (r[16]) continue; // 削除済み
-      made[String(r[0])] = ledgerRowFromWork_(r);
+      const row = ledgerRowFromWork_(r);
+      // key は r[0] を直接使わず、ledgerSyncWorks_ と同じく
+      // ledgerRowFromWork_ が正規化した後の row[1] を使う。r[0] のままだと、
+      // 先頭アポストロフィの剥がし方が台帳(have)側と食い違い、同じ記録IDでも
+      // 別キー扱いになって突き合わせが崩れる(v9.14 で実測・ledgerSyncWorks_ の
+      // key(1206行目付近)と同じ理由・同じ直し方)
+      made[row[1]] = row;
     }
   }
   // 記録IDが "__proto__" / "constructor" / "toString" などだと、素の {} では
@@ -1377,7 +1383,13 @@ function ledgerRebuild_(team, dryRun) {
   const W = HEADERS.length;
 
   // 作業シートから作り直した行を集める
-  const made = {};
+  // 記録IDが "__proto__" / "constructor" / "toString" などだと、素の {} では
+  // プロトタイプ鎖を拾って壊れる(ledgerCheck_ の made・have、ledgerSyncWorks_ の
+  // rowOf と同じ理由・同じ直し方。v9.14 で実測: made["constructor"] が継承した
+  // 関数を拾って truthy になり、`if (!made[id]) order.push(id)` が動かず、
+  // その記録IDが order に一度も入らないまま作り直しから漏れる)。
+  // Object.create(null) で継承の無い辞書にする
+  const made = Object.create(null);
   const order = [];
   if (wk.getLastRow() >= 2) {
     const rows = wk.getRange(2, 1, wk.getLastRow() - 1, WORK_HEADERS.length).getValues();
@@ -1396,7 +1408,8 @@ function ledgerRebuild_(team, dryRun) {
   // 触らない行も含めて手元に持つ
   const last = lg.getLastRow();
   const cur = last >= 2 ? lg.getRange(2, 1, last - 1, W).getValues() : [];
-  const rowOf = {};
+  // made と同じ理由(上のコメント参照)。Object.create(null) にする
+  const rowOf = Object.create(null);
   for (let i = 0; i < cur.length; i++) {
     const id = cur[i][COL.ID - 1];
     if (id === "" || id === null || id === undefined) continue;
