@@ -71,6 +71,10 @@ const HEADERS = [
   // 他シート(圃場マスタ・作業)の列1と位置が揃わないのは許容する。
   "チームコード", // 16
 ];
+// HEADERS の列番号(1始まり)の索引。Task3(v9.16)で applyRecord_ 等を消した後、
+// 実際に参照が残るのは ID / TEAM だけ(実測)。他は死んだ定数ではなく、
+// HEADERS の並びを1始まりの列番号で引くための索引として全項目を保持している
+// (ブリーフの指示により削除しない)。
 const COL = {
   ID: 2, AREA: 7, CHEM_N: 8, CHEM_TEXT: 9, TOTAL: 10, WATER: 11,
   SPRAYED: 12, STATUS: 13, REPORT_DATE: 14, MEMO: 15, TEAM: 16,

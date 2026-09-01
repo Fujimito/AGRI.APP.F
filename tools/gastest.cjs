@@ -1241,6 +1241,66 @@ const F2 = {
     eq("pushChems の応答にも applied を載せない", "applied" in rc, false);
   }
 
+  // Important-1(round1レビュー指摘): チーム分離(記録IDが衝突しても
+  // チームが違えば別行になる)。作業IDは「日付＋圃場ID」で決まるので、
+  // 別チームが同じ日に同じ圃場を入れると記録IDが衝突しうる(v8.85 で
+  // 実際に起きた不具合と同じ形)。findRow_ の team 分離ロジックは
+  // Task3 で findRow_ ごと消えたが、同じ役目は ledgerSyncWorks_ の
+  // rowOf 構築(1050行目付近、`rt !== String(team)` の判定)が引き継いで
+  // いる。ここを検査していた §17(record/report 経由)は Task3 で消した
+  // ので、pushWorks 経由で同じ不変条件を見直す。
+  {
+    const dupId = "2026-08-30:5001";   // 日付＋圃場ID形式(v8.73以降の作業IDと同じ)
+    const rA = post(ctx, { type: "pushWorks", team: TEAM, items: [
+      mk(dupId, "2026-08-30", true, "田中", "team-aの田"),
+    ]});
+    const rB = post(ctx, { type: "pushWorks", team: "team-b", items: [
+      mk(dupId, "2026-08-30", true, "田中", "team-bの田"),
+    ]});
+    eq("同じ記録IDでも両チームとも台帳に追加になる(上書きではない)",
+       [rA.ledgerAdded, rA.ledgerUpdated, rB.ledgerAdded, rB.ledgerUpdated],
+       [1, 0, 1, 0]);
+    const rowsDup = [];
+    for (let r = 2; r <= lg.getLastRow(); r++) {
+      if (String(lg.getRange(r, 2).getValue()) === dupId) rowsDup.push(r);
+    }
+    eq("台帳に2行できる(チームごとに別行)", rowsDup.length, 2);
+    const byTeam = {};
+    rowsDup.forEach(r => { byTeam[String(lg.getRange(r, 16).getValue())] = r; });
+    eq("チームコード列がそれぞれ保たれる",
+       [!!byTeam[TEAM], !!byTeam["team-b"]], [true, true]);
+    eq("team-a の行は team-a の圃場名のまま(team-b に上書きされない)",
+       lg.getRange(byTeam[TEAM], 5).getValue(), "team-aの田");
+    eq("team-b の行は team-b の圃場名のまま",
+       lg.getRange(byTeam["team-b"], 5).getValue(), "team-bの田");
+  }
+
+  // Important-2(round1レビュー指摘): チーム欄が空の古い行(v8.84以前)の拾い上げ。
+  // claimRow_ は Task3 で消えたが、「チーム欄が空の行は古い行として拾い、
+  // 二重行にしない」という役目自体は ledgerSyncWorks_ の rowOf 構築
+  // (`rt &&` の判定)に残っている。これを検査していた §18(record/report
+  // 経由)は Task3 で消したので、pushWorks 経由で見直す。
+  {
+    const legacyId = "9601";
+    // v8.84以前に書かれた、チーム欄が空の台帳行を直接作る(HEADERS 16列)
+    lg.appendRow(["2026-08-25 09:00:00", legacyId, "2026-08-25", "旧アプリ", "旧い田",
+                  "水稲", 10, 0, "", 0, 0, "", "調合済", "", "", ""]);
+    const beforeRows = lg.getLastRow();
+    const legacy = post(ctx, { type: "pushWorks", team: TEAM, items: [
+      mk(legacyId, "2026-08-25", true, "田中", "旧い田"),
+    ]});
+    eq("チーム欄が空の行を拾って更新する(追加ではない)",
+       [legacy.ledgerAdded, legacy.ledgerUpdated], [0, 1]);
+    eq("行は増えない(二重行にならない)", lg.getLastRow(), beforeRows);
+    let legacyRow = -1;
+    for (let r = 2; r <= lg.getLastRow(); r++) {
+      if (String(lg.getRange(r, 2).getValue()) === legacyId) { legacyRow = r; break; }
+    }
+    eq("拾った行にチームが書き戻される", lg.getRange(legacyRow, 16).getValue(), TEAM);
+    eq("状態が更新される(拾えていることの確認)",
+       lg.getRange(legacyRow, 13).getValue(), "散布済");
+  }
+
   eq("features に ledgerFromWorks が載っている",
      (JSON.parse(ctx.doGet().getContent()).features || []).indexOf("ledgerFromWorks") >= 0, true);
 }
