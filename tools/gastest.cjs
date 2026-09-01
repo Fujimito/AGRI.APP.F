@@ -195,64 +195,16 @@ const F2 = {
 }
 
 // ── 11. 既存機能を壊していないこと ──
+// v9.16(Task3) より前は、防除記録(台帳)への追記・更新を record/report で
+// 検査していたが、その経路は削除した(台帳は pushWorks が直接書く。§20/§24
+// 参照)。ここでは record/report と無関係な旧方式(cloudSave/cloudLoad)が
+// 引き続き残っていることだけを見る。
 {
   const ctx = makeContext({});
-  const rec = {
-    id: 9001, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
-    chems: [{ name: "薬剤A", useName: "殺菌剤", formName: "フロアブル", ratio: 1000, ml: 100 }],
-    totalL: 100, waterMl: 99900, memo: "",
-  };
-  const r1 = post(ctx, { type: "record", recorder: "藤本", record: rec });
-  eq("防除記録は従来どおり追記される", [r1.ok, r1.added], [true, 1]);
-  const sh = ctx.SHEET_STATE.getSheetByName("防除記録");
-  eq("防除記録のヘッダーは変えていない", sh.getRange(1, 1, 1, 3).getValues()[0],
-     ["受信日時", "記録ID", "散布日"]);
-  eq("状態列", sh.getRange(2, 13).getValue(), "調合済");
-  const r2 = post(ctx, { type: "report", recorder: "藤本",
-                         record: Object.assign({}, rec, { sprayedL: 95, reportDate: "2026-08-20" }) });
-  eq("散布実績は既存行を更新する", [r2.ok, r2.updated], [true, 1]);
-  eq("状態が散布済になる", sh.getRange(2, 13).getValue(), "散布済");
-  eq("実散布量", sh.getRange(2, 12).getValue(), 95);
-
-  // 旧方式(cloudSave/cloudLoad)も残っていること
   const s = post(ctx, { type: "cloudSave", team: TEAM, payload: '{"fields":[]}', by: "藤本" });
   eq("cloudSave は残っている", s.ok, true);
   eq("cloudLoad は残っている",
      post(ctx, { type: "cloudLoad", team: TEAM }).payload, '{"fields":[]}');
-}
-
-// ── 12. 実績の取り消し ──
-{
-  const ctx = makeContext({});
-  const rec = {
-    id: 9001, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
-    chems: [{ name: "薬剤A", ratio: 1000, ml: 100 }],
-    totalL: 100, waterMl: 99900, memo: "",
-  };
-  post(ctx, { type: "record", recorder: "藤本", record: rec });
-  post(ctx, { type: "report", recorder: "藤本",
-              record: Object.assign({}, rec, { sprayedL: 95, reportDate: "2026-08-20" }) });
-  const sh = ctx.SHEET_STATE.getSheetByName("防除記録");
-  eq("取消前 状態", sh.getRange(2, 13).getValue(), "散布済");
-
-  const r = post(ctx, { type: "unreport", recorder: "藤本", record: rec });
-  eq("取消 更新件数", [r.ok, r.updated], [true, 1]);
-  eq("取消 状態が調合済に戻る", sh.getRange(2, 13).getValue(), "調合済");
-  eq("取消 実散布量が空になる", sh.getRange(2, 12).getValue(), "");
-  eq("取消 報告日が空になる", sh.getRange(2, 14).getValue(), "");
-  eq("取消 行は消さない(調合した事実は残す)", sh.getLastRow(), 2);
-  eq("取消 薬剤内容は残る", String(sh.getRange(2, 9).getValue()).indexOf("薬剤A") >= 0, true);
-
-  // 送り直せば散布済に戻る
-  post(ctx, { type: "report", recorder: "藤本",
-              record: Object.assign({}, rec, { sprayedL: 80, reportDate: "2026-08-21" }) });
-  eq("取消後に再報告できる",
-     [sh.getRange(2, 13).getValue(), sh.getRange(2, 12).getValue()], ["散布済", 80]);
-
-  // 元の行が無いときは、失敗ではなく「取り消すものが無い」で成功にする。
-  // 失敗にするとアプリが永久に再送し続ける
-  const r2 = post(ctx, { type: "unreport", recorder: "藤本", record: { id: 9999, chems: [] } });
-  eq("取消 元の行が無ければ成功扱い", [r2.ok, r2.missing], [true, true]);
 }
 
 // ── 13. 薬剤マスタ(レコード単位の共有) ──
@@ -571,65 +523,6 @@ const F2 = {
   eq("あとから末尾に追記された行も拾う", pr2.items.some(x => x.fieldId === 99), true);
 }
 
-// ── 15d. 台帳へのまとめ送り(v8.98) ──
-{
-  const ctx = makeContext({});
-  const R = (id, o) => Object.assign({ id, date: "2026-08-26", field: "圃場" + id,
-    crop: "水稲", areaA: 10, totalL: 5, waterMl: 5000, chems: [] }, o || {});
-
-  const j = post(ctx, { type: "pushRecords", team: TEAM, recorder: "藤本", items: [
-    { op: "record", record: R(1) },
-    { op: "record", record: R(2) },
-    { op: "report", record: R(1, { sprayedL: 12, reportDate: "2026-08-26" }) }
-  ] });
-  eq("まとめ送りは件数分の結果を返す", [j.ok, (j.results || []).length], [true, 3]);
-  eq("全部成功", (j.results || []).length === 3 && j.results.every(r => r.ok), true);
-
-  const sh = ctx.SHEET_STATE.getSheetByName("防除記録");
-  eq("行は2本だけ(report は既存行を更新)", sh.getLastRow() - 1, 2);
-  eq("実散布量が入る", sh.getRange(2, 12).getValue(), 12);
-  eq("状態が散布済", sh.getRange(2, 13).getValue(), "散布済");
-  eq("チームも入る", sh.getRange(2, 16).getValue(), TEAM);
-
-  // 順番が守られること。取り消し→再報告 を同じ回で送る
-  const j2 = post(ctx, { type: "pushRecords", team: TEAM, recorder: "藤本", items: [
-    { op: "unreport", record: R(1) },
-    { op: "report", record: R(1, { sprayedL: 33, reportDate: "2026-08-27" }) }
-  ] });
-  eq("2件とも成功", (j2.results || []).length === 2 && j2.results.every(r => r.ok), true);
-  eq("あとに送った報告が残る(取り消しが勝たない)", sh.getRange(2, 12).getValue(), 33);
-
-  // 逆に並べると取り消しが勝つ(順番に意味があることの確認)
-  post(ctx, { type: "pushRecords", team: TEAM, items: [
-    { op: "report", record: R(1, { sprayedL: 99, reportDate: "2026-08-28" }) },
-    { op: "unreport", record: R(1) }
-  ] });
-  eq("順を逆にすると取り消しが勝つ", sh.getRange(2, 12).getValue(), "");
-
-  // 壊れた件が混ざっても、他の件は通る
-  const j3 = post(ctx, { type: "pushRecords", team: TEAM, items: [
-    { op: "record", record: { id: "" } },
-    { op: "record", record: R(3) }
-  ] });
-  eq("壊れた件だけ失敗する", (j3.results || []).map(r => r.ok), [false, true]);
-  eq("他の件は行になる", sh.getLastRow() - 1, 3);
-
-  eq("team は必須", post(ctx, { type: "pushRecords", items: [] }).error, "team required");
-  eq("items は必須", post(ctx, { type: "pushRecords", team: TEAM }).error, "items required");
-  eq("多すぎれば断る",
-    post(ctx, { type: "pushRecords", team: TEAM, items: new Array(400).fill({ op: "record", record: R(9) }) }).error, "too many");
-
-  // 1件ずつの古い道も残っていること(アプリだけ更新した人のため)
-  const ctx2 = makeContext({});
-  const s1 = post(ctx2, { type: "record", team: TEAM, recorder: "藤本", record: R(7) });
-  eq("record 単体は今までどおり", [s1.ok, s1.added], [true, 1]);
-  const s2 = post(ctx2, { type: "report", team: TEAM, record: R(7, { sprayedL: 8, reportDate: "2026-08-26" }) });
-  eq("report 単体も今までどおり", [s2.ok, s2.updated], [true, 1]);
-  const s3 = post(ctx2, { type: "unreport", team: TEAM, record: R(7) });
-  eq("unreport 単体も今までどおり", [s3.ok, s3.updated], [true, 1]);
-  eq("実績が消える", ctx2.SHEET_STATE.getSheetByName("防除記録").getRange(2, 12).getValue(), "");
-}
-
 // ── 16. doGet ──
 {
   const ctx = makeContext({ SHARED_SECRET: "x" });
@@ -639,77 +532,11 @@ const F2 = {
   ok("features に pushFields が入る", g.features.indexOf("pushFields") >= 0);
   ok("features に pushChems が入る", g.features.indexOf("pushChems") >= 0);
   ok("features に workPlan が入る", g.features.indexOf("workPlan") >= 0);
-  ok("features に unreport が入る", g.features.indexOf("unreport") >= 0);
-}
-
-// ── 17. 防除記録シートのチーム分離(v8.85) ──
-{
-  const ctx = makeContext({});
-  // 作業IDは「日付＋圃場ID」で決まるので、別チームでも同じ記録IDになりうる
-  const rec = {
-    id: "2026-08-20:1001", date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
-    chems: [{ name: "薬剤A", ratio: 1000, ml: 100 }],
-    totalL: 100, waterMl: 99900, memo: "",
-  };
-  const sh = ctx.SHEET_STATE.getSheetByName.bind(ctx.SHEET_STATE);
-  post(ctx, { type: "record", team: "team-a", recorder: "藤本", record: rec });
-  const r = post(ctx, { type: "record", team: "team-b", recorder: "田中",
-                        record: Object.assign({}, rec, { field: "南の田" }) });
-  const s17 = sh("防除記録");
-  eq("同じ記録IDでもチームが違えば別の行になる", [r.ok, r.added, s17.getLastRow()], [true, 1, 3]);
-  eq("チームコード列に書かれる",
-     [s17.getRange(2, 16).getValue(), s17.getRange(3, 16).getValue()], ["team-a", "team-b"]);
-  eq("見出しの末尾はチームコード", s17.getRange(1, 16).getValue(), "チームコード");
-
-  // 報告は自分のチームの行だけを更新する
-  post(ctx, { type: "report", team: "team-b", recorder: "田中",
-              record: Object.assign({}, rec, { sprayedL: 95, reportDate: "2026-08-20" }) });
-  eq("team-a の行は触られない", s17.getRange(2, 13).getValue(), "調合済");
-  eq("team-b の行だけ散布済になる", s17.getRange(3, 13).getValue(), "散布済");
-  eq("行は増えない", s17.getLastRow(), 3);
-}
-
-// ── 18. チーム欄が空の既存行(v8.84以前)の扱い ──
-{
-  const ctx = makeContext({});
-  const rec = {
-    id: 9002, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
-    chems: [{ name: "薬剤A", ratio: 1000, ml: 100 }],
-    totalL: 100, waterMl: 99900, memo: "",
-  };
-  // team を送らない旧アプリからの記録 = チーム欄が空の行になる
-  post(ctx, { type: "record", recorder: "藤本", record: rec });
-  const sh = ctx.SHEET_STATE.getSheetByName("防除記録");
-  eq("旧アプリの行はチーム欄が空", sh.getRange(2, 16).getValue(), "");
-
-  // 新アプリから報告すると、その行を拾って更新し、チームを書き戻す
-  const r = post(ctx, { type: "report", team: "team-a", recorder: "藤本",
-                        record: Object.assign({}, rec, { sprayedL: 95, reportDate: "2026-08-20" }) });
-  eq("空の行を拾って更新する(二重行にしない)", [r.ok, r.updated, sh.getLastRow()], [true, 1, 2]);
-  eq("拾った行にチームが書き戻される", sh.getRange(2, 16).getValue(), "team-a");
-  eq("状態が散布済になる", sh.getRange(2, 13).getValue(), "散布済");
-
-  // 書き戻した後は、別チームからは見えない
-  const r2 = post(ctx, { type: "report", team: "team-b", recorder: "田中",
-                         record: Object.assign({}, rec, { sprayedL: 80, reportDate: "2026-08-21" }) });
-  eq("移行後は別チームには拾われず新規行になる", [r2.ok, r2.added, sh.getLastRow()], [true, 1, 3]);
-}
-
-// ── 19. 旧アプリ(team なし)は従来どおり動く ──
-{
-  const ctx = makeContext({});
-  const rec = {
-    id: 9003, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
-    chems: [{ name: "薬剤A", ratio: 1000, ml: 100 }],
-    totalL: 100, waterMl: 99900, memo: "",
-  };
-  post(ctx, { type: "record", recorder: "藤本", record: rec });
-  const r = post(ctx, { type: "report", recorder: "藤本",
-                        record: Object.assign({}, rec, { sprayedL: 95, reportDate: "2026-08-20" }) });
-  const sh = ctx.SHEET_STATE.getSheetByName("防除記録");
-  eq("team なしでも既存行を更新する", [r.ok, r.updated, sh.getLastRow()], [true, 1, 2]);
-  const u = post(ctx, { type: "unreport", recorder: "藤本", record: rec });
-  eq("team なしでも取り消せる", [u.ok, u.updated], [true, 1]);
+  // record/report/unreport/pushRecords は Task3 で消した。
+  // 残っていると「まだ対応している」という誤った印になる
+  ["record", "report", "unreport", "pushRecords"].forEach(name => {
+    eq("features に " + name + " は無い(消した経路)", g.features.indexOf(name) >= 0, false);
+  });
 }
 
 // ── 20. 更新日時が Date に化けても since が効く(v8.85) ──
@@ -748,12 +575,17 @@ const F2 = {
      typeof f.getRange(2, 11).getValue(), "string");
   eq("薬剤マスタの更新日時は文字列のまま",
      typeof c.getRange(2, 8).getValue(), "string");
-  // 書式を当てていない列は、実物どおり Date になる(張りぼてが手加減していない証拠)
-  const rec = {
-    id: 9101, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12,
-    chems: [], totalL: 10, waterMl: 0, memo: "",
-  };
-  post(ctx, { type: "record", team: TEAM, recorder: "藤本", record: rec });
+  // 書式を当てていない列は、実物どおり Date になる(張りぼてが手加減していない証拠)。
+  // 防除記録(台帳)への書き込みは pushWorks(→ledgerSyncWorks_)経由に一本化した
+  // (record は Task3 で消した)ので、ここも pushWorks で書かせる
+  post(ctx, { type: "pushWorks", team: TEAM, items: [{
+    id: 9101, workDate: "2026-08-20", fieldId: 1, fieldName: "北の田",
+    status: "planned", plannedL: 10, sprayedL: 0, reportAreaA: "",
+    chemCount: 0, chemText: "", crop: "水稲", areaA: 12, chems: [],
+    totalL: 10, waterMl: 0, memo: "", reportMemo: "", seq: 0,
+    by: "藤本", deviceId: "d1", reportedAt: "",
+    updatedAt: "2026-08-20T04:00:00.000Z",
+  }] });
   ok("防除記録の散布日は Date になる",
      ctx.SHEET_STATE.getSheetByName("防除記録").getRange(2, 3).getValue() instanceof Date);
 }
@@ -788,9 +620,10 @@ const F2 = {
 
 // ── 20. 台帳を作業シートから作れるか(提案D・第2段) ──────────
 // 「防除記録」シートの列は全部「作業」シートにもある。最後に残っていた
-// 実績メモも v9.04 で足した。ここでは、いつもの送り方(pushWorks + record +
-// report)で入れたあと、作業シートから作り直した台帳が今の台帳と
-// 一致することを確かめる。一致するなら record / report は要らなくなる。
+// 実績メモも v9.04 で足した。ここでは、pushWorks(→ledgerSyncWorks_)だけで
+// 台帳が書かれ、作業シートから作り直した台帳が今の台帳と一致することを
+// 確かめる。record / report は Task3 で実際に消した(この一致の実測が
+// その根拠になった)。
 {
   const ctx = makeContext({});
   const CHEMS = [{ name: "薬剤A", useName: "殺菌剤", formName: "フロアブル", ratio: 1000, ml: 100 }];
@@ -809,16 +642,6 @@ const F2 = {
   // 実績メモが往復すること(この列が無いと台帳の備考が作れない)
   eq("実績メモが戻る",
      post(ctx, { type: "pull", team: TEAM, since: "" }).works[0].reportMemo, "実際は少なめ");
-
-  const rec = {
-    id: ID, date: "2026-08-20", field: "北の田", crop: "水稲", areaA: 12.5,
-    chems: CHEMS, totalL: 100, waterMl: 99900, memo: "予定のメモ",
-  };
-  post(ctx, { type: "record", team: TEAM, recorder: "藤本", record: rec });
-  post(ctx, { type: "report", team: TEAM, recorder: "藤本",
-              record: Object.assign({}, rec, {
-                sprayedL: 95, reportDate: "2026-08-20",
-                reportAreaA: 12.5, reportMemo: "実際は少なめ" }) });
 
   // 照合は読むだけ。ボタンの案内にもそう書いてあるので、機械で確かめる(v9.09)。
   // 文言だけを検査しても、実際に書かないことの保証にはならない
@@ -888,20 +711,14 @@ const F2 = {
   // 偽の二重行を空にして片づける(以降の件数に響かせない)
   lg.getRange(lg.getLastRow(), 1, 1, 16).setValues([new Array(16).fill("")]);
 
-  // 実績を取り消したら、作り直した台帳も「調合済」に戻ること
-  post(ctx, { type: "unreport", team: TEAM, recorder: "藤本", record: { id: ID } });
+  // 実績を取り消したら、作り直した台帳も「調合済」に戻ること。
+  // 取り消しの送信(unreport)は Task3 で消した。今は作業を mixed(未報告)に
+  // 戻して pushWorks するだけで、台帳側もその内容に揃う
   post(ctx, { type: "pushWorks", team: TEAM, items: [Object.assign({}, W, {
     status: "mixed", sprayedL: 0, reportAreaA: "", reportedAt: "",
     updatedAt: "2026-08-20T05:00:00.000Z" })] });
   const c4 = post(ctx, { type: "ledgerCheck", team: TEAM });
-  // v9.13 より前は、ここで実際に食い違いが見つかっていた(照合の意味があった例)。
-  // unreport は実散布量と報告日は消すが、備考に入れた実績メモは消さない。
-  // そのため、実績を取り消したあとも台帳には実績メモが残っていた。
-  // unreport の送りものは {id} だけで、予定のメモを知らないので、
-  // 台帳側だけでは直せなかった(消すことしかできない)。
-  // v9.13 で pushWorks が台帳も書くようになり(提案D)、直後の pushWorks が
-  // 備考も作業シートの値で上書きするので、この食い違いは実際に無くなった。
-  eq("取り消し後は pushWorks が備考も上書きするので食い違わない",
+  eq("取り消し後も pushWorks だけで台帳が揃うので食い違わない",
      c4.differ, 0);
   // 9999 の行は作業シートに無いまま
   eq("残っているのは台帳だけの行", c4.onlyLedger, 1);
@@ -916,12 +733,18 @@ const F2 = {
      (JSON.parse(ctx.doGet().getContent()).features || []).indexOf("ledgerCheck") >= 0, true);
 }
 
-// ── 21. 知らない種類は「unknown type」で返す(v9.05) ──────
+// ── 21. 知らない種類は「unknown type」で返す(v9.05・Task3で拡張) ──────
 // v9.04 までは、知らない種類が record の中身の検査に落ちて
 // 「invalid payload」になっていた。アプリ側は unknown type を
 // 「動いているGASが古い」の目印にしているので、古いのに古いと分からず、
 // 「送ったものが壊れている」と読める案内が出た。
 // 実際に v9.04 の ledgerCheck を古いGASに送ってそうなった。
+//
+// Task3 で record/report/unreport/pushRecords の分岐そのものを消した。
+// 消したあとは、この4種類も「知らない種類」と同じ扱いになり unknown type が
+// 返る。まだ更新していない古いアプリがこれを送ると「GASが古い」と誤読する
+// 案内が出るが、更新(アプリの側)が正しい対処であることに変わりはないので、
+// これは受け入れる(ブリーフの裁定)。
 {
   const ctx = makeContext({});
   eq("知らない種類は unknown type",
@@ -930,11 +753,19 @@ const F2 = {
   eq("中身があっても種類が先",
      post(ctx, { type: "なんだこれ", team: TEAM,
                  record: { id: 1, chems: [] } }).error, "unknown type");
-  // record の中身が足りないときはこれまでどおり
-  eq("record の中身が足りなければ invalid payload",
-     post(ctx, { type: "record", team: TEAM, record: { id: 1 } }).error, "invalid payload");
-  eq("record 自体が無ければ invalid payload",
-     post(ctx, { type: "report", team: TEAM }).error, "invalid payload");
+  // 消した4種類も、中身の有無にかかわらず unknown type になる
+  // (invalid payload には落ちない。種類の判定が中身の検査より先)
+  eq("record も unknown type",
+     post(ctx, { type: "record", team: TEAM, record: { id: 1, chems: [] } }).error, "unknown type");
+  eq("report も unknown type",
+     post(ctx, { type: "report", team: TEAM, record: { id: 1 } }).error, "unknown type");
+  eq("unreport も unknown type",
+     post(ctx, { type: "unreport", team: TEAM, record: { id: 1 } }).error, "unknown type");
+  eq("pushRecords も unknown type",
+     post(ctx, { type: "pushRecords", team: TEAM, items: [] }).error, "unknown type");
+  // 中身が無くても同じ(invalid payload に落ちない)
+  eq("record は中身が無くても unknown type",
+     post(ctx, { type: "record", team: TEAM }).error, "unknown type");
 }
 
 // ── 22. 台帳を作業シートから作り直す(提案D・第3段) ──────────
@@ -997,7 +828,7 @@ const F2 = {
   eq("状態が散布済に直る", lg.getRange(2, 13).getValue(), "散布済");
   eq("実散布量が入る", lg.getRange(2, 12).getValue(), 33);
   eq("受信日時は書き換えない", lg.getRange(2, 1).getValue(), before);
-  // 足した行の受信日時は、既存行(buildRow_)と同じ書式・同じ時刻帯にする(v9.09)。
+  // 足した行の受信日時は、既存行と同じ書式・同じ時刻帯にする(v9.09)。
   // ISO のままだと、足した行だけ見た目が違う。台帳は人が読んで印刷する表
   {
     const stamp = String(lg.getRange(lg.getLastRow(), 1).getValue());
@@ -1070,11 +901,12 @@ const F2 = {
   // 台帳は全チームの行を含むので、1回の作り直しで全行ぶん
   // 一斉に再点火しうる。直さない列・直さない行・別チームの行が危ない。
   {
-    // 別チームの行に、数式になりうる圓場名を入れておく
-    post(ctx, { type: "record", team: "NCT", recorder: "前川",
-                record: { id: 8801, date: "2026-08-20",
-                          field: '=IMPORTXML("http://x","//y")', crop: "", areaA: 1,
-                          chems: [], totalL: 0, waterMl: 0, memo: "" } });
+    // 別チームの行に、数式になりうる圃場名を入れておく。
+    // record は Task3 で消したので、pushWorks(→ledgerSyncWorks_)で
+    // 直接台帳へ書かせる(これも自動で台帳を書く経路なので、record より
+    // むしろ素直に再現できる)
+    post(ctx, { type: "pushWorks", team: "NCT",
+                items: [mk(8801, "2026-08-20", false, "前川", '=IMPORTXML("http://x","//y")')] });
     const row = lg.getLastRow();
     eq("入れた時点では数式ではない", lg._isFormulaAt(row, 5), false);
     // 別チーム(TEAM)で作り直す。この行は触らないはず。

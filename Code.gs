@@ -192,52 +192,6 @@ function fixHeaders() {
   sh.setFrozenRows(1);
 }
 
-// 指定した記録IDの行番号を返す(なければ0)。
-//
-// 探す鍵は「記録ID＋チームコード」。IDだけで探すと、別のチームが同じ日に
-// 同じ圃場を入れたとき同じ記録IDになり(作業IDは v8.73 から日付＋圃場IDで
-// 決まる)、互いの行を上書きし合う。台帳(圃場マスタ・作業)は upsertRows_ で
-// 既にチーム＋IDで分けているが、防除記録シートだけ列が無く取り残されていた。
-//
-// チーム欄が空の行は v8.84 以前に書かれたもので、どのチームのものか判別できない。
-// 拾えないと report / unreport が既存行を見つけられず二重行になるため、
-// 第2段として拾う。拾った側が呼び出し元でチームを書き戻し、以後は正しく分かれる。
-// 別チームが同じ記録IDを持っていた場合は先に触ったほうがその行を取るが、
-// これは v8.84 までと同じ挙動で、情報が無い以上これ以上は詰められない。
-//
-// team が空(チーム未設定、または team を送らない旧アプリ)のときはIDだけで探す。
-// 旧アプリ × 新GAS の組み合わせを壊さないため。
-function findRow_(sh, recordId, team) {
-  if (sh.getLastRow() < 2) return 0;
-  const n = sh.getLastRow() - 1;
-  const ids = sh.getRange(2, COL.ID, n, 1).getValues();
-  const t = String(team == null ? "" : team);
-  if (!t) {
-    for (let i = 0; i < n; i++) {
-      if (String(ids[i][0]) === String(recordId)) return i + 2;
-    }
-    return 0;
-  }
-  const teams = sh.getRange(2, COL.TEAM, n, 1).getValues();
-  let legacy = 0;
-  for (let i = 0; i < n; i++) {
-    if (String(ids[i][0]) !== String(recordId)) continue;
-    const rt = String(teams[i][0] == null ? "" : teams[i][0]);
-    if (rt === t) return i + 2;
-    if (!rt && !legacy) legacy = i + 2;
-  }
-  return legacy;
-}
-
-// チーム欄が空の行に、いま送ってきたチームを書き入れる。
-// findRow_ が第2段で拾った行を、その場で移行するための後始末。
-function claimRow_(sh, row, team) {
-  const t = String(team == null ? "" : team);
-  if (!t || row <= 0) return;
-  if (String(sh.getRange(row, COL.TEAM).getValue() || "")) return;
-  sh.getRange(row, COL.TEAM).setValue(safeCell_(t));
-}
-
 // チーム共有データ用のシート(チームコード / データ / 保存日時 / 保存者)
 function getShareSheet_() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -991,107 +945,6 @@ function chemdbChunk_(part, size) {
   };
 }
 
-// 薬剤リストを1セル用の文字列にまとめる(用途・剤型・倍率・薬量)
-// 薬剤名はユーザーが自由に入力できる(プリセット名)ので、
-// 連結後の文字列を safeCell_ に通してから返す。
-function chemsText_(chems) {
-  return safeCell_(chems.map(function (c) {
-    var parts = [];
-    if (c.useName) parts.push(c.useName);
-    if (c.formName) parts.push(c.formName);
-    parts.push((c.ratio || "?") + "倍");
-    parts.push(Math.round(Number(c.ml) || 0) + "mL");
-    return (c.name || "(無名)") + "(" + parts.join("・") + ")";
-  }).join(" / "));
-}
-
-// 1散布ぶんの行データを作る
-// ── 台帳(防除記録)の1件を反映する ──
-//
-// record / report / unreport の中身。単体でもまとめ送り(pushRecords)でも
-// 同じここを通す。二重に書くと、片方だけ直して振る舞いがずれる。
-//
-// 呼び側がロックを取っていること。ここでは取らない。
-function applyRecord_(sh, op, rec, team, recorder) {
-  if (!rec || !rec.id) return { ok: false, error: "invalid payload" };
-  if (op === "record" && !Array.isArray(rec.chems)) return { ok: false, error: "invalid payload" };
-  const row = findRow_(sh, rec.id, team);
-  // 第2段で拾ったチーム欄が空の行は、ここで自分のチームのものとして確定させる
-  if (row > 0) claimRow_(sh, row, team);
-  const data = { record: rec, team: team, recorder: recorder };
-
-  if (op === "record") {
-    // 既に行がある場合は薬剤の内容だけ上書きする。
-    // (実績入力のあとから薬剤を適用したケースを反映するため。行は増やさない)
-    if (row > 0) {
-      sh.getRange(row, COL.CHEM_N, 1, 4).setValues([[
-        rec.chems.length,
-        chemsText_(rec.chems),
-        Number(rec.totalL) || 0,
-        Math.round(Number(rec.waterMl) || 0) / 1000,
-      ]]);
-      return { ok: true, updated: 1, chemsOnly: true };
-    }
-    sh.appendRow(buildRow_(data, "調合済"));
-    return { ok: true, added: 1 };
-  }
-
-  // ── 実績の取り消し ──
-  // 作業タブのチェックを外したとき。行は消さない(調合した事実は残るため)。
-  // 状態を「調合済」に戻し、実散布量と報告日だけを消す。
-  if (op === "unreport") {
-    if (row <= 0) {
-      // 元の行が無い(まだ一度も送っていない)。取り消すものが無いので成功扱い。
-      // ここで失敗を返すと、アプリ側が永久に再送を続ける
-      return { ok: true, updated: 0, missing: true };
-    }
-    sh.getRange(row, COL.SPRAYED).setValue("");
-    sh.getRange(row, COL.STATUS).setValue("調合済");
-    sh.getRange(row, COL.REPORT_DATE).setValue("");
-    return { ok: true, updated: 1 };
-  }
-
-  if (op === "report") {
-    if (row > 0) {
-      sh.getRange(row, COL.SPRAYED).setValue(Number(rec.sprayedL) || "");
-      sh.getRange(row, COL.STATUS).setValue("散布済");
-      sh.getRange(row, COL.REPORT_DATE).setValue(safeCell_(rec.reportDate || ""));
-      if (rec.reportAreaA) sh.getRange(row, COL.AREA).setValue(Number(rec.reportAreaA) || "");
-      if (rec.reportMemo) sh.getRange(row, COL.MEMO).setValue(safeCell_(rec.reportMemo));
-      return { ok: true, updated: 1 };
-    }
-    // 元の記録が見つからない場合は報告内容ごと新規追加(取りこぼし防止)
-    sh.appendRow(buildRow_(data, "散布済"));
-    return { ok: true, added: 1 };
-  }
-  return { ok: false, error: "unknown type" };
-}
-
-function buildRow_(data, status) {
-  const rec = data.record;
-  const now = Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyy-MM-dd HH:mm:ss");
-  // 文字列の項目は safeCell_ を通す(数式インジェクション対策)。
-  // 数値の項目は Number() を通しているので、数式になりようがない。
-  return [
-    now,
-    safeCell_(String(rec.id)),
-    safeCell_(rec.date || ""),
-    safeCell_(data.recorder || ""),
-    safeCell_(rec.field || ""),
-    safeCell_(rec.crop || ""),
-    Number(rec.reportAreaA || rec.areaA) || "",
-    rec.chems.length,
-    chemsText_(rec.chems),
-    Number(rec.totalL) || 0,
-    Math.round(Number(rec.waterMl) || 0) / 1000, // mL→L
-    status === "散布済" ? (Number(rec.sprayedL) || "") : "",
-    status,
-    safeCell_(status === "散布済" ? (rec.reportDate || "") : ""),
-    safeCell_((status === "散布済" ? (rec.reportMemo || rec.memo) : rec.memo) || ""),
-    safeCell_(String(data.team || "")),
-  ];
-}
-
 // ══════════ 台帳を作業シートから作る(提案D・第2段) ══════════
 //
 // 「防除記録」シートの列は、すべて「作業」シートにもある。
@@ -1111,7 +964,7 @@ function buildRow_(data, status) {
 //
 // ★ここに書き込む処理を足さないこと。読み取り(doRead_)から呼ぶため、
 //   ロックを取らずに走る。
-// 受信日時の書式を buildRow_ と揃える。JSTの "yyyy-MM-dd HH:mm:ss"。
+// 受信日時の書式は台帳の受信日時と揃える。JSTの "yyyy-MM-dd HH:mm:ss"。
 // 値が空・壊れているときは空文字を返す(でたらめな時刻を書かない)。
 function jstStamp_(v) {
   if (v === "" || v === null || v === undefined) return "";
@@ -1123,7 +976,7 @@ function jstStamp_(v) {
 function ledgerRowFromWork_(r) {
   const done = String(r[5] || "") === "done";
   // 面積は実績面積を優先する。実績が入っていなければ登録上の面積。
-  // 台帳の buildRow_ / report と同じ順番にすること
+  // 台帳(HEADERS)の並びと同じ順番にすること
   const area = Number(r[8]) || Number(r[18]) || "";
   // r[0](記録ID)は2通りの由来がある。
   //  ・ledgerCheck_ からの呼び出しは、作業シートを getValues で読んだ行。
@@ -1139,7 +992,7 @@ function ledgerRowFromWork_(r) {
   return [
     // 受信日時。台帳は「受け取った時刻」、作業シートは「更新日時」。
     // どちらも「サーバーが最後に書いた時刻」なので同じものを指す。
-    // ★書式は buildRow_ と揃えること(JSTの "yyyy-MM-dd HH:mm:ss")。
+    // ★書式は台帳の受信日時と揃えること(JSTの "yyyy-MM-dd HH:mm:ss")。
     //   ISO のまま入れると、足した行だけ書式も時刻帯も違って見える。
     //   台帳は人が読んで印刷する表なので、そこは合わせる(v9.09)
     jstStamp_(r[WORK_AT_COL]),
@@ -1156,7 +1009,7 @@ function ledgerRowFromWork_(r) {
     done ? (Number(r[7]) || "") : "",
     done ? "散布済" : "調合済",
     done ? ymd_(r[13]) : "",
-    // 散布済のときは実績メモを優先する(台帳の buildRow_ と同じ)
+    // 散布済のときは実績メモを優先する
     String((done ? (r[24] || r[22]) : r[22]) || ""),
     String(r[1] || ""),
   ];
@@ -1193,7 +1046,7 @@ function ledgerSyncWorks_(rows, team) {
     if (id === "" || id === null || id === undefined) continue;
     var rt = String(tms[i][0] == null ? "" : tms[i][0]);
     // チーム欄が空の行は古い行。どのチームのものか分からないので拾う
-    // (findRow_ の第2段・ledgerRebuild_ と同じ扱い)
+    // (ledgerRebuild_ と同じ扱い)
     if (team && rt && rt !== String(team)) continue;
     var idKey = String(id);
     if (!(idKey in rowOf)) rowOf[idKey] = i + 2;  // シートの行番号
@@ -1307,7 +1160,7 @@ function ledgerCheck_(team) {
       // 突き合わせの対象には入れるが、チーム違いとしては数えない
       if (team && rt && rt !== String(team)) continue;
       const key = String(r[COL.ID - 1]);
-      // 同じ記録IDの行が複数あることはありうる(findRow_ のコメント参照)。
+      // 同じ記録IDの行が複数あることはありうる(チーム欄が空の古い行を拾う扱いのため)。
       // 先に見つけた行を採る。作り直し(ledgerRebuild_)も先勝ちなので、
       // ここを後勝ちにすると、直した行と見ている行が食い違って
       // 「作り直したのに照合が0にならない」ことになる(v9.09)
@@ -1427,7 +1280,7 @@ function ledgerRebuild_(team, dryRun) {
     if (id === "" || id === null || id === undefined) continue;
     const rt = String(cur[i][COL.TEAM - 1] == null ? "" : cur[i][COL.TEAM - 1]);
     // チーム欄が空の行は古い行。どのチームのものか分からないので拾っておく
-    // (findRow_ の第2段と同じ扱い)
+    // (ledgerSyncWorks_ と同じ扱い)
     if (team && rt && rt !== String(team)) continue;
     if (!(id in rowOf)) rowOf[String(id)] = i;
   }
@@ -1586,7 +1439,10 @@ function doPost(e) {
   if (headSecret && !secretEquals_(headSecret, head.auth)) {
     return json_({ ok: false, error: "auth" });
   }
-  const headType = head.type || "record";
+  // 既定値は空文字にする。record は Task3(v9.16)で消したので、
+  // 「type を送らなければ record 扱い」という昔の既定はもう意味がない
+  // (どのみち末尾の unknown type に落ちる)。
+  const headType = head.type || "";
   if (headType === "pull" || headType === "progress" || headType === "cloudLoad" ||
       headType === "ledgerCheck" ||
       headType === "chemdbLoad") {
@@ -1617,7 +1473,7 @@ function doPost(e) {
       return json_({ ok: false, error: "auth" });
     }
 
-    const type = data.type || "record";
+    const type = data.type || "";
 
     // 読み取り専用の種類(chemdbLoad / cloudLoad / pull / progress)は
     // ロックを取る前に doRead_ で処理済み。ここには来ない。
@@ -1678,41 +1534,13 @@ function doPost(e) {
       const res = upsertRows_(getWorkSheet_(), WORK_HEADERS, WORK_ID_COL, WORK_EDIT_COL,
                               list, workRow_, data.team, null);
       // 台帳(防除記録)も同じ受信で揃える(提案D・v9.13)。
-      // これがあるので端末は record / report を別に送らなくてよい。
+      // v9.16(Task3)より前は、これとは別に端末が record / report を
+      // 送って台帳を書いていたが、その経路はもう無い。台帳はここだけが書く。
       const lg = ledgerSyncWorks_(res.applied, data.team);
       res.ledgerAdded = lg.added;
       res.ledgerUpdated = lg.updated;
       delete res.applied;   // 応答に行の中身を載せない(要らないうえに重い)
       return json_(res);
-    }
-
-    // ── 台帳へのまとめ送り(v8.98) ──
-    // 従来は圃場1枚につき record と report で別々に送っていた。
-    // 170圃場に実績を入れた日は 340回を直列で往復していた。
-    // 順序は送られてきたまま守る(record → unreport → report の並びを
-    // アプリ側が作っている。ここで並べ替えると取り消しが後勝ちになる)。
-    if (type === "pushRecords") {
-      if (!data.team) return json_({ ok: false, error: "team required" });
-      const list = data.items;
-      if (!Array.isArray(list)) return json_({ ok: false, error: "items required" });
-      if (list.length > PUSH_MAX) {
-        return json_({ ok: false, error: "too many", max: PUSH_MAX, got: list.length });
-      }
-      const sh = getSheet_();
-      const team = String(data.team || "");
-      const results = [];
-      let touched = false;
-      for (let i = 0; i < list.length; i++) {
-        const it = list[i] || {};
-        const r = applyRecord_(sh, String(it.op || ""), it.record, team, data.recorder);
-        // 色分けが要るのは行を足したときだけ。既存行の更新では作業日は変わらない
-        if (r.added) touched = true;
-        results.push({ id: it.record && it.record.id, op: it.op, ok: !!r.ok, error: r.error || "" });
-      }
-      // 日付の色分けは行を足したあとに1度だけ。
-      // 1件ごとに呼ぶと、まとめ送りにした意味がなくなる
-      if (touched) colorByDate_(sh);
-      return json_({ ok: true, results: results });
     }
 
     // ── 台帳を作業シートから作り直す(提案D) ──
@@ -1724,24 +1552,14 @@ function doPost(e) {
       return json_(r);
     }
 
-    // 種類の判定を先にする(v9.05)。
-    // ここが後ろだと、知らない種類はすべて record の中身の検査に落ちて
-    // 「invalid payload」になる。アプリ側は「unknown type」を
-    // 「動いているGASが古い」の目印にしているので、古いのに古いと分からず
-    // 「送ったものが壊れている」と読める案内が出る。
-    // 実際、v9.04 で足した ledgerCheck を古いGASに送ると、そうなった。
-    if (type !== "record" && type !== "report" && type !== "unreport") {
-      return json_({ ok: false, error: "unknown type" });
-    }
-    const rec = data.record;
-    if (!rec || !rec.id || (type === "record" && !Array.isArray(rec.chems))) {
-      return json_({ ok: false, error: "invalid payload" });
-    }
-    const sh = getSheet_();
-    const r = applyRecord_(sh, type, rec, String(data.team || ""), data.recorder);
-    // 色分けは行を足したときだけ(従来と同じ)
-    if (r.added) colorByDate_(sh);
-    return json_(r);
+    // ここまでのどの種類にも一致しなければ「知らない種類」(v9.05)。
+    // record / report / unreport / pushRecords は v9.16(Task3)で消した
+    // ので、いまはこれらもここに落ちる。まだ更新していない古いアプリが
+    // これらを送ると、アプリ側は unknown type を「動いているGASが古い」の
+    // 目印として読むので、実際とは逆(古いのはアプリの方)の案内が出る。
+    // それでもアプリが促す対処(更新する)自体は正しいので、ここでは
+    // 特別扱いをしない(ブリーフの裁定。ワークアラウンドを入れない)。
+    return json_({ ok: false, error: "unknown type" });
   } catch (err) {
     return json_({ ok: false, error: String(err) });
   } finally {
@@ -1760,10 +1578,12 @@ function doGet() {
     secured: !!sharedSecret_(),
     // アプリ側が「このGASは進捗マップに対応しているか」を判定するための印。
     // 古いGASのまま進捗マップを開くと unknown type が返るだけで理由が分からない。
-    features: ["record", "report", "unreport", "chemdbLoad", "cloudSave", "cloudLoad",
+    // record / report / unreport / pushRecords は v9.16(Task3)で消したので、
+    // features から外す(残すと「まだ対応している」という誤った印になる)。
+    features: ["chemdbLoad", "cloudSave", "cloudLoad",
                "pushFields", "pushWorks", "pushChems", "pull", "progress", "workPlan",
                "ledgerCheck", "ledgerRebuild", "workReportMemo",
-               "pushRecords", "ledgerFromWorks"],
+               "ledgerFromWorks"],
   });
 }
 
