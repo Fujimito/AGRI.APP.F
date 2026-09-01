@@ -894,21 +894,21 @@ const F2 = {
     status: "mixed", sprayedL: 0, reportAreaA: "", reportedAt: "",
     updatedAt: "2026-08-20T05:00:00.000Z" })] });
   const c4 = post(ctx, { type: "ledgerCheck", team: TEAM });
-  // ここで実際に食い違いが見つかった(照合の意味があった例)。
+  // v9.13 より前は、ここで実際に食い違いが見つかっていた(照合の意味があった例)。
   // unreport は実散布量と報告日は消すが、備考に入れた実績メモは消さない。
-  // そのため、実績を取り消したあとも台帳には実績メモが残る。
-  // 作業シートから作り直すと予定のメモになる。
+  // そのため、実績を取り消したあとも台帳には実績メモが残っていた。
   // unreport の送りものは {id} だけで、予定のメモを知らないので、
-  // 台帳側だけでは直せない(消すことしかできない)。
-  // 提案D を通せばこの食い違い自体がなくなるので、ここでは直さず、
-  // 黙って変わらないように固めておく。
-  eq("取り消し後は備考だけ食い違う(既知)",
-     [c4.differ, c4.sample[0].why, c4.sample[0].made, c4.sample[0].ledger],
-     [1, "備考", "予定のメモ", "実際は少なめ"]);
+  // 台帳側だけでは直せなかった(消すことしかできない)。
+  // v9.13 で pushWorks が台帳も書くようになり(提案D)、直後の pushWorks が
+  // 備考も作業シートの値で上書きするので、この食い違いは実際に無くなった。
+  eq("取り消し後は pushWorks が備考も上書きするので食い違わない",
+     c4.differ, 0);
   // 9999 の行は作業シートに無いまま
   eq("残っているのは台帳だけの行", c4.onlyLedger, 1);
-  // 状態と報告日と実散布量はちゃんと戻っている(備考だけが残る)
+  // 状態と報告日と実散布量はちゃんと戻っている
   eq("状態は調合済に戻る", lg.getRange(2, 13).getValue(), "調合済");
+  // 備考も作業シートの「予定のメモ」に上書きされている(実績メモは残らない)
+  eq("備考も予定のメモに戻る", lg.getRange(2, 15).getValue(), "予定のメモ");
 
   eq("ledgerCheck は team 必須",
      post(ctx, { type: "ledgerCheck" }).error, "team required");
@@ -956,12 +956,20 @@ const F2 = {
     mk(102, "2026-08-20", false, "藤本", "南の田"),
     mk(103, "2026-08-21", true, "田中", "東の田"),
   ]});
-  // 台帳に1件だけ、記録者を間違えた行を先に入れておく
-  // (実データで75件出た「送った端末の名前が入る」のと同じ形)
-  post(ctx, { type: "record", team: TEAM, recorder: "藤本",
-              record: { id: 101, date: "2026-08-20", field: "北の田", crop: "水稲",
-                        areaA: 12, chems: [], totalL: 0, waterMl: 0, memo: "" } });
   const lg = ctx.SHEET_STATE.getSheetByName("防除記録");
+  // v9.13 から pushWorks が台帳も書くので、この時点で3行とも台帳に揃っている
+  // (record を送らなくても揃うことは §24 で検査済み)。
+  // ledgerRebuild_ の「足す/直す」を検査するには、台帳がまだ古いままの
+  // 状態を作る必要がある。record 経由(既存行があると薬剤欄しか
+  // 上書きしない)ではもう再現できないので、台帳シートを直接いじって、
+  // 実データで見つかった食い違い(記録者が送った端末の名前になっている・
+  // 報告前のまま)と、まだ一度も反映されていない行を再現する
+  lg.getRange(2, 4).setValue("藤本");    // 記録者を間違える(実データで75件出た形)
+  lg.getRange(2, 12).setValue("");       // 実績はまだ入っていない体にする
+  lg.getRange(2, 13).setValue("調合済");
+  lg.getRange(2, 14).setValue("");
+  lg.getRange(3, 1, 2, 16).setValues([   // 102・103 はまだ台帳に無い体にする
+    new Array(16).fill(""), new Array(16).fill("") ]);
   const before = lg.getRange(2, 1).getValue();   // 受信日時
   eq("台帳の記録者は送った端末の名前になっている", lg.getRange(2, 4).getValue(), "藤本");
 
@@ -1021,9 +1029,15 @@ const F2 = {
   eq("削除済みは足さない", del.added, 0);
 
   // ── 別のチームの作業は混ぜない ──
+  const beforeNct = lg.getLastRow();
   post(ctx, { type: "pushWorks", team: "NCT", items: [mk(201, "2026-08-20", true, "前川", "他所の田")] });
   const other = post(ctx, { type: "ledgerRebuild", team: TEAM });
   eq("別チームは足さない", other.added, 0);
+  // v9.13 から pushWorks も台帳を書くので、この時点で NCT の行は
+  // もう台帳にある。ledgerRebuild_ 単体でも「そのチームの足りない行」を
+  // 見つけられることを確かめるため、pushWorks が足した分をいったん消す
+  eq("pushWorks だけで NCT の行が増える(前提の確認)", lg.getLastRow(), beforeNct + 1);
+  lg.deleteRows(beforeNct + 1, 1);
   const nct = post(ctx, { type: "ledgerRebuild", team: "NCT", dryRun: true });
   eq("そのチームで呼べば足りない行が見える", nct.added, 1);
 
@@ -1032,13 +1046,20 @@ const F2 = {
   {
     const many = [];
     for (let i = 0; i < 300; i++) many.push(mk(30000 + i, "2026-08-25", i % 2 === 0, "田中", "圓" + i));
+    const baseRow = lg.getLastRow();
     post(ctx, { type: "pushWorks", team: TEAM, items: many.slice(0, 150) });
     post(ctx, { type: "pushWorks", team: TEAM, items: many.slice(150) });
+    // v9.13 から pushWorks も台帳を書くので、この時点でもう300行とも
+    // 台帳にある。ledgerRebuild_ 単体で300行を確保しながら足せることを
+    // 検査するため、pushWorks が足した分をいったん台帳から消して、
+    // まだ反映されていない体に戻す
+    eq("pushWorks だけで300行増える(前提の確認)", lg.getLastRow(), baseRow + 300);
+    lg.deleteRows(baseRow + 1, 300);
     // シートの行数を実物より狭くして、確保を忘れたら落ちることを見る
-    lg.maxRows = lg.getLastRow() + 10;
+    lg.maxRows = baseRow + 10;
     const big = post(ctx, { type: "ledgerRebuild", team: TEAM });
     eq("300行足せる", big.added, 300);
-    eq("行が入っている", lg.getLastRow(), 5 + 300);
+    eq("行が入っている", lg.getLastRow(), baseRow + 300);
     const c2 = post(ctx, { type: "ledgerCheck", team: TEAM });
     eq("足したあとも食い違わない", c2.differ, 0);
   }
@@ -1058,9 +1079,12 @@ const F2 = {
     eq("入れた時点では数式ではない", lg._isFormulaAt(row, 5), false);
     // 別チーム(TEAM)で作り直す。この行は触らないはず。
     // 書き戻しが実際に走るよう、足りない行を1件作っておく
-    // (変化が無いと setValues 自体を呼ばないので、検査にならない)
+    // (変化が無いと setValues 自体を呼ばないので、検査にならない)。
+    // v9.13 から pushWorks も台帳を書くので、いったん足してから
+    // 台帳側だけ消し、ledgerRebuild_ に足させる
     post(ctx, { type: "pushWorks", team: TEAM,
                 items: [mk(8802, "2026-08-23", true, "田中", "新しい田")] });
+    lg.deleteRows(lg.getLastRow(), 1);
     const r8802 = post(ctx, { type: "ledgerRebuild", team: TEAM });
     eq("書き戻しが実際に走っている", r8802.added, 1);
     eq("書き戻しても数式にならない", lg._isFormulaAt(row, 5), false);
@@ -1139,6 +1163,137 @@ const F2 = {
   post(ctx, { type: "pushFields", team: TEAM,
               items: [Object.assign({}, F1, { id: 2004, name: "別の田" })] });
   eq("別チームの行も数式にならない", fs._isFormulaAt(nctRow, 3), false);
+}
+
+// ── 24. pushWorks が台帳も書く(提案D・v9.13) ──────────
+//
+// 台帳(防除記録)は今まで record/report/unreport で別送りしていたが、
+// ledgerCheck で実測して一致433・食い違い0だった(§20 参照)。
+// pushWorks を受けた時点で台帳も書けば、端末は record/report を
+// 送らなくても台帳が揃うはず、というのがここでの主張。
+{
+  const ctx = makeContext({});
+  const mk = (id, day, done, by, name) => ({
+    id: id, workDate: day, fieldId: 5, fieldName: name,
+    status: done ? "done" : "planned", plannedL: 20,
+    sprayedL: done ? 18 : 0, reportAreaA: done ? 10 : "",
+    chemCount: 0, chemText: "", crop: "大豆", areaA: 10, chems: [],
+    totalL: 0, waterMl: 0, memo: "予定メモ", reportMemo: done ? "実績メモ" : "",
+    seq: 0, by: by, deviceId: "d1",
+    reportedAt: done ? day + "T04:00:00.000Z" : "",
+    updatedAt: day + "T04:00:00.000Z",
+  });
+  // 記録IDの列(COL.ID = 2)で台帳の行を探す。列の並びに依存しないようにする
+  const findLgRow = (id) => {
+    const last = lg.getLastRow();
+    for (let r = 2; r <= last; r++) {
+      if (String(lg.getRange(r, 2).getValue()) === String(id)) return r;
+    }
+    return -1;
+  };
+
+  // 1. pushWorks だけで台帳に行ができる(record を1度も送らない)
+  const r1 = post(ctx, { type: "pushWorks", team: TEAM, items: [
+    mk(9201, "2026-08-24", true, "田中", "西の田"),
+  ]});
+  // 台帳シートは pushWorks を受けて初めて作られる(record を送っていないため)
+  const lg = ctx.SHEET_STATE.getSheetByName("防除記録");
+  eq("pushWorks だけで台帳シートができる", !!lg, true);
+  eq("pushWorks の応答に台帳の追加/更新件数が載る",
+     [r1.ok, r1.ledgerAdded, r1.ledgerUpdated], [true, 1, 0]);
+  eq("応答に行の中身(applied)を載せない", "applied" in r1, false);
+  eq("台帳に1行できる(見出し込み2行)", lg.getLastRow(), 2);
+
+  // 8. 実績あり(status: done)の作業で、台帳の状態が「散布済」・実散布量・
+  //    報告日・実績メモが入る
+  // 報告日はシート上では日付として解釈され Date で返る(台帳は人が読む表なので
+  // ここは他の日付列と同じ扱い)。ymd_ で "yyyy-MM-dd" に戻してから比べる
+  const ymd = v => ctx.read("ymd_")(v);
+  const row9201 = findLgRow(9201);
+  eq("状態が散布済になる", lg.getRange(row9201, 13).getValue(), "散布済");
+  eq("実散布量が入る", lg.getRange(row9201, 12).getValue(), 18);
+  eq("報告日が入る", ymd(lg.getRange(row9201, 14).getValue()), "2026-08-24");
+  eq("実績メモが備考に入る", lg.getRange(row9201, 15).getValue(), "実績メモ");
+
+  // 2. そのあと ledgerCheck の differ が 0、onlyWork が 0
+  const c1 = post(ctx, { type: "ledgerCheck", team: TEAM });
+  eq("record を送らなくても照合が一致する", [c1.differ, c1.onlyWork], [0, 0]);
+
+  // S2 の検査用に、受信日時(列1)を覚えておく
+  const stamp1 = lg.getRange(row9201, 1).getValue();
+
+  // 3. 同じ作業をもう一度 pushWorks すると、台帳の行が増えない(更新になる)
+  const r2 = post(ctx, { type: "pushWorks", team: TEAM, items: [
+    Object.assign(mk(9201, "2026-08-24", true, "田中", "西の田"), {
+      sprayedL: 19, updatedAt: "2026-08-24T05:00:00.000Z" }),
+  ]});
+  eq("2回目は更新になる(追加は0)", [r2.ledgerAdded, r2.ledgerUpdated], [0, 1]);
+  eq("台帳の行数は増えない", lg.getLastRow(), 2);
+  eq("実散布量は更新される", lg.getRange(row9201, 12).getValue(), 19);
+
+  // 4. 更新のとき、台帳の受信日時(列1)は変わらない(S2)
+  eq("受信日時は書き換えない", lg.getRange(row9201, 1).getValue(), stamp1);
+
+  // 5. deleted: true の作業を送っても、台帳の行は消えない(S3)
+  const r3 = post(ctx, { type: "pushWorks", team: TEAM, items: [
+    Object.assign(mk(9201, "2026-08-24", true, "田中", "西の田"), {
+      deleted: true, updatedAt: "2026-08-24T06:00:00.000Z" }),
+  ]});
+  eq("削除済みは台帳に足さない(追加も更新もしない)",
+     [r3.ledgerAdded, r3.ledgerUpdated], [0, 0]);
+  eq("台帳の行数は変わらない(消えない)", lg.getLastRow(), 2);
+  eq("台帳の中身も残ったまま", lg.getRange(row9201, 5).getValue(), "西の田");
+
+  // 6. updatedAt が古くて upsertRows_ に飛ばされた作業は、台帳にも入らない(S6)
+  post(ctx, { type: "pushWorks", team: TEAM, items: [
+    mk(9202, "2026-08-25", false, "田中", "東の田2"),
+  ]});
+  const row9202 = findLgRow(9202);
+  const r4 = post(ctx, { type: "pushWorks", team: TEAM, items: [
+    Object.assign(mk(9202, "2026-08-25", true, "藤本", "偽の更新"), {
+      updatedAt: "2026-08-25T03:00:00.000Z" }),   // 直前の送信より古い
+  ]});
+  eq("古い更新は upsertRows_ に飛ばされる", r4.skipped, 1);
+  eq("飛ばした行は台帳にも入らない(追加も更新もしない)",
+     [r4.ledgerAdded, r4.ledgerUpdated], [0, 0]);
+  eq("台帳の中身は最初の送信のまま(古い更新が入っていない)",
+     [lg.getRange(row9202, 5).getValue(), lg.getRange(row9202, 13).getValue()],
+     ["東の田2", "調合済"]);
+
+  // 7. 台帳の触らない行に数式インジェクションを仕込み、別の作業を pushWorks
+  //    しても数式にならない(S5)。getValues ではアポストロフィが戻らないので、
+  //    素の "=..." 文字列として読める状態を張りぼて越しに再現する。
+  const EVIL = '=IMPORTXML("http://x","//y")';
+  // 先頭にアポストロフィを付けて、safeCell_ を通した後の(=文字列として
+  // 固定された)状態を再現する。素のまま setValue すると、この行自体が
+  // 生きた数式になってしまい、何を検査しているか分からなくなる
+  lg.getRange(row9202, 5).setValue("'" + EVIL);
+  eq("仕込んだ時点では数式ではない", lg._isFormulaAt(row9202, 5), false);
+  post(ctx, { type: "pushWorks", team: TEAM, items: [
+    mk(9203, "2026-08-26", true, "田中", "北の田3"),
+  ]});
+  eq("触っていない行を書き戻しても数式にならない", lg._isFormulaAt(row9202, 5), false);
+  eq("触っていない行の中身も変わらない", lg.getRange(row9202, 5).getValue(), EVIL);
+  lg.getRange(row9202, 5).setValue("東の田2");   // 後始末
+
+  // S5: 台帳から読むのは記録IDとチームコードの列だけ。読んだセル数で確かめる
+  {
+    const before = lg.getLastRow();   // 更新1件を送る(行数は変わらない)
+    lg._readCells = 0;
+    post(ctx, { type: "pushWorks", team: TEAM, items: [
+      Object.assign(mk(9203, "2026-08-26", true, "田中", "北の田3"), {
+        updatedAt: "2026-08-26T05:00:00.000Z" }),
+    ]});
+    // 記録IDの列とチームコードの列を、既存行ぶんだけ読む(2列 × 既存行数)。
+    // +16 は getSheet_ が毎回行う見出し行の一致チェック(1行 × 16列)ぶん。
+    // これは既存のコードで、ledgerSyncWorks_ が足したものではない
+    eq("台帳から読むのは記録IDとチームコードの列だけ",
+       lg._readCells, 16 + 2 * (before - 1));
+    eq("行数は変わらない(更新のはず)", lg.getLastRow(), before);
+  }
+
+  eq("features に ledgerFromWorks が載っている",
+     (JSON.parse(ctx.doGet().getContent()).features || []).indexOf("ledgerFromWorks") >= 0, true);
 }
 
 // ─────────── 結果 ───────────

@@ -738,6 +738,7 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
 
   const at = isoNow_();
   const logs = [];
+  const applied = [];   // 実際にシートへ書いた行(toRow の戻り値そのもの)。飛ばした行は入れない
   let updated = 0, added = 0, skipped = 0;
 
   for (let k = 0; k < incoming.length; k++) {
@@ -762,10 +763,12 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
       }
       rows[i] = values;
       updated++;
+      applied.push(values);
     } else {
       idx[key] = rows.length;
       rows.push(values);
       added++;
+      applied.push(values);
     }
   }
 
@@ -790,7 +793,7 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
     if (extra > 0) sh.deleteRows(2 + rows.length, extra);
   }
   pushRecLogs_(logs);
-  return { ok: true, added: added, updated: updated, skipped: skipped, purged: purged, serverTime: at };
+  return { ok: true, added: added, updated: updated, skipped: skipped, purged: purged, serverTime: at, applied: applied };
 }
 
 // ── 差分取得:since より後にサーバーが書いた行だけ返す ──
@@ -1139,6 +1142,63 @@ function ledgerRowFromWork_(r) {
     String((done ? (r[24] || r[22]) : r[22]) || ""),
     String(r[1] || ""),
   ];
+}
+
+// ══════════ pushWorks が台帳も書く(提案D・v9.13) ══════════
+//
+// 台帳(防除記録)は今まで record/report/unreport で別送りしていたが、
+// ledgerCheck で「作業シートから作り直した台帳」と実測して一致433・
+// 食い違い0だった。つまり作業シートの内容だけで台帳の行は再現できる。
+// なので pushWorks を受けた時点でここから台帳も書き、端末は
+// record/report を送らなくても台帳が揃うようにする。
+//
+// S2: 台帳の既存行の「受信日時」(列1)は書き換えない。列2以降だけ書く。
+// S3: 台帳の行は消さない。削除済みの作業が来ても台帳の行はそのまま残す。
+// S4: ledgerCheck と同じ ledgerRowFromWork_ を通すので、
+//     ここが作る行と ledgerCheck が期待する行は必ず一致する。
+// S5: 台帳シートは記録IDとチームコードの列だけ読む。読んだ値を
+//     そのまま書き戻すことはしない(書くのは自分で作った値だけ)。
+function ledgerSyncWorks_(rows, team) {
+  if (!rows || !rows.length) return { added: 0, updated: 0 };
+  const lg = getSheet_();
+  const W = HEADERS.length;
+  const last = lg.getLastRow();
+  // 記録IDとチームコードの列だけ読む。台帳の中身は読まない(S5)
+  const ids  = last >= 2 ? lg.getRange(2, COL.ID,   last - 1, 1).getValues() : [];
+  const tms  = last >= 2 ? lg.getRange(2, COL.TEAM, last - 1, 1).getValues() : [];
+  const rowOf = {};
+  for (var i = 0; i < ids.length; i++) {
+    var id = ids[i][0];
+    if (id === "" || id === null || id === undefined) continue;
+    var rt = String(tms[i][0] == null ? "" : tms[i][0]);
+    // チーム欄が空の行は古い行。どのチームのものか分からないので拾う
+    // (findRow_ の第2段・ledgerRebuild_ と同じ扱い)
+    if (team && rt && rt !== String(team)) continue;
+    if (!(String(id) in rowOf)) rowOf[String(id)] = i + 2;  // シートの行番号
+  }
+  var added = 0, updated = 0;
+  var append = [];
+  for (var k = 0; k < rows.length; k++) {
+    var r = rows[k];
+    if (r[16]) continue;                 // 削除済みは台帳に足さない(S3)
+    var want = ledgerRowFromWork_(r);    // S4: 照合と同じ関数を通す
+    var key = String(r[0]);
+    if (key in rowOf) {
+      // 受信日時(列1)は書き換えない(S2)。列2以降だけ書く
+      lg.getRange(rowOf[key], 2, 1, W - 1)
+        .setValues([want.slice(1).map(safeCell_)]);
+      updated++;
+    } else {
+      append.push(want.map(safeCell_));
+      added++;
+    }
+  }
+  if (append.length) {
+    ensureRows_(lg, last + append.length);
+    lg.getRange(last + 1, 1, append.length, W).setValues(append);
+    colorByDate_(lg);
+  }
+  return { added: added, updated: updated };
 }
 
 // 台帳の1行を、突き合わせできる形にそろえる。
@@ -1544,8 +1604,15 @@ function doPost(e) {
         return json_(upsertRows_(getChemSheet_(), CHEM_HEADERS, CHEM_ID_COL, CHEM_EDIT_COL,
                                  list, chemRow_, data.team, null));
       }
-      return json_(upsertRows_(getWorkSheet_(), WORK_HEADERS, WORK_ID_COL, WORK_EDIT_COL,
-                               list, workRow_, data.team, null));
+      const res = upsertRows_(getWorkSheet_(), WORK_HEADERS, WORK_ID_COL, WORK_EDIT_COL,
+                              list, workRow_, data.team, null);
+      // 台帳(防除記録)も同じ受信で揃える(提案D・v9.13)。
+      // これがあるので端末は record / report を別に送らなくてよい。
+      const lg = ledgerSyncWorks_(res.applied, data.team);
+      res.ledgerAdded = lg.added;
+      res.ledgerUpdated = lg.updated;
+      delete res.applied;   // 応答に行の中身を載せない(要らないうえに重い)
+      return json_(res);
     }
 
     // ── 台帳へのまとめ送り(v8.98) ──
@@ -1625,7 +1692,7 @@ function doGet() {
     features: ["record", "report", "unreport", "chemdbLoad", "cloudSave", "cloudLoad",
                "pushFields", "pushWorks", "pushChems", "pull", "progress", "workPlan",
                "ledgerCheck", "ledgerRebuild", "workReportMemo",
-               "pushRecords"],
+               "pushRecords", "ledgerFromWorks"],
   });
 }
 
