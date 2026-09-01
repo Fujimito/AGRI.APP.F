@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.09";
+const APP_VERSION = "v9.10";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -10801,6 +10801,30 @@ const progressEntries = (items, works, from, to, recorder) => {
   return Array.from(byWork.values());
 };
 
+// ── サーバーにだけ残っている作業を拾う ──
+// v9.09 までは ProgressMapTab の useMemo に直に書いていた。
+// 拾ったものは「サーバーから外す」ボタンに渡る。墓標が積まれて他の端末からも
+// 消える。取り消せないので、拾いすぎはそのまま事故になる。
+const serverOrphans = (items, works, from, to) => {
+  const localIds = new Set();
+  (works || []).forEach(w => {
+    if (!w.workDate || w.workDate < from || w.workDate > to) return;
+    localIds.add(String(w.id));
+  });
+  return (items || []).filter(it => {
+    if (it.id === undefined || it.id === null || it.id === "") return false;
+    // 手元と同じ範囲でサーバー側も絞る。絞らないと、端末に保存した写し
+    // (tankmix:progresssnap)が前の期間のまま残っている間、その期間の作業が
+    // まるごと残骸に見える。手元にちゃんとある作業なのに、
+    // 「直近3日の作業N件」と言いながら別の期間を消すことになる。
+    // 作業日を変えた直後は取り直しが終わっておらず、圏外なら永久に終わらない。
+    // 日付が入っていない行は判断できないので、拾わない側に倒す(v9.10)
+    const wd = String(it.workDate || "");
+    if (!wd || wd < from || wd > to) return false;
+    return !localIds.has(String(it.id));
+  });
+};
+
 // ── 2つの土台を突き合わせる(提案A の下ごしらえ・v9.03) ──
 //
 // progress をやめて pull だけにしてよいかは、理屈では決められない。
@@ -10942,13 +10966,13 @@ const fieldLabelVisible = (on, zoom, areaA, base) =>
 // ── 札の重なりを見て間引く(v9.02) ──
 //
 // 倍率のしきい値(v9.00)だけでは、引いた状態で札が重なるのを
-// 止められない。倍率15では30aの圓場でさえ地図上 27px しかないのに
-// 札は 60～90px あるので、「札のほうが圓場より大きい」という関係は
-// しきい値をどう動かしても変わらない。170圓場を一番引いた状態で見ると
+// 止められない。倍率15では30aの圃場でさえ地図上 27px しかないのに
+// 札は 60～90px あるので、「札のほうが圃場より大きい」という関係は
+// しきい値をどう動かしても変わらない。170圃場を一番引いた状態で見ると
 // 札が連なって地図が見えなくなる。
 //
 // そこで札を実際に置く位置に並べ、重なるものを落とす。
-// 大きい圓場を優先して残す（引いた状態で目印になるのは大きい圓場）。
+// 大きい圃場を優先して残す（引いた状態で目印になるのは大きい圃場）。
 //
 // 札の大きさは測らない。測ると v9.01 で消した同期レイアウトが戻る。
 // CSS の font-size と padding から見積もる。
@@ -10978,7 +11002,7 @@ const labelBoxOf = (lines, size) => {
   });
   return { w: Math.round(w) + f.padX * 2, h: h + f.padY * 2 };
 };
-// 圓場の札1枚分。中身は描画側と揃えること。
+// 圃場の札1枚分。中身は描画側と揃えること。
 // 揃っていないと、実際より狭い札として判定し、重なったまま残る。
 const fieldLabelBox = (nameText, areaText, byText, size) => labelBoxOf(
   [{ text: nameText }, { text: areaText, sub: true }].concat(
@@ -11398,7 +11422,7 @@ function ProgressLeafletCanvas(p) {
     // 札の出し分けが変わったときだけ描き直す。zoom そのものを入れると、
     // 少し動かすたびに全部の形を作り直すことになる
   // zoom をそのまま入れているのは、札を出す倍率が面積ごとに違うから(v9.00)。
-  // labelsVisible だけだと 15 をぶないと走らず、16・17 で出るはずの札が出ない。
+  // labelsVisible だけだと 15 を超えないと走らず、16・17 で出るはずの札が出ない。
   // 倍率を変えるたびに走るが、変わらない圃場は署名が同じなので触らない
   // (200圃場で 0.40ms の実測あり)。
   }, [ready, p.fields, p.statusByField, labelsVisible(p.showLabels, zoom), zoom, p.onlyTarget, p.areaUnitKey]);
@@ -11830,14 +11854,19 @@ function ProgressGoogleCanvas(p) {
       });
     });
     fitRef.current = targetBounds;
-    if (!fittedRef.current && targetBounds.length) {
+    // 高さが入ってから寄せる。Leaflet 側と同じ理由(v9.10)。
+    // 高さが 0 のまま fitBounds を呼ぶと倍率がでたらめになるうえ、
+    // ここで fittedRef を立ててしまうと、下の ResizeObserver の
+    // 「大きさが決まったらもう一度寄せる」も走らず、直る機会が無くなる。
+    const boxH = containerRef.current ? containerRef.current.clientHeight : 0;
+    if (!fittedRef.current && targetBounds.length && boxH > 80) {
       fittedRef.current = true;
       fit();
     }
     // 札の出し分けが変わったときだけ描き直す。zoom そのものを入れると、
     // 少し動かすたびに全部の形を作り直すことになる
   // zoom をそのまま入れているのは、札を出す倍率が面積ごとに違うから(v9.00)。
-  // labelsVisible だけだと 15 をぶないと走らず、16・17 で出るはずの札が出ない。
+  // labelsVisible だけだと 15 を超えないと走らず、16・17 で出るはずの札が出ない。
   // 倍率を変えるたびに走るが、変わらない圃場は署名が同じなので触らない
   // (200圃場で 0.40ms の実測あり)。
   }, [ready, p.fields, p.statusByField, labelsVisible(p.showLabels, zoom), zoom, p.onlyTarget, p.areaUnitKey]);
@@ -12147,17 +12176,9 @@ function ProgressMapTab(p) {
   // 端末から作業が消えているので removeWork では触れない。
   // ※ 作業IDは Code.gs を v8.80 以降にしないと進捗に入ってこない。
   //   古いままなら id が undefined なので0件になり、何も出ない。
-  const orphans = React.useMemo(() => {
-    const localIds = new Set();
-    (p.works || []).forEach(w => {
-      if (!w.workDate || w.workDate < fetchFrom || w.workDate > fetchTo) return;
-      localIds.add(String(w.id));
-    });
-    return (snap.items || []).filter(it => {
-      if (it.id === undefined || it.id === null || it.id === "") return false;
-      return !localIds.has(String(it.id));
-    });
-  }, [snap, p.works, fetchFrom, fetchTo]);
+  const orphans = React.useMemo(
+    () => serverOrphans(snap.items, p.works, fetchFrom, fetchTo),
+    [snap, p.works, fetchFrom, fetchTo]);
 
   // 地図の初期化・塗り分け・寄せはすべて子(ProgressLeafletCanvas /
   // ProgressGoogleCanvas)が持つ。ここは取得した状態と見出しだけを扱う。

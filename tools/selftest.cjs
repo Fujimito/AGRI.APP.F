@@ -32,7 +32,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -1683,6 +1683,62 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     /auto(PushFields|PushChems|PushWorks|PullShared)\(/.test(body), false);
   eq("途中で打ち切れる(オフに戻したときに送信を飛ばさない)",
     body.includes("alive = false") && body.includes("if (!alive) return;"), true);
+}
+
+// ── サーバーにだけ残っている作業(v9.10) ──────────────
+// 「🧹 サーバーから外す」に渡る一覧。押すと墓標が積まれ、他の端末からも消える。
+// 取り消せないので、拾いすぎは事故そのもの。
+{
+  const O = t.serverOrphans;
+  const item = o => Object.assign({ id: 1, fieldId: 7, workDate: "2026-08-31" }, o);
+  const work = o => Object.assign({ id: 1, fieldId: 7, workDate: "2026-08-31" }, o);
+  const ids = r => r.map(x => String(x.id));
+
+  eq("手元にある作業は残骸ではない",
+    O([item({ id: 1 })], [work({ id: 1 })], "2026-08-30", "2026-08-31"), []);
+  eq("手元に無い作業は残骸",
+    ids(O([item({ id: 9 })], [work({ id: 1 })], "2026-08-30", "2026-08-31")), ["9"]);
+  eq("作業IDが無いものは拾わない(古い Code.gs)",
+    O([item({ id: "" })], [], "2026-08-30", "2026-08-31"), []);
+  eq("IDの型が違っても同じものと見る",
+    O([item({ id: 123 })], [work({ id: "123" })], "2026-08-30", "2026-08-31"), []);
+
+  // ここから本題。
+  // 保存してある写し(tankmix:progresssnap)は前の期間のものが残る。
+  // 作業日を変えた直後は取り直しが終わっておらず、圏外なら永久に終わらない。
+  // 手元だけを新しい期間で絞ると、前の期間の作業が丸ごと「残骸」に見える。
+  // 実際には手元にちゃんとある作業なので、押せば全部消える。
+  eq("写しが範囲の外の日を含んでいても拾わない",
+    O([item({ id: 5, workDate: "2026-08-20" })],
+      [work({ id: 5, workDate: "2026-08-20" })],
+      "2026-08-30", "2026-08-31"), []);
+  // 範囲の外なら、手元に無くても拾わない。
+  // 「直近3日の作業N件」と言いながら別の期間を消すことになる
+  eq("範囲の外は手元に無くても拾わない",
+    O([item({ id: 6, workDate: "2026-08-20" })], [], "2026-08-30", "2026-08-31"), []);
+  // 日付が入っていない行は判断できない。拾わない側に倒す(消すのは戻せない)
+  eq("日付の無い行は拾わない",
+    O([item({ id: 7, workDate: "" })], [], "2026-08-30", "2026-08-31"), []);
+  // 範囲の中の本物の残骸は、これまでどおり拾えること
+  eq("範囲の中の残骸は拾う",
+    ids(O([item({ id: 8, workDate: "2026-08-30" }), item({ id: 9, workDate: "2026-08-20" })],
+      [], "2026-08-30", "2026-08-31")), ["8"]);
+
+  eq("useMemo は serverOrphans を呼ぶ(直書きに戻していない)",
+    src.includes("serverOrphans(snap.items, p.works, fetchFrom, fetchTo)"), true);
+}
+
+// ── 進捗地図: 高さが入ってから寄せる(v9.10) ────────────
+// 高さ0のまま fitBounds を呼ぶと倍率がでたらめになる。しかも寄せた印
+// (fittedRef)を立ててしまうと、ResizeObserver 側の「大きさが決まったら
+// もう一度寄せる」も走らなくなり、直る機会が無くなる。
+// Leaflet 側は v8.9x で入れてあったが、Google 側に入っていなかった。
+// Google 版は API キーが無く未検証なので、並びが揃っているかだけを見る。
+{
+  eq("Leaflet版は高さを見てから寄せる",
+    src.includes("targetBounds.length && mapRef.current.getSize().y > 80"), true);
+  eq("Google版も高さを見てから寄せる",
+    src.includes("targetBounds.length && boxH > 80"), true);
 }
 
 // ── 版数の整合(sw.js と揃っているか) ───────────────────

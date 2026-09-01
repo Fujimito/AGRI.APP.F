@@ -851,6 +851,29 @@ flowchart TD
       <dt>対処</dt><dd><code>loadAttempt</code> を依存に入れてやり直す。<strong>同じ形を v8.40 で一度直していた。</strong>履歴を確認せず v8.62 で別の原因(ResizeObserver)と誤診している。</dd>
     </dl>
   </div>
+
+  <div class="fail">
+    <h3>片方だけ期間で絞り、手元にある作業を「残骸」と呼ぶ</h3>
+    <p class="ver">v9.10 で修正</p>
+    <dl>
+      <dt>機構</dt><dd>進捗地図の「サーバーにだけ残っている作業」は、<strong>手元だけを取得範囲(直近3日)で絞り、サーバー側の写しは絞っていなかった</strong>。写し(<code>tankmix:progresssnap</code>)は端末に残るので、作業日を切り替えた直後は<strong>前の期間のまま</strong>。手元が新しい範囲、写しが古い範囲になり、突き合わせが噛み合わない。</dd>
+      <dt>症状</dt><dd>前の期間の作業が丸ごと「⚠ この端末にない作業がN件、サーバーに残っています」に出る。<strong>手元にちゃんとある作業</strong>なのに残骸として並ぶ。圏外だと取り直しが終わらないので、その状態が続く。</dd>
+      <dt>なぜ重いか</dt><dd>「🧹 サーバーから外す」は墓標を積んで送る。<strong>他の端末からも消え、取り消せない。</strong>確認文は「直近3日の作業N件」と言うが、実際に消えるのは別の期間の作業。</dd>
+      <dt>対処</dt><dd>サーバー側の写しにも同じ範囲を掛ける。日付が入っていない行は判断できないので<strong>拾わない側に倒す</strong>(消すのは戻せない)。<code>useMemo</code> に直書きしていた計算を <code>serverOrphans</code> に出し、9件の検査を付けた。</dd>
+      <dt>同じ形</dt><dd>v9.08 で <code>progressEntries</code> に入れたのと<strong>同じ欠陥</strong>。あのとき「サーバー由来にも範囲を掛ける」と直したが、<strong>同じ写しを使う隣の計算を見ていなかった</strong>。片方を直したら、同じ入力を使う場所を数え上げること。</dd>
+    </dl>
+  </div>
+
+  <div class="fail">
+    <h3>Leaflet に入れた手当てが、Google 側に入っていない</h3>
+    <p class="ver">v9.10 で修正・未検証</p>
+    <dl>
+      <dt>機構</dt><dd>進捗地図は Leaflet と Google の2実装。Leaflet 側は「地図の高さが入ってから寄せる」を持つが、<strong>Google 側は高さを見ずに寄せ、寄せた印(<code>fittedRef</code>)まで立てていた</strong>。</dd>
+      <dt>症状</dt><dd>高さが 0 のうちに <code>fitBounds</code> が走ると倍率がでたらめになる。しかも印が立つので、<strong>下の ResizeObserver の「大きさが決まったらもう一度寄せる」も走らない</strong>。直る機会が無い。</dd>
+      <dt>対処</dt><dd>Google 側にも高さの条件を入れる。<strong>Google 版は API キーが無く未検証</strong>なので、直したのは並びが揃っていることまで。selftest で両方の並びを固定した。</dd>
+      <dt>教訓</dt><dd>同じ画面を2つの実装で持つと、片方だけ直した手当てが残る。<code>PROGRESS_LABEL_MIN_ZOOM</code> のように<strong>共通の定数へ出せるものは出す</strong>。出せない手当ては、テストで並びを揃えて固定する。</dd>
+    </dl>
+  </div>
 </section>
 
 <section>
@@ -860,8 +883,8 @@ flowchart TD
   <table>
     <thead><tr><th>ファイル</th><th>やること</th><th>件数</th></tr></thead>
     <tbody>
-      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">366</td></tr>
-      <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">127</td></tr>
+      <tr><td><code>tools/selftest.cjs</code></td><td>app.js のトップレベル関数を取り出して呼ぶ。ソースの形も検査する</td><td class="num">595</td></tr>
+      <tr><td><code>tools/gastest.cjs</code></td><td>Code.gs を張りぼての上で動かし、シートに何を書いたかを見る</td><td class="num">222</td></tr>
       <tr><td><code>tools/gasharness.cjs</code></td><td><code>SpreadsheetApp</code> の張りぼて。vm で Code.gs を評価する</td><td>—</td></tr>
       <tr><td><code>tools/fakegas.cjs</code></td><td>ローカルの受信口。2オリジンで2端末を再現できる</td><td>—</td></tr>
     </tbody>
