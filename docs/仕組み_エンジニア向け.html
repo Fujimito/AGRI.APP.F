@@ -872,6 +872,7 @@ flowchart TD
       <dt>症状</dt><dd>高さが 0 のうちに <code>fitBounds</code> が走ると倍率がでたらめになる。しかも印が立つので、<strong>下の ResizeObserver の「大きさが決まったらもう一度寄せる」も走らない</strong>。直る機会が無い。</dd>
       <dt>対処</dt><dd>Google 側にも高さの条件を入れる。<strong>Google 版は API キーが無く未検証</strong>なので、直したのは並びが揃っていることまで。selftest で両方の並びを固定した。</dd>
       <dt>教訓</dt><dd>同じ画面を2つの実装で持つと、片方だけ直した手当てが残る。<code>PROGRESS_LABEL_MIN_ZOOM</code> のように<strong>共通の定数へ出せるものは出す</strong>。出せない手当ては、テストで並びを揃えて固定する。</dd>
+      <dt>続き</dt><dd>圃場登録タブは、まさにその「出せるのに出していない」状態だった&mdash;&mdash;基準倍率 <code>16</code> を Leaflet 版と Google 版の component に<strong>別々に書いていた</strong>。v9.11 で <code>FIELD_LABEL_MIN_ZOOM</code> に出した。<strong>この不具合を見つけた直後に、同じ形が隣にあると分かった。</strong>1件直したら、同じ形を数え上げること。</dd>
     </dl>
   </div>
 </section>

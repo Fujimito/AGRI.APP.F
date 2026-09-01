@@ -32,7 +32,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "FIELD_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -1217,7 +1217,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     (src.match(/showLabel && zoom >= PROGRESS_LABEL_MIN_ZOOM \+ lsz\.step/g) || []).length, 2);
   // 候補集めで 2、Google は描画側でも同じ判定を使うので 3
   eq("圃場登録タブは基準 16",
-    (src.match(/showLabel && zoom >= LABEL_MIN_ZOOM \+ lsz\.step/g) || []).length, 3);
+    (src.match(/showLabel && zoom >= FIELD_LABEL_MIN_ZOOM \+ lsz\.step/g) || []).length, 3);
   // v9.02: 間引きは倍率ごとに結果が変わるので、帯では足りない。
   // 帯に戻すと、寄っても落とされたままの札が出てこない
   eq("圃場登録タブは倍率そのもので描き直す",
@@ -1726,6 +1726,30 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 
   eq("useMemo は serverOrphans を呼ぶ(直書きに戻していない)",
     src.includes("serverOrphans(snap.items, p.works, fetchFrom, fetchTo)"), true);
+}
+
+// ── 札を出す倍率は1か所で決める(v9.10) ─────────────────
+// 圃場登録タブの地図は Leaflet と Google の2実装。v9.10 まで、基準倍率 16 を
+// それぞれの component の中に別々に書いていた。片方だけ動かしても誰も気づかない。
+// 進捗地図の側には「ここに絶対の倍率を書かない。書くと片方の地図の振る舞いが
+// 変わる」と注意書きまであるのに、圃場登録タブがそれを破っていた。
+// 実際 v9.10 で、Leaflet に入れてあった手当てが Google 側に無いのが見つかっている。
+{
+  eq("基準は 16", t.FIELD_LABEL_MIN_ZOOM, 16);
+  eq("進捗地図とは別の値", t.FIELD_LABEL_MIN_ZOOM === t.PROGRESS_LABEL_MIN_ZOOM, false);
+  // component の中に自前の定数を持たせない。持たせると2つに割れる
+  eq("component ごとの定数は残っていない",
+    src.includes("const LABEL_MIN_ZOOM = 16;"), false);
+  eq("2つの地図が同じ定数を見ている",
+    (src.match(/const showLabel = zoom >= FIELD_LABEL_MIN_ZOOM;/g) || []).length, 2);
+
+  // 定数を通した実際の判定。面積で出る倍率が変わる(v9.00)
+  const vis = t.fieldLabelVisible, Z = t.FIELD_LABEL_MIN_ZOOM;
+  eq("大(30a以上)は 16 で出る", vis(true, Z, 50, Z), true);
+  eq("中(10a以上)は 16 では出ない", vis(true, Z, 20, Z), false);
+  eq("中(10a以上)は 17 で出る", vis(true, Z + 1, 20, Z), true);
+  eq("小は 18 で出る", vis(true, Z + 2, 5, Z), true);
+  eq("札なしにすれば倍率によらず出ない", vis(false, Z + 5, 50, Z), false);
 }
 
 // ── 進捗地図: 高さが入ってから寄せる(v9.10) ────────────

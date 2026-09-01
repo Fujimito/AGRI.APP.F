@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.10";
+const APP_VERSION = "v9.11";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -7411,7 +7411,6 @@ function GoogleMapTab(p) {
   const [mapType, setMapType] = React.useState("hybrid"); // hybrid=衛星+地名, roadmap=地図のみ
   const drawingRef = React.useRef(false);
   const drawPtsRef = React.useRef([]);
-  const LABEL_MIN_ZOOM = 16; // これ以上に拡大すると圃場名・作物・面積の札を出す
   const [zoom, setZoom] = React.useState(15);
   const drawArea = polygonAreaA(drawPts);
   const drawCrossed = polygonSelfIntersects(drawPts);
@@ -7635,7 +7634,7 @@ function GoogleMapTab(p) {
       o.setMap && o.setMap(null);
     });
     fieldOverlaysRef.current = [];
-    const showLabel = zoom >= LABEL_MIN_ZOOM;
+    const showLabel = zoom >= FIELD_LABEL_MIN_ZOOM;
     // Leaflet 版と同じ間引き(v9.02)。getProjection は準備できるまで null で、
     // そのときは間引かない(札は従来どおり出る)。Google 版は未検証
     const proj = mapRef.current.getProjection ? mapRef.current.getProjection() : null;
@@ -7644,7 +7643,7 @@ function GoogleMapTab(p) {
     const cand = [];
     shown.forEach(f => {
       const lsz = labelSizeOf(f.areaA);
-      if (!(showLabel && zoom >= LABEL_MIN_ZOOM + lsz.step) || !proj) return;
+      if (!(showLabel && zoom >= FIELD_LABEL_MIN_ZOOM + lsz.step) || !proj) return;
       const box = fieldLabelBox(f.name + (f.crop ? " / " + f.crop : ""),
         fieldAreaText(f, p.areaUnitKey), "", lsz.size);
       const ctr = f.center || polygonCenter(f.polygon);
@@ -7681,7 +7680,7 @@ function GoogleMapTab(p) {
       // 小さい圃場の札はもう少し寄ってから出す(v9.00)。
       // さらに、重なる札は落とす(v9.02)
       const lsz = labelSizeOf(f.areaA);
-      if (showLabel && zoom >= LABEL_MIN_ZOOM + lsz.step && (!keep || keep.has(String(f.id)))) {
+      if (showLabel && zoom >= FIELD_LABEL_MIN_ZOOM + lsz.step && (!keep || keep.has(String(f.id)))) {
         const c = f.center || polygonCenter(f.polygon);
         const label = new g.Marker({
           position: {
@@ -8398,7 +8397,6 @@ function LeafletMapTab(p) {
   const drawPtsRef = React.useRef([]);
   const drawArea = polygonAreaA(drawPts);
   const drawCrossed = polygonSelfIntersects(drawPts);
-  const LABEL_MIN_ZOOM = 16; // これ以上に拡大すると圃場名・作物・面積の札を出す
   // 頂点をタップしたら消すモード。既定はOFF。
   // v8.58までは1回目のタップで✕に変わり、2回目で削除していた。
   // 形を直しているだけでも✕になるので、作業中に邪魔になる。
@@ -8601,14 +8599,14 @@ function LeafletMapTab(p) {
     const L = window.L;
     const grp = layersRef.current.fields;
     grp.clearLayers();
-    const showLabel = zoom >= LABEL_MIN_ZOOM;
+    const showLabel = zoom >= FIELD_LABEL_MIN_ZOOM;
     const shown = p.fields.filter(f => f.polygon && f.polygon.length >= 3 && hidden.indexOf(f.id) < 0);
     // 進捗地図と同じ間引き(v9.02)。先に候補を集めて、重なるものを落とす
     const cand = [];
     shown.forEach(f => {
       // 小さい圃場の札はもう少し寄ってから出す(v9.00)
       const lsz = labelSizeOf(f.areaA);
-      if (!(showLabel && zoom >= LABEL_MIN_ZOOM + lsz.step)) return;
+      if (!(showLabel && zoom >= FIELD_LABEL_MIN_ZOOM + lsz.step)) return;
       const box = fieldLabelBox(f.name + (f.crop ? " / " + f.crop : ""),
         fieldAreaText(f, p.areaUnitKey), "", lsz.size);
       const ctr = f.center || polygonCenter(f.polygon);
@@ -10731,6 +10729,14 @@ const toMapStatus = st => st === "done" || st === "local" ? "done" : "planned";
 // 映るが、そのぶんGASの実行回数と通信量が増える。45秒は未計測の暫定値。
 // 圃場名の札を出しはじめる倍率。Leaflet版とGoogle版で揃える
 const PROGRESS_LABEL_MIN_ZOOM = 15;
+// 圃場登録タブの地図で札を出しはじめる倍率。こちらも Leaflet版と Google版で揃える。
+// 進捗地図(15)より1つ寄ってからにしてある。作図中は頂点を掴むので、
+// 札が多いと掴みたい点が隠れる。
+//
+// v9.10 まで、この 16 を2つの component の中に別々に書いていた。片方だけ
+// 動かしても誰も気づかない。実際、Leaflet に入れた手当てが Google 側に
+// 入っていない不具合が v9.10 で見つかっている(08節)。定数は1か所に置く。
+const FIELD_LABEL_MIN_ZOOM = 16;
 
 
 // ── 進捗地図の土台を作る(v9.03で関数に出した) ──
