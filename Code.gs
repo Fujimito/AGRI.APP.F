@@ -526,7 +526,7 @@ function getChemSheet_()  {
 function fieldRow_(f, team, at) {
   const c = Array.isArray(f.center) ? f.center : [];
   return [
-    String(f.id),
+    safeCell_(String(f.id)),
     safeCell_(team),
     safeCell_(f.name || ""),
     safeCell_(f.crop || ""),
@@ -572,10 +572,10 @@ function fieldObj_(r) {
 // ── 作業1件 → 行 ──
 function workRow_(w, team, at) {
   return [
-    String(w.id),
+    safeCell_(String(w.id)),
     safeCell_(team),
     safeCell_(w.workDate || ""),
-    String(w.fieldId),
+    safeCell_(String(w.fieldId)),
     safeCell_(w.fieldName || ""),
     safeCell_(w.status || "planned"),
     Number(w.plannedL) || "",
@@ -1118,6 +1118,17 @@ function ledgerRowFromWork_(r) {
   // 面積は実績面積を優先する。実績が入っていなければ登録上の面積。
   // 台帳の buildRow_ / report と同じ順番にすること
   const area = Number(r[8]) || Number(r[18]) || "";
+  // r[0](記録ID)は2通りの由来がある。
+  //  ・ledgerCheck_ からの呼び出しは、作業シートを getValues で読んだ行。
+  //    数式インジェクション対策の先頭アポストロフィは getValues では戻らないので付かない。
+  //  ・ledgerSyncWorks_ からの呼び出しは、upsertRows_ の applied(=workRow_ の
+  //    戻り値そのもの、まだシートに書いていない)。workRow_ が safeCell_ を
+  //    通した記録IDだと、"=" などで始まる値には先頭にアポストロフィが付いたまま渡ってくる。
+  // 台帳の記録ID列に使うのはどちらも「見た目の記録ID」であるべきなので、
+  // 付いていれば剥がして揃える(実測: 剥がさないと、同じ記録IDでも
+  // ledgerSyncWorks_ の追加と更新でキーが食い違い、台帳に二重行ができる)
+  const id0 = String(r[0] == null ? "" : r[0]);
+  const id = id0.charAt(0) === "'" ? id0.slice(1) : id0;
   return [
     // 受信日時。台帳は「受け取った時刻」、作業シートは「更新日時」。
     // どちらも「サーバーが最後に書いた時刻」なので同じものを指す。
@@ -1125,7 +1136,7 @@ function ledgerRowFromWork_(r) {
     //   ISO のまま入れると、足した行だけ書式も時刻帯も違って見える。
     //   台帳は人が読んで印刷する表なので、そこは合わせる(v9.09)
     jstStamp_(r[WORK_AT_COL]),
-    String(r[0]),
+    id,
     ymd_(r[2]),
     String(r[11] || ""),
     String(r[4] || ""),
@@ -1191,7 +1202,12 @@ function ledgerSyncWorks_(rows, team) {
     var r = rows[k];
     if (r[16]) continue;                 // 削除済みは台帳に足さない(S3)
     var want = ledgerRowFromWork_(r);    // S4: 照合と同じ関数を通す
-    var key = String(r[0]);
+    // key は r[0] を直接使わず、ledgerRowFromWork_ が正規化した後の
+    // want[1] を使う。r[0] は workRow_ が safeCell_ を通した記録IDだと
+    // 先頭にアポストロフィが付いたまま渡ってくることがあり、それをそのまま
+    // キーにすると rowOf(シートから読んだ、アポストロフィの付かない記録ID)
+    // と食い違って、追加と更新が別キー扱いになり台帳が二重行になる(実測)
+    var key = want[1];
     if (key in appendAt) {
       append[appendAt[key]] = want.map(safeCell_);
       continue;
@@ -1247,7 +1263,10 @@ function ledgerNorm_(row) {
 function ledgerCheck_(team) {
   const wk = getWorkSheet_();
   const lg = getSheet_();
-  const made = {};   // 記録ID → 作り直した行
+  // 記録IDが "__proto__" だと、素の {} への代入 made["__proto__"] = 行 は
+  // データを持たず made 自身の [[Prototype]] を書き換えてしまう
+  // (代入の特殊挙動。have と同じ実測・同じ直し方)。Object.create(null) にする
+  const made = Object.create(null);   // 記録ID → 作り直した行
   if (wk.getLastRow() >= 2) {
     const rows = wk.getRange(2, 1, wk.getLastRow() - 1, WORK_HEADERS.length).getValues();
     for (let i = 0; i < rows.length; i++) {
@@ -1258,7 +1277,11 @@ function ledgerCheck_(team) {
       made[String(r[0])] = ledgerRowFromWork_(r);
     }
   }
-  const have = {};
+  // 記録IDが "__proto__" / "constructor" / "toString" などだと、素の {} では
+  // プロトタイプ鎖を拾って壊れる(v9.13a レビューで指摘・実測。ledgerSyncWorks_ の
+  // rowOf を Object.create(null) に直した(v9.13 round 1)のと同じ理由・同じ直し方)。
+  // Object.create(null) で継承の無い辞書にする
+  const have = Object.create(null);
   // 記録IDが重なっている行の数。0でないなら、台帳に二重行がある
   let dup = 0;
   if (lg.getLastRow() >= 2) {
