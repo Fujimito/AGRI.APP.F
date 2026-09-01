@@ -135,7 +135,10 @@ class FakeSheet {
         return range;
       },
       setBackground() { return range; },
-      setBackgrounds() { return range; },
+      // 渡された値をそのまま覚えておく(検査から中身を見られるようにするため)。
+      // 実物の Sheets が背景色として文字列以外(関数など)を渡されたときに
+      // 例外を投げるかどうかは、この張りぼてでは再現していない(未確認)
+      setBackgrounds(bg) { sh._lastBackgrounds = bg; return range; },
       clearContent() {
         for (let i = 0; i < nr; i++) {
           if (!sh.rows[r0 + i]) continue;

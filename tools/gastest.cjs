@@ -1585,6 +1585,45 @@ const F2 = {
   eq("食い違いにもならない(differ=0)", c.differ, 0);
 }
 
+// ── 29. colorByDate_ の colorOf{} がプロトタイプ鎖を拾う(v9.14 追加ラウンド) ──────────
+//
+// 散布日は端末が送った workDate 由来で、ymd_ は日付として解釈できなければ
+// 元の文字列をそのまま返す(§28 のコメント参照)。つまり workDate に
+// "__proto__" / "constructor" / "toString" を送ると、台帳の散布日列に
+// その文字列がそのまま残り、colorByDate_ の colorOf キーもそれになる。
+//
+// colorByDate_ は行を足すたびに走る(ledgerSyncWorks_・ledgerRebuild_ の
+// 両方から)ため、made/have/rowOf よりも頻繁に踏みうる経路。
+//
+// 張りぼての setBackgrounds は渡された値の型を検証せず、何を渡しても
+// 黙って受け取る(gasharness.cjs 参照)。実物の Sheets が背景色として
+// 文字列以外(関数など)を渡されたときに例外を投げるかどうかは、この
+// 張りぼてでは確かめようがない(未確認)。ここでは「setBackgrounds に
+// 渡った色の型が文字列であること」を typeof で見る検査にとどめる
+// (colorOf が壊れていれば、"constructor" のときは継承した関数、
+// "__proto__" のときは継承したプロトタイプ自身が色として渡り、
+// どちらも typeof は "string" にならない)。
+{
+  const mk = (id, day, name) => ({
+    id: id, workDate: day, fieldId: 5, fieldName: name,
+    status: "done", plannedL: 20, sprayedL: 18, reportAreaA: 10,
+    chemCount: 0, chemText: "", crop: "大豆", areaA: 10, chems: [],
+    totalL: 0, waterMl: 0, memo: "", reportMemo: "実績", seq: 0,
+    by: "藤本", deviceId: "d1", reportedAt: "2026-08-24T04:00:00.000Z",
+    updatedAt: "2026-08-24T04:00:00.000Z",
+  });
+  ["__proto__", "constructor", "toString"].forEach(pid => {
+    const ctx = makeContext({});
+    const r = post(ctx, { type: "pushWorks", team: TEAM, items: [mk(9501, pid, "西の田")] });
+    eq("散布日 " + pid + " でも pushWorks が例外にならず終わる(ok=true)", r.ok, true);
+    const lg = ctx.SHEET_STATE.getSheetByName("防除記録");
+    const bg = lg._lastBackgrounds;
+    eq("散布日 " + pid + " でも colorByDate_ が背景色を書いている", Array.isArray(bg) && bg.length > 0, true);
+    eq("散布日 " + pid + " の背景色は文字列(継承したプロパティを拾っていない)",
+       typeof bg[0][0], "string");
+  });
+}
+
 // ─────────── 結果 ───────────
 if (fails.length) {
   console.error("\n  ✗ " + fails.length + " 件失敗 / " + (pass + fails.length) + " 件中\n");

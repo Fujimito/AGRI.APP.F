@@ -153,7 +153,12 @@ function colorByDate_(sh) {
   if (last < 2) return;
   const n = last - 1;
   const dates = sh.getRange(2, 3, n, 1).getValues(); // 3列目 = 散布日
-  const colorOf = {};   // 散布日 → 色
+  // 散布日は端末が送った workDate 由来で、ymd_ は日付として解釈できなければ
+  // 元の文字列をそのまま返す(418行目)。つまり workDate に "__proto__" /
+  // "constructor" / "toString" を送ると、この列にその文字列がそのまま残る。
+  // made/have/rowOf と同じ理由(v9.14 で実測・同じ直し方)。
+  // Object.create(null) で継承の無い辞書にする
+  const colorOf = Object.create(null);   // 散布日 → 色
   let next = 0;         // 次に割り当てる色の番号
   const bg = [];
   for (let i = 0; i < n; i++) {
@@ -733,6 +738,8 @@ function upsertRows_(sh, headers, idCol, editCol, incoming, toRow, team, logKind
   // チームコードはどのシートも列 1。
   const TEAM_COL = 1;
   const keyOf_ = (t, id) => String(t == null ? "" : t) + "\u241F" + String(id);
+  // 鍵に必ず区切り文字 U+241F が入るので、"__proto__" 等の予約語そのものとは
+  // 一致しない。素の {} のままで安全(v9.14 の調査で確認)
   const idx = {};
   for (let i = 0; i < rows.length; i++) idx[keyOf_(rows[i][TEAM_COL], rows[i][idCol])] = i;
 
@@ -1312,9 +1319,14 @@ function ledgerCheck_(team) {
   let same = 0, differ = 0, onlyWork = 0, onlyLedger = 0;
   // どの列が何件違うか。件数だけだと、1種類の食い違いが125件なのか
   // 125種類バラバラなのかが分からず、直しようがない
+  // 鍵は HEADERS[i](自分のコードの中の固定の列名配列)。端末からは来ないので安全。
+  // bump(m,k) は m[k] = (m[k]||0)+1 なので、鍵の由来を変えるときは継承したプロパティを
+  // 拾って件数が壊れないか確認すること
   const byCol = {};
   // 台帳に行が無い作業は、状態ごとに数える。予定のまま(planned)なら
   // 台帳に行が無いのが正しい。台帳の行は「薬剤を当てた」ときにできる
+  // 鍵は状態 + "・薬剤あり"/"・薬剤なし"(必ず接尾辞が付く固定パターン)。端末からは来ないので安全。
+  // bump は byCol と同じ形なので、鍵の由来を変えるときは同じ確認が要る
   const onlyWorkBy = {};
   // 最初の1件は全列を並べて返す。列ごとの件数だけでは、
   // 「なぜ違うのか」の見当が付かないことがある
@@ -1423,10 +1435,13 @@ function ledgerRebuild_(team, dryRun) {
   let added = 0, updated = 0, untouched = 0;
   // 作り直しの対象にならなかった台帳の行(作業シートに対応が無い・
   // 記録IDが空・別チーム)。触らないことを数えて見せる
+  // 鍵は配列の添字(数値)。"__proto__" 等の予約語とは一致しないので安全
   const seen = {};
   // 足す行の内訳。「足す 258 件」だけでは、その中身が
   // 実施済なのか予定のままなのか分からず、元帳に入れてよいか判断できない。
   // 台帳は人が読んで印刷する表なので、中身を見せてから決めてもらう(v9.09)
+  // 鍵は onlyWorkBy と同じ形(状態 + 接尾辞の固定パターン)。端末からは来ないので安全。
+  // bump も同じなので、鍵の由来を変えるときは同じ確認が要る
   const addedBy = {};
   const cols = [];   // 直した列の内訳
   const bumpCol = k => { for (let i = 0; i < cols.length; i++) if (cols[i].col === k) { cols[i].n++; return; } cols.push({ col: k, n: 1 }); };
