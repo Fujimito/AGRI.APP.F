@@ -31,7 +31,7 @@ const EXPORTS = [
   "shiftDate", "dateLabel", "newChem", "agriAmountUnit", "stripTrailingZeros",
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
-  "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
+  "syncFingerprint", "stampUpdated", "pendingOf", "isPending", "progressTargets", "PROGRESS_STATES", "PROGRESS_RANK",
   "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "FIELD_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
@@ -1003,7 +1003,10 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 {
   eq("buildLedgerOps は app.js から消えている", src.includes("buildLedgerOps"), false);
   eq("buildLedgerOps は EXPORTS からも外してある", EXPORTS.indexOf("buildLedgerOps"), -1);
-  eq("syncPending は app.js から消えている", src.includes("syncPending"), false);
+  // 名前そのものは「なぜ pushProgress に一本化したか」を書いた説明コメントに
+  // 残っている(履歴として正直)。実コードとしての定義・呼び出しが無いことを見る
+  eq("syncPending の定義は無い", src.includes("const syncPending"), false);
+  eq("syncPending の呼び出しは無い", src.includes("syncPending("), false);
   eq("abortSync は app.js から消えている", src.includes("abortSync"), false);
   eq('type: "record" を送る箇所が無い', src.includes('type: "record"'), false);
   eq('type: "report" を送る箇所が無い', src.includes('type: "report"'), false);
@@ -1017,7 +1020,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   // 台帳を書く唯一の経路(pushWorks=pushProgress)が成功したときだけ、
   // 台帳送信済みの印を立てる。旧 markDone() の代わり
   eq("pushProgress の成功時に台帳の印(synced/reportSynced/unreportPending)を立て直す",
-    src.includes("synced: true,\n      reportSynced: w.reported ? true : w.reportSynced,\n      unreportPending: false"), true);
+    src.includes("synced: true,\n        reportSynced: w.reported ? true : w.reportSynced,\n        unreportPending: false"), true);
 
   // 接続テストの「古いGAS」判定は、Task1で足された ledgerFromWorks を見る。
   // pushChems のままだと、台帳を書けない古いGASを繋いでも警告が出ない
@@ -1036,6 +1039,17 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.includes("setTab(\"work\");\n      pushProgress();"), true);
   eq("送信ボタンの文言が「進捗を送信」になっている",
     (src.match(/"☁ 進捗を送信\(未送信 " \+ pending \+ "件\)"/g) || []).length, 2);
+  // レビュー指摘(round1・Important2): 作業タブの2つのボタンだけ直して、
+  // 見出しのバッジが「☁ 8月30日(土) 未送信 3件」のまま日付を名乗っていた。
+  // クリック先の pushProgress は日をまたいで全部送るので、バッジの文言だけ
+  // 実態と食い違っていた。ボタン2つと表現を揃える
+  eq("見出しのバッジの文言も「進捗を送信」になっている",
+    src.includes('"☁ 進捗を送信(未送信 " + pendingCount + "件)"'), true);
+  // 電波復帰時の自動送信も、選んでいる日で絞ると「他の日にしか未送信が
+  // 無い」ときに発火しなくなる(pushProgressは日を絞らず全部送るため)。
+  // isPending を全件に対して見るように直した
+  eq("電波復帰の発火判定は日で絞っていない(全件をisPendingで見る)",
+    src.includes('const pend = load("tankmix:works", []).some(isPending);'), true);
   // 中断・途中の圃場から再開する仕組みは record/report を1件ずつ
   // 送っていたときの機能で、pushWorks は1回のまとめ送りなので意味が無い
   eq("「送信を中止」ボタンは無い", src.includes("送信を中止"), false);
@@ -1048,6 +1062,94 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("abortBtn のスタイル定義も片付いている", src.includes("abortBtn:"), false);
   eq("planSelect のスタイル定義も片付いている(この再開セレクトでしか使っていなかった)",
     src.includes("planSelect:"), false);
+}
+
+// ── 送信対象の合流(v9.15・レビュー round1 Important1の修正) ──────────
+//
+// isPending(画面の未送信バッジ・送信ボタンの件数表示に使う4つの旗の判定)と
+// pendingOf(実際に何を送るか決める判定。updatedAt!==pushedAt)が、
+// v9.15の最初の実装では別物のまま放置されていた。
+//
+// 再現する経路(レビュアがコード読解で発見。実機未確認):
+//   1. 端末Aが圏外で作業Wを追加 → synced:false、pushedAt未設定。
+//      自動送信は失敗して印は立たない
+//   2. 同チームの端末Bが同じWを編集して送信 → サーバーのupdatedAtが進む
+//   3. 端末Aが復帰しpullで受信 → itemToWork()がpushedAtをupdatedAtに
+//      合わせる一方、synced等は「この端末の事情」としてold.syncedのまま残す
+//      (itemToWorkのコメントのとおり)
+//   4. 結果、updatedAt===pushedAtになりpendingOfからは外れるのに、
+//      syncedはfalseのままなのでisPendingには残り続ける
+//
+// pushProgressがpendingOfだけを見ていると③以降ずっと送られず、画面の
+// 「未送信」は消えないのに押すと「送っていない進捗はありません」と出る。
+{
+  const P = t.pendingOf, I = t.isPending, T = t.progressTargets;
+
+  // 手順1〜3を経た後の状態(pull直後)をそのまま組み立てる
+  const afterPull = {
+    id: 1, workDate: "2026-08-30", fieldId: 1,
+    updatedAt: "2026-08-30T02:00:00.000Z",
+    pushedAt: "2026-08-30T02:00:00.000Z", // pullでpushedAtがupdatedAtに追いついた
+    synced: false, reported: false, reportSynced: false, unreportPending: false
+  };
+  eq("(欠陥の再現)pendingOfだけでは pull 直後の未送信を見失う", P([afterPull]).length, 0);
+  eq("isPendingは pull 直後もまだ未送信のまま", I(afterPull), true);
+  eq("progressTargets は pendingOf が見失った分を isPending 側から拾う",
+    T([afterPull]).map(w => w.id), [1]);
+
+  // 逆方向(台帳の印はもう立っているが、中身をその後また変えた行)も
+  // 引き続き pendingOf 側から拾えること(退行していないか)
+  const editedAfterSync = {
+    id: 2, updatedAt: "2026-08-30T03:00:00.000Z", pushedAt: "2026-08-30T02:00:00.000Z",
+    synced: true, reported: true, reportSynced: true, unreportPending: false
+  };
+  eq("中身を変えただけの行は従来どおりpendingOfから拾える",
+    P([editedAfterSync]).map(w => w.id), [2]);
+  eq("isPendingだけ見れば(台帳の印は生きているので)送信済み扱い",
+    I(editedAfterSync), false);
+  eq("progressTargets は両方の理由の行をどちらも拾う(重複なし・順不同)",
+    T([afterPull, editedAfterSync]).map(w => w.id).sort(), [1, 2]);
+
+  // 両方の条件に同時に当たる行を二重に数えない(Mapでidキーにしてある)
+  const both = {
+    id: 3, updatedAt: "2026-08-30T04:00:00.000Z", pushedAt: "2026-08-30T02:00:00.000Z",
+    synced: false, reported: false, reportSynced: false, unreportPending: false
+  };
+  eq("両方の条件に当たる行は1件として数える(重複なし)", T([both]).length, 1);
+
+  // 空・null混入・pushedAt未設定でも落ちない
+  eq("空配列でも落ちない", T([]).length, 0);
+  eq("undefinedでも落ちない", T(undefined).length, 0);
+  eq("nullが混ざっても飛ばす", T([null, afterPull]).length, 1);
+  eq("pushedAt未設定(一度も送っていない)は当然pendingOf側からも拾える",
+    T([{ id: 4, updatedAt: "t", synced: true, reported: false, reportSynced: false, unreportPending: false }]).map(w => w.id), [4]);
+
+  // pushProgress本体が実際にこの合流関数を使っていることをソースでも確認する
+  // (ここだけ pendingOf に先祖返りしても、上のロジックのテストだけでは検出できない)
+  eq("pushProgress は progressTargets を使っている",
+    src.includes("const pend = progressTargets(cur);"), true);
+  eq("pendingOf は圃場・薬剤の送信では引き続きそのまま使われている(触っていない)",
+    (src.match(/const pend = pendingOf\(cur\);/g) || []).length, 2);
+}
+
+// ── pushProgress の二重起動防止・syncing の共有(v9.15・レビュー round1 Important3の修正) ──
+//
+// pushProgress はボタン3箇所・電波復帰・実績保存・散布済の入れ外しなど
+// あちこちから呼ばれるようになったのに、syncing state を誰も立てていなかった
+// (cloudSave/cloudLoad/syncSharedだけがsetSyncingを呼んでいた)。
+// ボタンはp.syncingでdisabled/「送信中…」を出す設計のままだったので、
+// 押しても手応えが無く連打できてしまい、他の送信系(🔁今すぐ同期する等)と
+// 同時に走ると tankmix:works の読み書きが競合しうる欠陥があった。
+{
+  eq("pushProgress は pushingRef で二重起動を防ぐ",
+    src.includes("if (pushingRef.current) return false;"), true);
+  eq("pushProgress は開始時に syncing を立てる",
+    src.includes("pushingRef.current = true;\n    setSyncing(true);"), true);
+  eq("pushProgress は try/finally で必ず syncing を戻す(早期returnでも戻る)",
+    src.includes("} finally {\n      pushingRef.current = false;\n      setSyncing(false);\n    }\n  };"), true);
+  // 状態を分けなかった理由がコメントとして残っているか
+  eq("syncingを共有した理由のコメントがある",
+    src.includes("1つの状態で足並みを揃えるほうが"), true);
 }
 
 // ── 記録者ごとの実績集計(v8.97) ──────────────
@@ -1768,7 +1870,6 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 const sw = nl(fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8"));
 const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];
 eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
-eq("版数は v9.15(台帳への別送をやめた版)", t.APP_VERSION, "v9.15");
 
 // ── 結果 ─────────────────────────────────────────────
 console.log("");

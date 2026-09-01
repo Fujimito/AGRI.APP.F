@@ -596,6 +596,40 @@ const stampUpdated = (next, prev) => {
   });
 };
 
+// ── 未送信の判定(v9.15でトップレベルに出した) ──
+//
+// 「未送信」には意味が2つある。
+//   pendingOf   … 中身の更新が pushedAt に追いついていないもの
+//                 (updatedAt !== pushedAt。圃場・薬剤・作業すべてに使う汎用の判定)
+//   isPending   … 台帳(防除記録)の印(synced/reportSynced/unreportPending)が
+//                 まだ立っていないもの(作業だけの判定。画面の「未送信◯件」
+//                 バッジと送信ボタンの件数表示に使う)
+// v9.14までは、台帳への送信(旧 syncPending)がこの2つ目の印だけを見て動いていた
+// ので一致していたが、v9.15で送信経路を pushProgress(pendingOf)一本にしたところ、
+// 次の手順で食い違いが起きることが分かった(実機未確認・コード読解で発見)。
+//
+//   1. 端末Aが圏外で作業Wを追加 → synced:false / pushedAt 未設定。
+//      自動送信は失敗して印は立たない
+//   2. 同チームの端末Bが同じWを編集して送信 → サーバーの updatedAt が進む
+//   3. 端末Aが復帰し、pull で受信 → itemToWork() が pushedAt を
+//      サーバーの updatedAt に合わせる一方、synced は「この端末の事情」として
+//      old.synced(=false)のまま残す(itemToWorkのコメント参照)
+//   4. 結果、pendingOf からは外れる(updatedAt===pushedAt)のに
+//      isPending には残り続ける(synced が false のまま)
+//
+// pushProgress が pendingOf だけを見ていると③以降ずっと送られず、
+// 画面の「未送信」表示だけが残り続けて自己修復しない。
+// progressTargets はこの2つを合わせて「送るべきもの」を決める
+// (App側からはトップレベルの pendingOf/isPending/progressTargets を直接使う)。
+const pendingOf = list => (list || []).filter(x => x && x.updatedAt && x.updatedAt !== x.pushedAt);
+const isPending = w => !w.synced || w.reported && !w.reportSynced || !!w.unreportPending;
+const progressTargets = works => {
+  const byId = new Map();
+  pendingOf(works).forEach(w => byId.set(w.id, w));
+  (works || []).filter(w => w && isPending(w)).forEach(w => byId.set(w.id, w));
+  return Array.from(byId.values());
+};
+
 // ── 削除の墓標(トゥームストーン) ──
 // 端末Aで消しただけでは、端末Bは「自分が持っている＝まだある」としか判断できず、
 // 次の同期で消したはずのものが復活する。消したという事実そのものを送るために、
@@ -1197,6 +1231,12 @@ function App() {
     localStorage.setItem("tankmix:shareon", v ? "1" : "0");
   };
   const [syncing, setSyncing] = useState(false);
+  // pushProgress の二重起動を防ぐ。syncing(state)は反映が非同期なので、
+  // 連打やあちこちからの自動呼び出し(toggleDone・deleteWork・電波復帰など)を
+  // 確実に弾くには state 更新を待たない ref が要る(v9.15 の修正でsyncingRef
+  // を消してしまっていたが、pushProgress が頻繁に呼ばれる経路になった今は
+  // 再入防止が要る。旧 syncPending にあったのと同じ理由)
+  const pushingRef = useRef(false);
   // 農薬データ(IndexedDB)の状態。null = 未取り込み、{count, savedAt} = 取り込み済み
   const [chemDbInfo, setChemDbInfo] = useState(null);
   const [chemDbBusy, setChemDbBusy] = useState(false); // 取り込み中(ボタンの二重押し防止)
@@ -2518,8 +2558,6 @@ function App() {
   //   圃場(fields) … 双方向。ポリゴンを含む完全な内容をサーバーに置ける
   const SYNC_CHUNK = 200; // GAS側の PUSH_MAX(300)より小さくしておく
 
-  // 未送信 = updatedAt が pushedAt と食い違うもの
-  const pendingOf = list => list.filter(x => x.updatedAt && x.updatedAt !== x.pushedAt);
   const syncReady = () => {
     if (!shareOn) return false; // 共有オフ。送りも受け取りもしない
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
@@ -2666,53 +2704,86 @@ function App() {
       if (!quiet) flash(notReadyMsg());
       return false;
     }
-    const cur = load("tankmix:works", []);
-    const pend = pendingOf(cur);
-    const tombs = loadTombs().works;
-    if (pend.length === 0 && tombs.length === 0) {
-      if (!quiet) flash("送っていない進捗はありません");
+    // v9.15 の見直し: 送信ボタン・見出しのバッジ・電波復帰時の自動送信・
+    // 実績保存や散布済の入れ外し時の自動送信など、pushProgress はあちこちから
+    // 呼ばれる(旧 syncPending は作業タブの送信ボタンからしか呼ばれなかった)。
+    // 同時に走ると tankmix:works の読み直し→書き戻しが競合し、片方の印が
+    // 後勝ちで消える恐れがあるため、他の送信系(cloudSave/cloudLoad/syncShared)
+    // と同じ syncing 状態を共有して連打・重複起動をUI側でも止める。
+    // 分けなかった理由: これらは全部 localStorage の同じコレクション
+    // (tankmix:works・tankmix:fields 等)を丸ごと読み書きするので、状態を
+    // 分けても「pushProgress は止まっているが syncShared は動いている」間に
+    // works を書き換えられると結局衝突する。1つの状態で足並みを揃えるほうが
+    // 単純で安全と判断した。加えて pushProgress は呼ばれる頻度が桁違いに
+    // 高いので、state の反映(非同期)を待たずに弾ける ref(pushingRef)も
+    // 別に持たせている(cloudSave 等は手動操作でしか呼ばれないため無くても
+    // 実害が薄く、そこまでは揃えていない)。
+    if (pushingRef.current) return false;
+    pushingRef.current = true;
+    setSyncing(true);
+    try {
+      const cur = load("tankmix:works", []);
+      // 送る対象は2つの合わせ技(v9.15の修正)。
+      //   ① pendingOf(cur) … 中身の更新が pushedAt に追いついていないもの
+      //   ② cur.filter(isPending) … 台帳の印(synced/reportSynced/unreportPending)
+      //      がまだ立っていないもの
+      // ①だけでは足りない。他端末の更新を pull で取り込むと、pushedAt は
+      // updatedAt に追いつく(itemToWork)一方、synced 等は「この端末の事情」
+      // としてそのまま残る(itemToWork のコメント参照)。そのため①からは
+      // 外れるのに②には残り続け、画面の「未送信」が消えないのに
+      // pushProgress は「送っていない進捗はありません」を返す、という
+      // 食い違いが起きる(実機未確認・コード読解で見つかった経路。
+      // tools/selftest.cjs の再現テスト参照)。progressTargets がこの合流を担う
+      const pend = progressTargets(cur);
+      const tombs = loadTombs().works;
+      if (pend.length === 0 && tombs.length === 0) {
+        if (!quiet) flash("送っていない進捗はありません");
+        return true;
+      }
+      const items = pend.map(w => workToItem(w, w.seq)).concat(tombs.map(t => ({
+        id: t.id,
+        fieldId: 0,
+        workDate: "",
+        status: "planned",
+        deleted: true,
+        updatedAt: t.updatedAt,
+        by: recorder,
+        deviceId
+      })));
+      const r = await pushItems("pushWorks", items);
+      if (!r.ok) {
+        if (!quiet && r.error !== "auth") flash("進捗の送信に失敗しました" + (r.error ? "(" + r.error + ")" : ""));
+        return false;
+      }
+      // 送れたものだけ pushedAt を進める。送信中に編集された行は updatedAt が
+      // 先へ進んでいるので、次回もう一度送られる
+      //
+      // v9.15: 台帳(防除記録)は pushWorks を受けた側(GAS)が直接書くようになった
+      // (Task1)。record / report / unreport を別送りしていた専用の送信経路は
+      // 無くなったので、台帳へ届いた印(synced / reportSynced / unreportPending)は
+      // ここ(pushWorks の成功)だけを唯一のきっかけとして立てる。印の意味そのものは
+      // 変えていない(未確認: GAS側が実際に台帳へ書けたかはこの応答からは分からず、
+      // ok が返れば台帳も書けている前提で進めている)。
+      const done = new Map(pend.map(w => [w.id, w.updatedAt]));
+      setWorksRaw(load("tankmix:works", []).map(w => done.has(w.id) ? {
+        ...w,
+        pushedAt: done.get(w.id),
+        synced: true,
+        reportSynced: w.reported ? true : w.reportSynced,
+        unreportPending: false
+      } : w));
+      // 送った墓標だけを差し引く。全消しにすると、送信中に外したものの
+      // 削除が一緒に捨てられ、他端末に残り続ける(v8.78)
+      const sentIds = new Set(tombs.map(x => String(x.id)));
+      const t = loadTombs();
+      t.works = t.works.filter(x => !sentIds.has(String(x.id)));
+      save(TOMB_KEY, t);
+      if (!quiet) flash("進捗を送信しました(" + items.length + "件)");
       return true;
+    } finally {
+      pushingRef.current = false;
+      setSyncing(false);
     }
-    const items = pend.map(w => workToItem(w, w.seq)).concat(tombs.map(t => ({
-      id: t.id,
-      fieldId: 0,
-      workDate: "",
-      status: "planned",
-      deleted: true,
-      updatedAt: t.updatedAt,
-      by: recorder,
-      deviceId
-    })));
-    const r = await pushItems("pushWorks", items);
-    if (!r.ok) {
-      if (!quiet && r.error !== "auth") flash("進捗の送信に失敗しました" + (r.error ? "(" + r.error + ")" : ""));
-      return false;
-    }
-    // 送れたものだけ pushedAt を進める。送信中に編集された行は updatedAt が
-    // 先へ進んでいるので、次回もう一度送られる
-    //
-    // v9.15: 台帳(防除記録)は pushWorks を受けた側(GAS)が直接書くようになった
-    // (Task1)。record / report / unreport を別送りしていた専用の送信経路は
-    // 無くなったので、台帳へ届いた印(synced / reportSynced / unreportPending)は
-    // ここ(pushWorks の成功)だけを唯一のきっかけとして立てる。印の意味そのものは
-    // 変えていない(未確認: GAS側が実際に台帳へ書けたかはこの応答からは分からず、
-    // ok が返れば台帳も書けている前提で進めている)。
-    const done = new Map(pend.map(w => [w.id, w.updatedAt]));
-    setWorksRaw(load("tankmix:works", []).map(w => done.has(w.id) ? {
-      ...w,
-      pushedAt: done.get(w.id),
-      synced: true,
-      reportSynced: w.reported ? true : w.reportSynced,
-      unreportPending: false
-    } : w));
-    // 送った墓標だけを差し引く。全消しにすると、送信中に外したものの
-    // 削除が一緒に捨てられ、他端末に残り続ける(v8.78)
-    const sentIds = new Set(tombs.map(x => String(x.id)));
-    const t = loadTombs();
-    t.works = t.works.filter(x => !sentIds.has(String(x.id)));
-    save(TOMB_KEY, t);
-    if (!quiet) flash("進捗を送信しました(" + items.length + "件)");
-    return true;
   };
 
   // ── 圃場マスタを送る ──
@@ -3244,22 +3315,25 @@ function App() {
     });
     return warnings.sort((a, b) => b.count - a.count);
   }, [works, fields, chemMaster, seasonStart]);
-  const isPending = w => !w.synced || w.reported && !w.reportSynced || !!w.unreportPending;
-  // 未送信の件数は「選んでいる作業日」ぶんだけを数える
+  // 未送信の件数は「選んでいる作業日」ぶんだけを数える(見出しのバッジに出す表示用)
   const pendingCount = works.filter(w => w.workDate === workDate && isPending(w)).length;
 
-  // 電波が戻ったら自動で送信を試みる(その日の未送信があるときだけ)。
+  // 電波が戻ったら自動で送信を試みる。
   // v9.15: 台帳(防除記録)は pushWorks を受けた側が直接書くようになったので、
-  // 端末が自動で送り直すのも pushProgress(進捗の送信)だけになった
+  // 端末が自動で送り直すのも pushProgress(進捗の送信)だけになった。
+  // pushProgress は「選んでいる作業日」に絞らず、たまっている未送信を
+  // 全部まとめて送る作りなので、ここの発火判定も日で絞らない
+  // (以前は workDate で絞っていたが、それだと選んでいる日以外の分しか
+  // 未送信が無いときに自動送信が発火せず、電波復帰の意味が薄れていた)
   useEffect(() => {
     const onOnline = () => {
       const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
-      const pend = load("tankmix:works", []).filter(w => w.workDate === workDate && isPending(w)).length;
-      if (shareOn && url && pend > 0) pushProgress();
+      const pend = load("tankmix:works", []).some(isPending);
+      if (shareOn && url && pend) pushProgress();
     };
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
-  }, [workDate, shareOn]);
+  }, [shareOn]);
 
   // 見た目の表示用。上の効果は「戻ったときに送る」ためのもので、
   // 役割が違うので別に持つ。
@@ -3360,7 +3434,7 @@ function App() {
       pushProgress();
     },
     style: S.headerBadge
-  }, syncing ? "送信中…" : "☁ " + dateLabel(workDate) + " 未送信 " + pendingCount + "件"))), saveFail && /*#__PURE__*/React.createElement("div", {
+  }, syncing ? "送信中…" : "☁ 進捗を送信(未送信 " + pendingCount + "件)"))), saveFail && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.warnBand,
       background: "#FDE2E2",
