@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.14";
+const APP_VERSION = "v9.15";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -790,28 +790,6 @@ const workBy = (w, recorder) => {
   if (w.fromTeam) return String(w.by || "");
   return String(w.by || recorder || "");
 };
-// 台帳(防除記録)へ送る操作を、送る順に並べる。
-//
-// 1圃場につき最大3つ。順番に意味がある。
-//   record   … 行が無ければ作る(調合の内容)
-//   unreport … 実績の取り消し
-//   report   … 実績の報告
-// 取り消しを報告より後に送ると、同じ回で「取り消し→再報告」が
-// 起きたときに取り消しが勝ち、シートだけ未実施になる。
-// record を先頭に置くのは、行が無いと report が新規行を作って
-// 調合の内容(薬剤・総量・水量)が入らない行になるため。
-//
-// mark は、その操作が成功したときに立てる印の名前。
-const buildLedgerOps = works => {
-  const ops = [];
-  (works || []).forEach(w => {
-    if (!w) return;
-    if (!w.synced) ops.push({ op: "record", id: w.id, mark: "synced" });
-    if (w.unreportPending) ops.push({ op: "unreport", id: w.id, mark: "unreportPending" });
-    if (w.reported && !w.reportSynced) ops.push({ op: "report", id: w.id, mark: "reportSynced" });
-  });
-  return ops;
-};
 // その日の実績を記録者ごとにまとめる。
 //
 // 2チームで回ったあと、どちらがどこをやったのかを見るためのもの。
@@ -1223,12 +1201,6 @@ function App() {
   const [chemDbInfo, setChemDbInfo] = useState(null);
   const [chemDbBusy, setChemDbBusy] = useState(false); // 取り込み中(ボタンの二重押し防止)
   const [chemDbProgress, setChemDbProgress] = useState(""); // 例: "3/4 パート"
-  const syncingRef = useRef(false);
-  const abortRef = useRef(false);
-  const [syncProgress, setSyncProgress] = useState({
-    done: 0,
-    total: 0
-  });
   const [areaUnitKey, setAreaUnitKeyState] = useState(() => localStorage.getItem("tankmix:areaunit") || "a");
   const [volUnitKey, setVolUnitKeyState] = useState(() => localStorage.getItem("tankmix:volunit") || "L");
   // 散布車の水タンク容量(L)。空欄にできるよう入力値は文字列のまま持ち、使う側で parseFloat する
@@ -1243,7 +1215,6 @@ function App() {
   // これが合わないとGASが記録を受け付けない(GAS側が未設定なら従来どおり通る)
   const [authKey, setAuthKeyState] = useState(() => localStorage.getItem("tankmix:authkey") || "");
   const gasUrlWarnRef = useRef(null); // 送信先URLの形の警告を、入力が止まってから出すためのタイマー
-  const authErrRef = useRef(false); // 共有パスワード違いを検出したか(後続の一般的な失敗メッセージで上書きしないため)
   const setAuthKey = v => {
     setAuthKeyState(v);
     localStorage.setItem("tankmix:authkey", v.trim());
@@ -2073,7 +2044,7 @@ function App() {
       return;
     }
     setWorksRaw(stampUpdated(withSeq(next), cur));
-    flash(updated + "圃場に実績を入れました" + (noArea > 0 ? "(面積未入力 " + noArea + "件は対象外)" : "") + "。送信は下の「☁ …の未送信 ○件を送信」から");
+    flash(updated + "圃場に実績を入れました" + (noArea > 0 ? "(面積未入力 " + noArea + "件は対象外)" : "") + "。送信は下の「☁ 進捗を送信」から");
     pushProgress({
       quiet: true
     });
@@ -2277,30 +2248,6 @@ function App() {
       quiet: true
     });
   };
-  const buildPayload = w => {
-    const f = resolveWork(w);
-    return {
-      id: w.id,
-      date: w.workDate,
-      field: f.name,
-      crop: f.crop || "",
-      areaA: f.areaA || "",
-      reportAreaA: w.reportAreaA || "",
-      totalL: w.totalL,
-      waterMl: w.waterMl,
-      memo: w.memo || "",
-      sprayedL: w.sprayedL,
-      reportDate: w.reportDate,
-      reportMemo: w.reportMemo,
-      flights: w.flights || [],
-      flightCount: (w.flights || []).length,
-      chems: w.chems.map(c => ({
-        ...c,
-        formName: formLabel(c.form),
-        useName: useLabel(c.use)
-      }))
-    };
-  };
   const post = async (body, retries = 2) => {
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
     if (!url) return null;
@@ -2322,7 +2269,6 @@ function App() {
         const j = await res.json();
         // パスワード違いは何度送っても同じなので、リトライせずその場で知らせる
         if (j && j.error === "auth") {
-          authErrRef.current = true;
           flash("共有パスワードが違います。設定タブの「共有パスワード」を確認してください");
           return j;
         }
@@ -2331,153 +2277,6 @@ function App() {
       if (attempt < retries) await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
     }
     return null;
-  };
-  const syncPending = async startFromId => {
-    // 共有オフの間は台帳への送信も止める。オフなのに一部だけ送られると
-    // 「オフにしたつもりが送られていた」になる
-    if (!shareOn) {
-      flash(notReadyMsg());
-      return;
-    }
-    const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
-    if (!url || syncingRef.current) return;
-    syncingRef.current = true;
-    abortRef.current = false;
-    authErrRef.current = false;
-    setSyncing(true);
-    let current = load("tankmix:works", []);
-    // 送信対象は「作業日で選んでいる日」の未送信ぶんだけ。
-    // 以前は全期間の未送信をまとめて送っていたため、意図しない日の記録まで一斉に送られていた。
-    const pendingList = current.filter(w => w.workDate === workDate && (!w.synced || w.reported && !w.reportSynced || w.unreportPending));
-    // 開始圃場が指定されていれば、その位置から
-    let startIdx = 0;
-    if (startFromId) {
-      const i = pendingList.findIndex(w => w.id === startFromId);
-      if (i >= 0) startIdx = i;
-    }
-    const targets = pendingList.slice(startIdx);
-    setSyncProgress({
-      done: 0,
-      total: targets.length
-    });
-    let sent = 0;
-    let failed = false;
-    let aborted = false;
-
-    // ── 送る作業を並べる ──
-    // 1圃場につき最大3つ(調合の登録 / 取り消し / 実績)。
-    // 順番はこのまま守ること。取り消しを報告より後に送ると、
-    // 同じ回で「取り消し→再報告」が起きたときに取り消しが勝つ。
-    const ops = buildLedgerOps(targets);
-    // 1回の送信に入れる件数。GAS側の PUSH_MAX(300)より小さくしてある。
-    // 小さくするほど「中止」が早く効き、失敗したときのやり直しも少ない。
-    // 大きくするほど往復が減る。170圃場なら 340件 → 7回。
-    const REC_CHUNK = 50;
-    // 台帳への実際の書き込み。成功したものだけ印を付ける
-    const markDone = o => {
-      current = current.map(x => {
-        if (x.id !== o.id) return x;
-        if (o.mark === "synced") return { ...x, synced: true };
-        if (o.mark === "unreportPending") return { ...x, unreportPending: false };
-        return { ...x, reportSynced: true };
-      });
-    };
-    const flush = () => {
-      setWorks(current);
-      save("tankmix:works", current);
-    };
-    // 進捗の表示は「圃場単位」のままにする。
-    // 送信の単位を変えただけで、利用者に見せる数を変える理由はない
-    const doneFields = () => targets.filter(w => {
-      const c = current.find(x => x.id === w.id);
-      return c && c.synced && !c.unreportPending && (!c.reported || c.reportSynced);
-    }).length;
-
-    // 古い GAS は pushRecords を知らない。そのときは1件ずつに戻す。
-    // ここを省くと、アプリだけ更新した人の台帳送信が全部止まる
-    let batchOk = true;
-    for (let i = 0; i < ops.length; i += REC_CHUNK) {
-      if (abortRef.current) { aborted = true; break; }
-      const part = ops.slice(i, i + REC_CHUNK);
-      const items = part.map(o => ({
-        op: o.op,
-        record: buildPayload(current.find(x => x.id === o.id) || targets.find(x => x.id === o.id))
-      }));
-      const j = await post({
-        type: "pushRecords",
-        // 台帳シートは記録IDだけで行を探していた。別チームが同じ日に同じ圃場を
-        // 入れると作業IDが一致して互いの行を上書きする(v8.85)
-        team: teamCode.trim(),
-        recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
-        items
-      });
-      if (j && j.error === "unknown type") { batchOk = false; break; }
-      if (!j || !j.ok || !Array.isArray(j.results)) { failed = true; break; }
-      j.results.forEach((r, k) => {
-        if (!r || !r.ok) { failed = true; return; }
-        markDone(part[k]);
-        sent++;
-      });
-      flush();
-      setSyncProgress({ done: doneFields(), total: targets.length });
-      if (failed) break;
-    }
-
-    // 古い GAS 向けの道。1圃場ずつ、従来どおりに送る
-    if (!batchOk) for (let ti = 0; ti < targets.length; ti++) {
-      if (abortRef.current) {
-        aborted = true;
-        break;
-      }
-      const w = targets[ti];
-      const one = async (op) => {
-        const cur = current.find(x => x.id === w.id);
-        const j = await post({
-          type: op,
-          team: teamCode.trim(),
-          recorder: (localStorage.getItem("tankmix:recorder") || "").trim(),
-          record: buildPayload(cur || w)
-        });
-        return !!(j && j.ok);
-      };
-      const cur0 = current.find(x => x.id === w.id) || w;
-      if (!cur0.synced) {
-        if (!(await one("record"))) { failed = true; break; }
-        markDone({ id: w.id, mark: "synced" });
-        flush();
-        sent++;
-      }
-      const cur1 = current.find(x => x.id === w.id) || w;
-      if (cur1.unreportPending) {
-        if (!(await one("unreport"))) { failed = true; break; }
-        markDone({ id: w.id, mark: "unreportPending" });
-        flush();
-        sent++;
-      }
-      const cur2 = current.find(x => x.id === w.id) || w;
-      if (cur2.reported && !cur2.reportSynced) {
-        if (!(await one("report"))) { failed = true; break; }
-        markDone({ id: w.id, mark: "reportSynced" });
-        flush();
-        sent++;
-      }
-      setSyncProgress({
-        done: ti + 1,
-        total: targets.length
-      });
-    }
-    syncingRef.current = false;
-    abortRef.current = false;
-    setSyncing(false);
-    setSyncProgress({
-      done: 0,
-      total: 0
-    });
-    // パスワード違いは post() が既に案内済み。ここで一般的な失敗文言に上書きしない
-    if (authErrRef.current) {/* 何も出さない */} else if (aborted) flash(sent + "件送信して中止しました。残りは後で送信できます");else if (sent > 0) flash(sent + "件を送信しました" + (failed ? "(一部失敗・再試行してください)" : ""));else if (failed) flash("送信に失敗しました。電波とURLを確認してください");
-  };
-  const abortSync = () => {
-    abortRef.current = true;
   };
   // ── 台帳(防除記録)を作業シートから作り直せるかの下見(提案D) ──
   //
@@ -2610,9 +2409,11 @@ function App() {
       // 古い版を返し続ける(貼った内容は反映されない)。ここで見分けられるようにする。
       const feats = j && Array.isArray(j.features) ? j.features : [];
       // 目安にする印は、その時点で一番新しい機能の名前。
-      // v8.57 で薬剤の共有(pushChems)を足したので、これが無ければ
-      // 進捗地図は動いても薬剤だけ共有されない状態になる。
-      const oldGas = j && j.ok && feats.indexOf("pushChems") < 0;
+      // v9.15 で台帳(防除記録)への書き込みを pushWorks 側(ledgerFromWorks)に
+      // 一本化し、端末からの別送り(record/report/unreport)を無くした。
+      // これが無いGASにつなぐと、台帳が誰からも書かれずに黙って止まる
+      // (端末側にはエラーが出ない)ので、ここで気づけるようにする。
+      const oldGas = j && j.ok && feats.indexOf("ledgerFromWorks") < 0;
       if (oldGas) flash("⚠ つながりましたが、動いているのは古い版のスクリプトです。Apps Scriptで「デプロイ」→「デプロイを管理」→ 鉛筆 → バージョン「新バージョン」で更新してください" + urlWarn);else if (j && j.ok && j.secured === false) flash("✅ 接続OK(ただし共有パスワード未設定：URLを知る人は誰でも記録を書き込めます)" + urlWarn);else flash((j && j.ok ? "✅ 接続OK！" : "応答が不正です。URLを確認してください") + urlWarn);
     } catch {
       flash("❌ 接続できません。URLとデプロイ設定を確認してください");
@@ -2889,10 +2690,20 @@ function App() {
     }
     // 送れたものだけ pushedAt を進める。送信中に編集された行は updatedAt が
     // 先へ進んでいるので、次回もう一度送られる
+    //
+    // v9.15: 台帳(防除記録)は pushWorks を受けた側(GAS)が直接書くようになった
+    // (Task1)。record / report / unreport を別送りしていた専用の送信経路は
+    // 無くなったので、台帳へ届いた印(synced / reportSynced / unreportPending)は
+    // ここ(pushWorks の成功)だけを唯一のきっかけとして立てる。印の意味そのものは
+    // 変えていない(未確認: GAS側が実際に台帳へ書けたかはこの応答からは分からず、
+    // ok が返れば台帳も書けている前提で進めている)。
     const done = new Map(pend.map(w => [w.id, w.updatedAt]));
     setWorksRaw(load("tankmix:works", []).map(w => done.has(w.id) ? {
       ...w,
-      pushedAt: done.get(w.id)
+      pushedAt: done.get(w.id),
+      synced: true,
+      reportSynced: w.reported ? true : w.reportSynced,
+      unreportPending: false
     } : w));
     // 送った墓標だけを差し引く。全消しにすると、送信中に外したものの
     // 削除が一緒に捨てられ、他端末に残り続ける(v8.78)
@@ -3436,15 +3247,15 @@ function App() {
   const isPending = w => !w.synced || w.reported && !w.reportSynced || !!w.unreportPending;
   // 未送信の件数は「選んでいる作業日」ぶんだけを数える
   const pendingCount = works.filter(w => w.workDate === workDate && isPending(w)).length;
-  // 他の日に残っている未送信の件数(日付を切り替えてもらうための案内に使う)
-  const pendingOtherDays = works.filter(w => w.workDate !== workDate && isPending(w)).length;
 
-  // 電波が戻ったら自動で送信を試みる(その日の未送信があるときだけ)
+  // 電波が戻ったら自動で送信を試みる(その日の未送信があるときだけ)。
+  // v9.15: 台帳(防除記録)は pushWorks を受けた側が直接書くようになったので、
+  // 端末が自動で送り直すのも pushProgress(進捗の送信)だけになった
   useEffect(() => {
     const onOnline = () => {
       const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
       const pend = load("tankmix:works", []).filter(w => w.workDate === workDate && isPending(w)).length;
-      if (shareOn && url && pend > 0) syncPending();
+      if (shareOn && url && pend > 0) pushProgress();
     };
     window.addEventListener("online", onOnline);
     return () => window.removeEventListener("online", onOnline);
@@ -3546,7 +3357,7 @@ function App() {
   }, teamCode.trim() ? "👥 " + teamCode.trim() : "👥 チーム未設定"), pendingCount > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => {
       setTab("work");
-      syncPending();
+      pushProgress();
     },
     style: S.headerBadge
   }, syncing ? "送信中…" : "☁ " + dateLabel(workDate) + " 未送信 " + pendingCount + "件"))), saveFail && /*#__PURE__*/React.createElement("div", {
@@ -3654,12 +3465,9 @@ function App() {
     submitReport,
     submitGroupReport,
     deleteWork,
-    syncPending,
+    pushProgress,
     syncing,
-    pendingOtherDays,
     exportCSV,
-    syncProgress,
-    abortSync,
     gasUrl,
     presets,
     lastMix,
@@ -4255,7 +4063,8 @@ function WorkTab(p) {
   const naviQueue = pendingDayList.filter(w => !naviSkipped.includes(w.id));
   const naviNext = naviQueue[0] || null;
   const history = p.works.filter(w => w.reported).sort((a, b) => b.id - a.id);
-  // 送信はその日ぶんだけ。日付を切り替えないと他の日の記録は送られない
+  // 未送信の件数表示は「選んでいる作業日」ぶんだけ数える。
+  // ただし送信ボタン(pushProgress)自体は日をまたいでたまっている分をまとめて送る
   const pendingWorks = dayList.filter(w => !w.synced || w.reported && !w.reportSynced);
   const pending = pendingWorks.length;
 
@@ -5005,23 +4814,22 @@ function WorkTab(p) {
     active: true
   }), /*#__PURE__*/React.createElement("section", {
     // 地図を見ながら作業を終えられるよう、送信もここに置く。
-    // 中身の進捗表示や中止は一覧側のものを使うので、ここはボタン1つだけ。
     style: {
       ...S.card,
       marginTop: 12
     },
     className: "no-print"
   }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => p.syncPending(),
+    onClick: () => p.pushProgress(),
     disabled: p.syncing || pending === 0,
     style: {
       ...S.primaryBtn,
       width: "100%",
       opacity: p.syncing || pending === 0 ? 0.4 : 1
     }
-  }, p.syncing ? "送信中…" : pending === 0 ? "☁ 送信するものはありません" : "☁ " + dateLabel(p.workDate) + "の未送信 " + pending + "件を送信"), /*#__PURE__*/React.createElement("p", {
+  }, p.syncing ? "送信中…" : pending === 0 ? "☁ 送信するものはありません" : "☁ 進捗を送信(未送信 " + pending + "件)"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "送信されるのは", dateLabel(p.workDate), "ぶんだけです。送信済みは二重登録されません")) ), recSummary.length > 0 && /*#__PURE__*/React.createElement("section", {
+  }, "台帳(防除記録)へはこの送信で直接記録されます。送信済みは二重登録されません")) ), recSummary.length > 0 && /*#__PURE__*/React.createElement("section", {
     style: {
       ...S.card,
       marginTop: 12
@@ -5468,75 +5276,21 @@ function WorkTab(p) {
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "作業終了後に送信(", dateLabel(p.workDate), "ぶん・未送信 ", pending, "件)"), p.syncing && p.syncProgress.total > 0 && /*#__PURE__*/React.createElement("div", {
-    style: S.progressBox
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "center",
-      marginBottom: 8
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontWeight: 700,
-      color: "#2b5a7a"
-    },
-    className: "num"
-  }, "送信中… ", p.syncProgress.done, " / ", p.syncProgress.total), /*#__PURE__*/React.createElement("button", {
-    onClick: p.abortSync,
-    style: S.abortBtn
-  }, "■ 送信を中止")), /*#__PURE__*/React.createElement("div", {
-    style: S.progressTrack
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.progressFill,
-      width: (p.syncProgress.total > 0 ? p.syncProgress.done / p.syncProgress.total * 100 : 0) + "%"
-    }
-  }))), !p.gasUrl && /*#__PURE__*/React.createElement("p", {
+  }, "作業終了後に進捗を送信(未送信 ", pending, "件)"), !p.gasUrl && /*#__PURE__*/React.createElement("p", {
     style: {
       ...S.memoLine,
       marginBottom: 10
     }
   }, "送信先URLが未設定です。「⚙設定」タブで設定してください。"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => p.syncPending(),
+    onClick: () => p.pushProgress(),
     disabled: p.syncing || pending === 0 || !p.gasUrl,
     style: {
       ...S.bigSendBtn,
       opacity: p.syncing || pending === 0 || !p.gasUrl ? 0.45 : 1
     }
-  }, p.syncing ? "送信中…" : !p.gasUrl ? "☁ 送信先が未設定です" : pending === 0 ? "☁ " + dateLabel(p.workDate) + "に送信するデータはありません" : "☁ " + dateLabel(p.workDate) + "の未送信 " + pending + "件を送信"), !p.syncing && pending > 0 && p.gasUrl && pendingWorks.length > 1 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      marginTop: 10
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.smallLabel
-  }, "特定の圃場から送信を再開する"), /*#__PURE__*/React.createElement("select", {
-    value: "",
-    onChange: e => {
-      if (e.target.value) p.syncPending(Number(e.target.value));
-    },
-    style: {
-      ...S.planSelect,
-      marginTop: 6,
-      marginBottom: 0
-    }
-  }, /*#__PURE__*/React.createElement("option", {
-    value: ""
-  }, "▼ この圃場から送信を開始"), pendingWorks.map(w => {
-    const f = p.resolveWork(w);
-    return /*#__PURE__*/React.createElement("option", {
-      key: w.id,
-      value: w.id
-    }, f.name, w.reported ? "(実績)" : "(調合)");
-  }))), /*#__PURE__*/React.createElement("p", {
+  }, p.syncing ? "送信中…" : !p.gasUrl ? "☁ 送信先が未設定です" : pending === 0 ? "☁ 送信するデータはありません" : "☁ 進捗を送信(未送信 " + pending + "件)"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "送信されるのは", dateLabel(p.workDate), "ぶんだけです。電波のある場所で押してください。送信済みは二重登録されません。中止した場合は、上の選択から途中の圃場を選んで再開できます。"), p.pendingOtherDays > 0 && /*#__PURE__*/React.createElement("p", {
-    style: {
-      ...S.memoLine,
-      marginTop: 8
-    }
-  }, "⚠ 他の日にも未送信が", p.pendingOtherDays, "件あります。上の「作業日」をその日に切り替えてから送信してください。")), /*#__PURE__*/React.createElement("section", {
+  }, "台帳(防除記録)へはこの送信で直接記録されます。電波のある場所で押してください。送信済みは二重登録されません。")), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     id: "print-area"
   }, /*#__PURE__*/React.createElement("div", {
@@ -9550,7 +9304,7 @@ function SettingsTab(p) {
     }
   }, "✍ 下見のとおりに作り直す(足す " + p.ledgerPlan.added + " / 直す " + p.ledgerPlan.updated + ")"), ledgerPlanBlock(p.ledgerPlan), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "「台帳の照合」は、「防除記録」シートを「作業」シートから作り直せるかを見るためのものです(読むだけで、シートは書き換えません)。食い違いが 0 のままなら、端末が台帳へ別に送る仕組みをやめられます。"), ledgerReportBlock(p.ledgerReport), /*#__PURE__*/React.createElement("p", {
+  }, "「台帳の照合」は、「防除記録」シートを「作業」シートから作り直せるかを見るためのものです(読むだけで、シートは書き換えません)。v9.15 で、端末が台帳へ別に送っていた仕組み(調合・実績・取り消しの個別送信)は既にやめてあります。台帳は進捗の送信(pushWorks)を受けたGAS側が直接書きます。ここは食い違いが出ていないかを確かめる開発用の道具として残しています。"), ledgerReportBlock(p.ledgerReport), /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "チームコードは、一緒に作業する端末で同じ文字列にします。大文字と小文字は区別されます。共有パスワードはGAS側でスクリプトプロパティ SHARED_SECRET を設定しているときだけ使います。未設定なら空欄で動きますが、その場合はURLを知っている人なら誰でも書き込めます。"), secHead("２　データ共有(圃場・薬剤)"), /*#__PURE__*/React.createElement("button", {
     onClick: p.syncShared,
@@ -9586,7 +9340,7 @@ function SettingsTab(p) {
     }
   }, "🚦 進捗を送り直す"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "実績を保存したときと、「散布済」のチェックを入れ外ししたときに自動で送られます。このボタンは圏外だったときの送り直し用です。作業タブの「📤 送信」はこれとは別で、スプレッドシートの「防除記録」に1行ずつ台帳として残します。"), secHead("４　古い方式(通常は使いません)"), /*#__PURE__*/React.createElement("button", {
+  }, "実績を保存したときと、「散布済」のチェックを入れ外ししたときに自動で送られます。このボタンは圏外だったときの送り直し用です。作業タブの「☁ 進捗を送信」も中身は同じ送信で、これを受けたGAS側がスプレッドシートの「作業」と「防除記録」の両方に書きます(別に送る必要はありません)。"), secHead("４　古い方式(通常は使いません)"), /*#__PURE__*/React.createElement("button", {
     onClick: () => setShowLegacy(v => !v),
     style: {
       ...S.smallSecondary,
@@ -9826,7 +9580,7 @@ function SettingsTab(p) {
     desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、「🧪 薬剤・プリセット」に登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。このタブはタンク1杯分を計算するための電卓です。圃場への薬剤の適用は作業タブの「この日に使用した薬剤」で行います。何度も使う組み合わせは「⭐プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます。上限は薬剤ごとに調合タブの「🧪 薬剤・プリセット」で登録でき、未登録の薬剤は既定3回です。設定タブの「農薬の使用回数」で作期の開始日を設定すると、その日以降の実績だけを数えます(作期が変わったら日付を更新するとカウントがやり直しになります)。"
   }, {
     title: "🚁 作業予定・進捗確認タブ(以下「作業タブ」)",
-    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。登録済みの圃場が一覧で出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。計算式は圃場ごとに「面積÷10×投下量」で、調合タブの「面積から計算」とまったく同じ式・同じ端数処理(0.01L単位)です。投下量の欄の下に出る「対象◯圃場 ／ 合計◯a → ◯L」は、実際に書き換わる圃場だけを、書き換わる値そのもので合計した予告なので、押した結果と必ず一致します(実績を入力済みの圃場は上書きされません)。集計バーの「合計薬液量」は、実績を入力した圃場だけ実散布量に切り替わるため、まだ実績のない状態の予定合計とは差が出ます。実績が何圃場ぶん混ざっているかは「実績 ◯/◯圃場」で分かります。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(圃場マスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ ○月○日の未送信 ○件を送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。進捗地図で圃場をタップしたときの吹き出しからも、同じナビを開けます(吹き出しの先頭にあります)。進捗地図の「🏷 札あり／🏷 札なし」で、圃場名と面積の札を消せます(全画面でも地図の右わきの🏷で切り替えられます)。札は45秒ごとの描き直しのたびに作り直され、圃場が多いとそこで画面が止まります。動きが重いと感じたら消してください(消しても圃場をタップすれば名前・面積・実績は吹き出しに出ます)。進捗地図は直近3日を見ます。今日の作業に入っていない圃場でも、直近3日のうちに散布し終えていれば「前日までに済」(青)で出るので、済んだ場所へまた向かわずに済みます。まだ済んでいない圃場は「↩ 直近3日のやり残し ◯圃場を引き継ぐ」でその日のリストに入れられます(圃場だけが入り、薬剤と投下量はその日の値を入れ直してください)。前の日の記録はそのまま残ります。進捗地図には現在地が常に青い丸で出ます(まわりの薄い円は測位の精度で、大きいときは位置がずれている可能性があります)。現在地が出ていないときは「📍 位置情報を使う」が出るので、押すと位置情報の確認が出ます(すでに拒否している場合はブラウザが確認を出さないため、「⚠ 位置情報が拒否されています」と出て端末の設定から戻す案内になります)。地図が現在地を追いかけて動くことはないので、「📍 現在地」を押したときだけ寄ります。「⛶ 地図を全画面で見る」にすると上のツールバーは隠れますが、地図の右わきに小さなボタンが縦に4つ出ます(✕ 全画面をやめる ／ 📍 現在地 ／ ⊙ 今日の圃場 ／ 🏷 札の出し入れ)。位置情報は地図に出すためだけに使い、スプレッドシートにも他の端末にも送信しません。進捗地図を閉じると測位も止まります。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
+    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。登録済みの圃場が一覧で出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。計算式は圃場ごとに「面積÷10×投下量」で、調合タブの「面積から計算」とまったく同じ式・同じ端数処理(0.01L単位)です。投下量の欄の下に出る「対象◯圃場 ／ 合計◯a → ◯L」は、実際に書き換わる圃場だけを、書き換わる値そのもので合計した予告なので、押した結果と必ず一致します(実績を入力済みの圃場は上書きされません)。集計バーの「合計薬液量」は、実績を入力した圃場だけ実散布量に切り替わるため、まだ実績のない状態の予定合計とは差が出ます。実績が何圃場ぶん混ざっているかは「実績 ◯/◯圃場」で分かります。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(圃場マスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 進捗を送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。進捗地図で圃場をタップしたときの吹き出しからも、同じナビを開けます(吹き出しの先頭にあります)。進捗地図の「🏷 札あり／🏷 札なし」で、圃場名と面積の札を消せます(全画面でも地図の右わきの🏷で切り替えられます)。札は45秒ごとの描き直しのたびに作り直され、圃場が多いとそこで画面が止まります。動きが重いと感じたら消してください(消しても圃場をタップすれば名前・面積・実績は吹き出しに出ます)。進捗地図は直近3日を見ます。今日の作業に入っていない圃場でも、直近3日のうちに散布し終えていれば「前日までに済」(青)で出るので、済んだ場所へまた向かわずに済みます。まだ済んでいない圃場は「↩ 直近3日のやり残し ◯圃場を引き継ぐ」でその日のリストに入れられます(圃場だけが入り、薬剤と投下量はその日の値を入れ直してください)。前の日の記録はそのまま残ります。進捗地図には現在地が常に青い丸で出ます(まわりの薄い円は測位の精度で、大きいときは位置がずれている可能性があります)。現在地が出ていないときは「📍 位置情報を使う」が出るので、押すと位置情報の確認が出ます(すでに拒否している場合はブラウザが確認を出さないため、「⚠ 位置情報が拒否されています」と出て端末の設定から戻す案内になります)。地図が現在地を追いかけて動くことはないので、「📍 現在地」を押したときだけ寄ります。「⛶ 地図を全画面で見る」にすると上のツールバーは隠れますが、地図の右わきに小さなボタンが縦に4つ出ます(✕ 全画面をやめる ／ 📍 現在地 ／ ⊙ 今日の圃場 ／ 🏷 札の出し入れ)。位置情報は地図に出すためだけに使い、スプレッドシートにも他の端末にも送信しません。進捗地図を閉じると測位も止まります。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
   }, {
     title: "🗺 圃場登録・圃場一覧タブ(以下「地図タブ」)",
     desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。作図パネルの「頂点を追加」をOFFにすると、地図をタップしても頂点が増えません。形を整えている最中に地図を触って離れた場所に点ができるのを防げます(登録済みの圃場をタップして編集を始めたときは最初からOFFです)。頂点を消すときは「🗑 頂点を消す」をONにしてから頂点をタップします。ONの間は全部の頂点が✕になり、タップしたものがその場で消えます(ONの間は「頂点を追加」は自動でOFFになります)。頂点と頂点の間に出る小さな丸をドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます(触れただけでは増えません。形を確かめたいときに誤って頂点が増えないようにしてあります)。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存すると圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真と国土地理院の標準地図(道路・地名)を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。「🔍 住所・地名を入力して地図を移動」に住所や地名を入れると、その場所へ地図がジャンプします(国土地理院の住所検索を使うためAPIキー不要で、無料地図・Googleマップの両方で使えます)。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。登録済みの圃場は赤い輪郭で表示されます。衛星写真は緑や茶が大半なので、赤が最も輪郭を追いやすいためです。中の作物の様子が見えるよう、塗りは薄く輪郭は濃くしてあります。拡大すると圃場名・作物名・面積の札が出ます。地図は画面の縦幅いっぱいに自動で広がるので、スクロールせずに全体を見られます。「⛶」を押すと見出しやタブバーも隠して完全な全画面になります。全画面で作図していないときは下の帯に「✏ 圃場を囲む」と「✕ 全画面」が出るので、全画面のまま次の圃場を囲めます(登録した圃場をタップすれば、全画面のまま形を直せます)。作図中は右上の「✕ 全画面をやめる」で戻ります。圃場の一覧は上の「📋 一覧」に切り替えると出ます。一覧は地区ごとに折りたためて検索もでき、見出しの「👁 表示中」を押すとその地区を地図から一時的に消せます(端末には保存されないので、アプリを開き直すと元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
@@ -9838,7 +9592,7 @@ function SettingsTab(p) {
     desc: "面積(a/ha/反/町)と薬量(L/mL/kg/g)の表示単位を切り替えられます。データは常にa・Lで保存され、表示だけ変換されます。作物マスタの管理もここで行います。「散布タンク」では散布車の水タンクの容量を設定でき、作業タブの補給の目印に使われます。送信先URL(GASのウェブアプリURL)は一度設定すれば保存されます。GASを再デプロイするときは「デプロイを管理→編集→新しいバージョン」を使うとURLが変わりません。チームコードを使って複数端末間でデータを共有できます。このガイドとバージョン履歴もここで確認できます。"
   }, {
     title: "📡 送信とバックアップ",
-    desc: "作業タブの「☁ ○月○日の未送信 ○件を送信」で、その日ぶんの記録がGoogleスプレッドシートの「防除記録」に送られます(送信は日ごとで、他の日の分は日付を切り替えないと送られません)。圏外でも記録は端末に残ります。台帳への送信は手動なので、電波が戻ってからもう一度ボタンを押してください。圃場・薬剤・その日の予定と進捗のほうは、次に何か操作したときと、設定タブの「🔁 今すぐ同期する」「🚦 進捗を送り直す」で送り直されます。送信中に「中止」を押すと途中で止められ、どの圃場から再開するか選べます。端末どうしの共有はチームコードで行い、圃場・薬剤・作業は変わったものだけが自動でやりとりされます(設定タブの「☁↑ 端末→共有へ保存」「☁↓ 共有→端末へ読込」は丸ごと上書きする古い方式で、④に畳んであります)。"
+    desc: "作業タブの「☁ 進捗を送信」を押すと、この端末にたまっている未送信の作業(圃場・薬剤・実績)がGoogleスプレッドシートに送られます。送るのは「作業日で選んでいる日」に限らず、たまっている分をまとめて送ります。台帳(防除記録)には、この送信を受けたGAS側が直接書き込みます(v9.15より前は、台帳へ別便で record/report/unreport を送っていましたが、その仕組みはやめました)。圏外でも記録は端末に残ります。送信は手動なので、電波が戻ってからもう一度ボタンを押してください(電波が戻った瞬間に自動でも送られます)。実績を保存したとき・「散布済」のチェックを入れ外ししたときも自動で送られます。設定タブの「🚦 進捗を送り直す」は同じ送信のやり直し用です。圃場・薬剤は登録・編集・削除した時点で別に自動送信され、設定タブの「🔁 今すぐ同期する」で送り直せます。端末どうしの共有はチームコードで行い、変わったものだけが自動でやりとりされます(設定タブの「☁↑ 端末→共有へ保存」「☁↓ 共有→端末へ読込」は丸ごと上書きする古い方式で、④に畳んであります)。"
   }].map((item, i) => /*#__PURE__*/React.createElement("div", {
     key: i,
     style: {
@@ -13259,17 +13013,6 @@ const S = {
     borderRadius: 13,
     cursor: "pointer"
   },
-  planSelect: {
-    width: "100%",
-    fontSize: 16,
-    fontWeight: 700,
-    padding: "13px 10px",
-    marginBottom: 12,
-    border: "2px solid #2E7D4F",
-    borderRadius: 10,
-    background: "#EDF5EE",
-    color: "#1C2B21"
-  },
   dateRow: {
     display: "flex",
     alignItems: "center",
@@ -13743,34 +13486,6 @@ const S = {
     color: "#fff",
     background: "#2E7D4F",
     border: "1.5px solid #2E7D4F"
-  },
-  progressBox: {
-    padding: "12px 14px",
-    background: "#EAF3FA",
-    border: "1.5px solid #BBD6E8",
-    borderRadius: 10,
-    marginBottom: 12
-  },
-  progressTrack: {
-    height: 10,
-    background: "#D3E4EF",
-    borderRadius: 6,
-    overflow: "hidden"
-  },
-  progressFill: {
-    height: "100%",
-    background: "#3B7EA1",
-    transition: "width 0.2s"
-  },
-  abortBtn: {
-    padding: "9px 16px",
-    fontSize: 14.5,
-    fontWeight: 800,
-    color: "#fff",
-    background: "#C74E36",
-    border: "none",
-    borderRadius: 8,
-    cursor: "pointer"
   },
   mapWrap: {
     display: "flex",

@@ -32,7 +32,7 @@ const EXPORTS = [
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "PROGRESS_STATES", "PROGRESS_RANK",
-  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "buildLedgerOps", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "FIELD_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "FIELD_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -996,59 +996,58 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("手元の作業の刻も渡す", src.includes("atTime: w.reportAt || \"\","), true);
 }
 
-// ── 台帳へのまとめ送り(v8.98) ────────────────
-// 170圃場に実績を入れた日は、record 170回 + report 170回 を
-// 直列で往復していた。順番を崩さずに1本の列にする。
+// ── 台帳への別送をやめた(v9.15・Task2) ────────────────
+// pushWorks を受けた側(GAS)が台帳(防除記録)を直接書くようになったので
+// (Task1・ledgerFromWorks)、端末から record/report/unreport/pushRecords を
+// 別送りする経路(buildLedgerOps・syncPending)は丸ごと不要になった。
 {
-  const B = t.buildLedgerOps;
-  const W = (id, o) => Object.assign({ id, synced: false, reported: false, reportSynced: false, unreportPending: false }, o || {});
+  eq("buildLedgerOps は app.js から消えている", src.includes("buildLedgerOps"), false);
+  eq("buildLedgerOps は EXPORTS からも外してある", EXPORTS.indexOf("buildLedgerOps"), -1);
+  eq("syncPending は app.js から消えている", src.includes("syncPending"), false);
+  eq("abortSync は app.js から消えている", src.includes("abortSync"), false);
+  eq('type: "record" を送る箇所が無い', src.includes('type: "record"'), false);
+  eq('type: "report" を送る箇所が無い', src.includes('type: "report"'), false);
+  eq('type: "unreport" を送る箇所が無い', src.includes('type: "unreport"'), false);
+  eq('type: "pushRecords" を送る箇所が無い', src.includes('type: "pushRecords"'), false);
 
-  {
-    const ops = B([W(1)]);
-    eq("未送信なら調合の登録だけ", ops.map(o => o.op), ["record"]);
-    eq("成功時に立てる印", ops[0].mark, "synced");
-  }
-  {
-    const ops = B([W(1, { reported: true })]);
-    eq("未送信で実績ありなら record のあとに report",
-      ops.map(o => o.op), ["record", "report"]);
-  }
-  {
-    const ops = B([W(1, { synced: true, reported: true, unreportPending: true })]);
-    eq("取り消しは報告より先", ops.map(o => o.op), ["unreport", "report"]);
-  }
-  {
-    const ops = B([W(1, { synced: true, reported: true, reportSynced: true })]);
-    eq("送るものが無ければ空", ops.length, 0);
-  }
-  {
-    const ops = B([W(1, { synced: true, reported: true })]);
-    eq("調合済みなら報告だけ", ops.map(o => o.op), ["report"]);
-  }
-  {
-    const ops = B([W(1), W(2, { synced: true, reported: true })]);
-    eq("圃場の順は崩さない",
-      ops.map(o => o.id + ":" + o.op), ["1:record", "2:report"]);
-  }
-  {
-    eq("空の一覧でも落ちない", B([]).length, 0);
-    eq("undefined でも落ちない", B(undefined).length, 0);
-    eq("null が混ざっても飛ばす", B([null, W(1)]).length, 1);
-  }
-  // 170圃場分の往復回数。ここが C の目的
-  {
-    const many = [];
-    for (let i = 1; i <= 170; i++) many.push(W(i, { reported: true }));
-    const ops = B(many);
-    eq("170圃場の操作数", ops.length, 340);
-    eq("50件ずつなら7回の往復", Math.ceil(ops.length / 50), 7);
-  }
-  // 呼び側の配線
-  eq("まとめ送りを使う", src.includes('type: "pushRecords"'), true);
-  eq("順を作るのは buildLedgerOps", src.includes("const ops = buildLedgerOps(targets);"), true);
-  eq("古い GAS に当たったら１件ずつに戻す",
-    src.includes('if (j && j.error === "unknown type") { batchOk = false; break; }'), true);
-  eq("送る件数は GAS 側の上限より小さい", src.includes("const REC_CHUNK = 50;"), true);
+  // 未送信の印(isPending相当)の意味は変えていない。四つの旗を見たまま
+  eq("未送信の判定は synced/reported/reportSynced/unreportPending を見たまま",
+    src.includes("const isPending = w => !w.synced || w.reported && !w.reportSynced || !!w.unreportPending;"), true);
+
+  // 台帳を書く唯一の経路(pushWorks=pushProgress)が成功したときだけ、
+  // 台帳送信済みの印を立てる。旧 markDone() の代わり
+  eq("pushProgress の成功時に台帳の印(synced/reportSynced/unreportPending)を立て直す",
+    src.includes("synced: true,\n      reportSynced: w.reported ? true : w.reportSynced,\n      unreportPending: false"), true);
+
+  // 接続テストの「古いGAS」判定は、Task1で足された ledgerFromWorks を見る。
+  // pushChems のままだと、台帳を書けない古いGASを繋いでも警告が出ない
+  eq("接続テストの古いGAS判定は ledgerFromWorks を見る",
+    src.includes('feats.indexOf("ledgerFromWorks") < 0'), true);
+  eq("古いGAS判定に pushChems は使っていない",
+    src.includes('feats.indexOf("pushChems") < 0'), false);
+}
+
+// ── 送信ボタンの文言・配線(v9.15・Task2) ────────────────
+// 「台帳へ送信」ではなく「進捗を送信」。押した先も pushProgress 一本にする
+{
+  eq("作業タブの送信ボタン(地図側)は pushProgress を呼ぶ",
+    src.includes("onClick: () => p.pushProgress(),"), true);
+  eq("見出しの未送信バッジも pushProgress を呼ぶ",
+    src.includes("setTab(\"work\");\n      pushProgress();"), true);
+  eq("送信ボタンの文言が「進捗を送信」になっている",
+    (src.match(/"☁ 進捗を送信\(未送信 " \+ pending \+ "件\)"/g) || []).length, 2);
+  // 中断・途中の圃場から再開する仕組みは record/report を1件ずつ
+  // 送っていたときの機能で、pushWorks は1回のまとめ送りなので意味が無い
+  eq("「送信を中止」ボタンは無い", src.includes("送信を中止"), false);
+  eq("「特定の圃場から送信を再開する」は無い", src.includes("特定の圃場から送信を再開する"), false);
+  // 「他の日にも未送信が」の日付切り替え案内は、日をまたいで一括で送る
+  // pushProgress では意味が無いので消した。バージョン履歴の過去の記述
+  // (v8.7x台。今も昔の出来事として文中に残る)は書き換えない
+  eq("pendingOtherDays の配線が残っていない", src.includes("pendingOtherDays"), false);
+  // 使わなくなったスタイル定義も片付いているか
+  eq("abortBtn のスタイル定義も片付いている", src.includes("abortBtn:"), false);
+  eq("planSelect のスタイル定義も片付いている(この再開セレクトでしか使っていなかった)",
+    src.includes("planSelect:"), false);
 }
 
 // ── 記録者ごとの実績集計(v8.97) ──────────────
@@ -1769,6 +1768,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 const sw = nl(fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8"));
 const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];
 eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
+eq("版数は v9.15(台帳への別送をやめた版)", t.APP_VERSION, "v9.15");
 
 // ── 結果 ─────────────────────────────────────────────
 console.log("");
