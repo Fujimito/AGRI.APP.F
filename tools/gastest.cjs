@@ -1301,6 +1301,49 @@ const F2 = {
        lg.getRange(legacyRow, 13).getValue(), "散布済");
   }
 
+  // Important(v9.17 final-fix-1): チーム欄が空の古い行と、チーム一致の行が
+  // 両方あるとき、"先に見つけた行を採る"(位置優先)ではなく
+  // "チーム一致を優先する"(findRow_ と同じ優先度)でなければならない。
+  // 消した findRow_(a35131e 時点)は teams 列を全走査し、まずチーム一致を
+  // 探し切ってから、無ければ最初のチーム空行(legacy)を返していた。
+  // v9.13 でこの優先度が「先に見つけた行を採る」に化けており、
+  // チーム空行が先の行にあると、後にある本当の行(チーム一致)ではなく
+  // 空行の方が更新されて二重行が固定化する(台帳は行を消さないので
+  // 自己修復しない)。ここでは「空行が先・チーム一致が後」の並びを
+  // わざと作って再現する。
+  {
+    const dupId2 = "8001";
+    // row2: チーム欄が空の古い行(先にある)
+    lg.appendRow(["2026-08-20 09:00:00", dupId2, "2026-08-20", "田中", "北の田",
+                  "水稲", 10, 0, "", 0, 0, "", "調合済", "", "", ""]);
+    // row3: team-a の本当の行(後にある)
+    lg.appendRow(["2026-08-20 09:00:00", dupId2, "2026-08-20", "田中", "北の田",
+                  "水稲", 10, 0, "", 0, 0, 10, "散布済", "2026-08-20", "", TEAM]);
+    const blankRow = findLgRow(dupId2);          // 先に見つかる行(空行のはず)
+    const teamRow = (() => {
+      const last = lg.getLastRow();
+      for (let r = 2; r <= last; r++) {
+        if (String(lg.getRange(r, 2).getValue()) === dupId2 &&
+            String(lg.getRange(r, 16).getValue()) === TEAM) return r;
+      }
+      return -1;
+    })();
+    const beforeCount = lg.getLastRow();
+    const dupWork = post(ctx, { type: "pushWorks", team: TEAM, items: [
+      Object.assign(mk(dupId2, "2026-08-20", true, "田中", "北の田"),
+                     { sprayedL: 12, reportAreaA: 10 }),
+    ]});
+    eq("チーム一致の行だけが更新される(追加ではない)",
+       [dupWork.ledgerAdded, dupWork.ledgerUpdated], [0, 1]);
+    eq("行数は増えない(二重行が新たにできない)", lg.getLastRow(), beforeCount);
+    eq("チーム一致の行(row3)の実散布量が新しい値になる",
+       lg.getRange(teamRow, 12).getValue(), 12);
+    eq("チーム空行(row2)は書き換えられずに残る(実散布量は空のまま)",
+       lg.getRange(blankRow, 12).getValue(), "");
+    eq("チーム空行(row2)のチーム欄も空のまま(更新対象に選ばれていないので触れない)",
+       lg.getRange(blankRow, 16).getValue(), "");
+  }
+
   eq("features に ledgerFromWorks が載っている",
      (JSON.parse(ctx.doGet().getContent()).features || []).indexOf("ledgerFromWorks") >= 0, true);
 }

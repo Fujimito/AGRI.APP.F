@@ -1045,14 +1045,33 @@ function ledgerSyncWorks_(rows, team) {
   // プロトタイプ鎖を拾って壊れる(v9.13 レビューで指摘・実測)。
   // Object.create(null) で継承の無い辞書にする
   const rowOf = Object.create(null);   // 記録ID → 台帳の行番号(既存行)
+  // exactOf: その記録IDについて、既にチーム一致の行を確定させたかどうか。
+  // v9.13〜v9.16では「先に見つけた行を採る」(位置優先)になっていたが、
+  // これは消した findRow_(a35131e。teams列を全走査し、チーム一致を
+  // 優先で探し、無ければ最初のチーム空行(legacy)にフォールバックしていた)
+  // とは優先度が逆転している。位置優先だと、チーム欄が空の古い行が
+  // チーム一致の本当の行より先の行にあるとき、空行の方が更新されて
+  // しまい、本当の行は取り残されたまま台帳に二重行が固定化する
+  // (台帳は行を消さない(S3)ので自己修復しない。実測は
+  // tools/gastest.cjs の「v9.17 final-fix-1」参照)。
+  // findRow_ と同じ優先度(チーム一致が常に勝つ。同点なら位置が早い方)に戻す。
+  const exactOf = Object.create(null);
   for (var i = 0; i < ids.length; i++) {
     var id = ids[i][0];
     if (id === "" || id === null || id === undefined) continue;
     var rt = String(tms[i][0] == null ? "" : tms[i][0]);
-    // チーム欄が空の行は古い行。どのチームのものか分からないので拾う
-    // (ledgerRebuild_ と同じ扱い)
-    if (team && rt && rt !== String(team)) continue;
     var idKey = String(id);
+    if (team && rt) {
+      if (rt !== String(team)) continue;  // 他チームの行は対象外
+      // チーム一致。位置に関わらず優先する。同じ記録IDに複数のチーム
+      // 一致行があるのは想定外だが、あれば findRow_ と同じく先の行を採る
+      if (!exactOf[idKey]) { rowOf[idKey] = i + 2; exactOf[idKey] = true; }
+      continue;
+    }
+    // チーム欄が空の行は古い行。どのチームのものか分からないので拾う
+    // (ledgerRebuild_ と同じ扱い)。ただしチーム一致より優先度は低いので、
+    // 既にチーム一致の行が見つかっていれば上書きしない
+    if (exactOf[idKey]) continue;
     if (!(idKey in rowOf)) rowOf[idKey] = i + 2;  // シートの行番号
   }
   var added = 0, updated = 0;
@@ -1180,8 +1199,13 @@ function ledgerCheck_(team) {
   // bump(m,k) は m[k] = (m[k]||0)+1 なので、鍵の由来を変えるときは継承したプロパティを
   // 拾って件数が壊れないか確認すること
   const byCol = {};
-  // 台帳に行が無い作業は、状態ごとに数える。予定のまま(planned)なら
-  // 台帳に行が無いのが正しい。台帳の行は「薬剤を当てた」ときにできる
+  // 台帳に行が無い作業は、状態ごとに数える。
+  // v9.13 で仕様が変わった: pushWorks を受けた時点で ledgerSyncWorks_ が
+  // 台帳の行を作るので、いまは予定のまま(planned)でも台帳に行ができる
+  // (S1)。なので「台帳に無い」に入るのは、planned だから無くて正しい
+  // 行ではなく、v9.13 より前に作られて以降 pushWorks で触れられていない
+  // 古い作業(=まだ台帳側が追いついていない行)だと考えられる
+  // (未確認: 実データでどちらが多いかは計測していない)
   // 鍵は状態 + "・薬剤あり"/"・薬剤なし"(必ず接尾辞が付く固定パターン)。端末からは来ないので安全。
   // bump は byCol と同じ形なので、鍵の由来を変えるときは同じ確認が要る
   const onlyWorkBy = {};

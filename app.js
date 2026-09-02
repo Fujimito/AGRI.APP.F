@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.16";
+const APP_VERSION = "v9.17";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -1237,6 +1237,11 @@ function App() {
   // を消してしまっていたが、pushProgress が頻繁に呼ばれる経路になった今は
   // 再入防止が要る。旧 syncPending にあったのと同じ理由)
   const pushingRef = useRef(false);
+  // v9.17: 古いGAS(ledgerSyncWorks_を持たない、Code.gsを貼り替えていない版)へ
+  // 繋いだままpushWorksを送り続けると、台帳(防除記録)が更新されていない
+  // という警告を毎回(自動送信は1.5秒おき)出すことになり、うるさい。
+  // セッション中1回だけに絞るためのref
+  const oldGasLedgerWarnedRef = useRef(false);
   // 農薬データ(IndexedDB)の状態。null = 未取り込み、{count, savedAt} = 取り込み済み
   const [chemDbInfo, setChemDbInfo] = useState(null);
   const [chemDbBusy, setChemDbBusy] = useState(false); // 取り込み中(ボタンの二重押し防止)
@@ -2675,6 +2680,11 @@ function App() {
   // 件数で分割して送る。1回で送りきれる件数はGAS側の上限で決まる
   const pushItems = async (type, items) => {
     let sent = 0;
+    // GASの生の応答(res)も戻す。呼び出し側(pushProgress)が
+    // ledgerAdded/ledgerUpdatedの有無を見て、古いGASかどうかを
+    // 判定するのに使う(v9.17)。件数を数えるだけの用途では今まで
+    // 通り ok/sent/error だけ見ればよい
+    let res = null;
     for (let i = 0; i < items.length; i += SYNC_CHUNK) {
       const part = items.slice(i, i + SYNC_CHUNK);
       const j = await post({
@@ -2688,10 +2698,12 @@ function App() {
         error: j && j.error
       };
       sent += part.length;
+      res = j;
     }
     return {
       ok: true,
-      sent
+      sent,
+      res
     };
   };
 
@@ -2754,6 +2766,18 @@ function App() {
       if (!r.ok) {
         if (!quiet && r.error !== "auth") flash("進捗の送信に失敗しました" + (r.error ? "(" + r.error + ")" : ""));
         return false;
+      }
+      // v9.17: 台帳(防除記録)を書くのはGAS側のledgerSyncWorks_(v9.13〜)。
+      // Code.gsを貼り替えていない古いGASは作業シートしか書かず、それでも
+      // ok:trueを返すので、送信は成功したように見えて台帳だけ静かに
+      // 更新されなくなる(気づく手段は接続テストのledgerFromWorks判定しか
+      // 無く、毎回押す人はいない)。応答にledgerAddedが無ければ古いGASと
+      // 判定し、警告だけ出す。送信は止めない・synced化も変えない(挙動は
+      // 変えない)。自動送信は1.5秒おきに走るので、警告はセッション中
+      // 1回だけに絞る(oldGasLedgerWarnedRef)
+      if (r.res && !("ledgerAdded" in r.res) && !oldGasLedgerWarnedRef.current) {
+        oldGasLedgerWarnedRef.current = true;
+        flash("スプレッドシート側のスクリプト(Code.gs)が古く、防除記録(台帳)が更新されていません。作業の記録自体は「作業」シートに保存されているので失われていません。Code.gsを最新にしてから、設定タブの「台帳の作り直し」で揃え直してください。");
       }
       // 送れたものだけ pushedAt を進める。送信中に編集された行は updatedAt が
       // 先へ進んでいるので、次回もう一度送られる

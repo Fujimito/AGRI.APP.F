@@ -1152,6 +1152,50 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.includes("1つの状態で足並みを揃えるほうが"), true);
 }
 
+// ── 古いGASへ繋いだままpushWorksすると台帳が黙って更新されない(v9.17) ──
+//
+// GASがledgerSyncWorks_を持つようになった(v9.13)ので、応答には
+// ledgerAdded/ledgerUpdatedが載る。Code.gsを貼り替えていない古いGASは
+// 作業シートしか書かず、それでもok:trueを返すため、送信は成功したように
+// 見えて台帳(防除記録・法定の帳簿)だけ更新されない。気づく手段が
+// 接続テスト(ledgerFromWorks判定)しか無いのを補うため、pushProgressの
+// 応答自体でも判定して警告を出す。送信を止める・syncedを変えるなどの
+// 挙動は変えない(警告のみ)。自動送信が1.5秒おきに走るので、警告は
+// セッション中1回に絞る(oldGasLedgerWarnedRef)。
+{
+  // pushItemsはチャンクごとの応答を握りつぶしていた。pushProgress側で
+  // ledgerAddedの有無を見るには、生の応答をpushItemsの戻り値から
+  // 取り出せる必要がある
+  eq("pushItems はGASの生の応答を戻り値に含める(resフィールド)",
+    src.includes("      sent += part.length;\n      res = j;\n    }\n    return {\n      ok: true,\n      sent,\n      res\n    };"), true);
+
+  eq("oldGasLedgerWarnedRef を宣言している(セッション中1回だけに絞るref)",
+    src.includes("const oldGasLedgerWarnedRef = useRef(false);"), true);
+
+  eq("pushProgress は応答にledgerAddedが無ければ古いGASと判定する",
+    src.includes('if (r.res && !("ledgerAdded" in r.res) && !oldGasLedgerWarnedRef.current) {'), true);
+
+  eq("警告は一度出したらrefを立てて以後は出さない",
+    src.includes("oldGasLedgerWarnedRef.current = true;\n        flash("), true);
+
+  eq("警告文は台帳が更新されていないことを伝える",
+    src.includes("防除記録(台帳)が更新されていません"), true);
+  eq("警告文は作業シートには記録が残っていて失われていないと伝える",
+    src.includes("作業」シートに保存されているので失われていません"), true);
+  eq("警告文は台帳の作り直しへ誘導する",
+    src.includes("台帳の作り直し"), true);
+
+  // 送信を止めていない: 古いGAS判定の分岐が r.ok チェックの後、
+  // つまり「送信は成功」の扱いのまま追加されていることをソース順で確認する
+  const iOk = src.indexOf("if (!r.ok) {");
+  const iOld = src.indexOf('if (r.res && !("ledgerAdded" in r.res)');
+  const iDone = src.indexOf("const done = new Map(pend.map(w => [w.id, w.updatedAt]));");
+  eq("古いGAS判定は r.ok チェックのあとに来る(送信失敗パスとは別)",
+    iOk >= 0 && iOld > iOk, true);
+  eq("古いGAS判定のあとも従来通りsynced化(done)まで進む(送信を止めない)",
+    iDone > iOld, true);
+}
+
 // ── 記録者ごとの実績集計(v8.97) ──────────────
 // 2チームで回ったあと、どちらがどこをやったのかを見る。
 {
