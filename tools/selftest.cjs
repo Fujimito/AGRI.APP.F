@@ -2037,6 +2037,9 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
   // (よそにある同名文字列で通ってしまう抜け穴を塞ぐ)
   eq("件数表示はSettingsTabの中にある", settingsBody.includes("この端末で外した圃場"), true);
   eq("全部戻すボタンはSettingsTabの中にある", settingsBody.includes("すべて一覧に戻す"), true);
+  // 上のボタン文言の検査はラベルがあるだけで通ってしまい、
+  // onClick を no-op に差し替えても落ちない(空振り)。実際に処理を呼ぶことまで確認する
+  eq("全部戻すボタンはp.setExcluded([])を呼ぶ", settingsBody.includes("p.setExcluded([])"), true);
   eq("1件戻すボタンはSettingsTabの中にある", settingsBody.includes("toggleExcluded(p.excluded, [id], false)"), true);
   eq("共有から消えた表記はSettingsTabの中にある", settingsBody.includes("(共有データにありません)"), true);
   // 除外0件のときはカード自体を出さない
