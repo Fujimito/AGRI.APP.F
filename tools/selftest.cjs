@@ -1947,13 +1947,40 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
      src.includes("fields: fields.map(compactField)"), true);
   eq("cloudSave は除外後の一覧を送らない",
      src.includes("fields: fieldsShown.map(compactField)"), false);
-  // pushFieldsSync は保存済みの一覧を直接読む
-  eq("送信は保存データを直接読む",
-     src.includes('const cur = load("tankmix:fields", []);'), true);
+  // pushFieldsSync は保存済みの一覧を直接読む。
+  // 同じ1行 `const cur = load("tankmix:fields", []);` は pullSharedSync にも
+  // 出てくるため、ファイル全体を対象にした検査は pushFieldsSync 側だけが
+  // 壊れても素通りしてしまう(実測: 2870行目だけを fieldsShown に変えても
+  // 657件全件成功した)。関数の中身だけを切り出して見る。
+  // 次の宣言(chemToItem)の手前までを本体とみなす。
+  const pushFieldsSyncBody = src.slice(
+    src.indexOf("const pushFieldsSync = async opt => {"),
+    src.indexOf("const chemToItem = c => ({")
+  );
+  eq("送信は保存データを直接読む(pushFieldsSyncの中身)",
+     pushFieldsSyncBody.includes('const cur = load("tankmix:fields", []);'), true);
+  eq("pushFieldsSyncは除外後の一覧(fieldsShown)を読まない",
+     pushFieldsSyncBody.includes("fieldsShown"), false);
   // 画面へ渡すのは除外後
   eq("画面へ渡すのは除外後の一覧",
      (src.match(/fields: fieldsShown,/g) || []).length, 2);
   eq("除外リストの鍵", src.includes('"tankmix:excluded"'), true);
+  // ★S5: 除外は端末ごと。cloudSave の共有ペイロードに乗せると、次に
+  // 保存した端末の除外設定を全端末が引き継いでしまう。ここも payload
+  // 構築部分だけを切り出して見る(ファイル全体だとFinding1と同じ穴になる)。
+  const cloudSavePayloadStart = src.indexOf("const payload = JSON.stringify({");
+  const cloudSavePayloadBody = src.slice(
+    cloudSavePayloadStart,
+    // "const j = await post({" はファイル中に何箇所もあるため、開始位置より
+    // 後ろで最初に出てくるものを終端にする(先頭から探すと2536行目より前の
+    // 箇所に当たって範囲が負になり、切り出しが空文字列になっていた=検査が
+    // 常に通ってしまう。実測して気づいた)
+    src.indexOf("const j = await post({", cloudSavePayloadStart)
+  );
+  eq("cloudSaveのpayloadは除外リストを含まない(excluded)",
+     cloudSavePayloadBody.includes("excluded"), false);
+  eq("cloudSaveのpayloadは除外リストを含まない(EXCLUDED_KEY)",
+     cloudSavePayloadBody.includes("EXCLUDED_KEY"), false);
   // ★S4: 作業行の圃場名は resolveWork が引く。ここは App の中にあり
   // 生の fields を見ているので、除外しても過去の記録の表示は変わらない
   eq("作業行の圃場名は生の一覧から引く",
