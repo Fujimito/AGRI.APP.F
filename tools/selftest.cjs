@@ -2149,20 +2149,100 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
   eq("LeafletMapTabの中にlistOnly入りゲートがある", leafletBody.includes(fixedGate), true);
 
   // 「一覧へ切り替えても作図は消えない(隠すだけ)」の担保。
-  // 📋一覧 ボタンの onClick は setListOnly(true) 一発の式であって、
-  // { ... } ブロックではない。ブロックでない=その式の中に setDrawing(false) や
-  // 頂点クリアなど他の副作用を書き足す余地が無い、という構造上の担保になる。
-  // (もし将来ブロック化してリセットを足せば、この厳密一致は落ちる)
-  eq("Googleタブの一覧切替はsetListOnly(true)単体(ブロックでない)",
-     googleBody.includes("onClick: () => setListOnly(true),"), true);
-  eq("Leafletタブの一覧切替はsetListOnly(true)単体(ブロックでない)",
-     leafletBody.includes("onClick: () => setListOnly(true),"), true);
-  // 念のため、その式の中に drawing を消す・リセットする呼び出しが
-  // 併記されていないことも文字列として確認する
-  eq("Googleタブのその式にsetDrawing(false)は無い",
-     googleBody.includes("onClick: () => setListOnly(true), setDrawing"), false);
-  eq("Leafletタブのその式にsetDrawing(false)は無い",
-     leafletBody.includes("onClick: () => setListOnly(true), setDrawing"), false);
+  //
+  // 旧版はここを「📋一覧 ボタンの onClick が setListOnly(true) 単体の式で
+  // あること」の文字列一致で確認していた。しかしこれは的外れだった。
+  // 別の場所に
+  //   React.useEffect(() => { if (listOnly) setDrawing(false); }, [listOnly]);
+  // を1行足すだけで、頂点も作図フラグも一覧に切り替えた瞬間に消えてしまうが、
+  // onClick の行そのものは1文字も変わらないため、旧版の検査は素通りしてしまう
+  // (レビューで実際にこの変異を入れて全711件成功することを確認済み)。
+  //
+  // 本来の要求は「onClick の書き方」ではなく「listOnlyの値をきっかけに
+  // 作図状態を消す副作用がどこにも無いこと」なので、それを直接検査する。
+  // GoogleMapTab/LeafletMapTabの本体から React.useEffect(...)/useLayoutEffect(...)
+  // の呼び出しを総当たりで拾い、依存配列(第2引数)に listOnly が入っている
+  // ものだけを取り出し、そのコールバック本体が作図状態をリセットする関数
+  // (setDrawing/setDrawPts/resetDrawState)を呼んでいないかを見る。
+  //
+  // 文字列を単純に balanced に切り出すため、括弧の対応を自前で数える。
+  // 文字列リテラル・テンプレートリテラル・コメントの中の括弧を深さに数えない
+  // ようにスキップする(日本語コメント・JSXの文言に "(" "[" が多数出るため)。
+  const skipTrivia = (text, i) => {
+    const c = text[i];
+    if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      let j = i + 1;
+      while (j < text.length && text[j] !== quote) { if (text[j] === "\\") j++; j++; }
+      return j + 1;
+    }
+    if (c === "/" && text[i + 1] === "/") {
+      let j = i;
+      while (j < text.length && text[j] !== "\n") j++;
+      return j;
+    }
+    if (c === "/" && text[i + 1] === "*") {
+      let j = i + 2;
+      while (j < text.length && !(text[j] === "*" && text[j + 1] === "/")) j++;
+      return j + 2;
+    }
+    return -1;
+  };
+  const findMatchingParen = (text, openIdx) => {
+    let depth = 0;
+    for (let i = openIdx; i < text.length; i++) {
+      const skipTo = skipTrivia(text, i);
+      if (skipTo >= 0) { i = skipTo - 1; continue; }
+      if (text[i] === "(") depth++;
+      else if (text[i] === ")") { depth--; if (depth === 0) return i; }
+    }
+    return -1;
+  };
+  const splitTopLevelArgs = (text) => {
+    const args = [];
+    let depth = 0, cur = "";
+    for (let i = 0; i < text.length; i++) {
+      const skipTo = skipTrivia(text, i);
+      if (skipTo >= 0) { cur += text.slice(i, skipTo); i = skipTo - 1; continue; }
+      const c = text[i];
+      if ("([{".includes(c)) depth++;
+      if (")]}".includes(c)) depth--;
+      if (c === "," && depth === 0) { args.push(cur); cur = ""; continue; }
+      cur += c;
+    }
+    if (cur.trim() !== "") args.push(cur);
+    return args;
+  };
+  // body(関数本体の文字列)から useEffect/useLayoutEffect の呼び出しを
+  // すべて拾う。"React." 付き・destructuring 経由の裸の呼び出しの両方に対応する
+  const findEffectCalls = (body, fnName) => {
+    const calls = [];
+    const re = new RegExp("(?:React\\.)?\\b" + fnName + "\\s*\\(", "g");
+    let m;
+    while ((m = re.exec(body))) {
+      const openParenIdx = m.index + m[0].length - 1;
+      const closeParenIdx = findMatchingParen(body, openParenIdx);
+      if (closeParenIdx < 0) continue;
+      const argsText = body.slice(openParenIdx + 1, closeParenIdx);
+      const args = splitTopLevelArgs(argsText);
+      calls.push({ callback: args[0] || "", deps: args[1] || "" });
+      re.lastIndex = closeParenIdx + 1;
+    }
+    return calls;
+  };
+  const DRAW_RESET_CALL = /\b(setDrawing|setDrawPts|resetDrawState)\s*\(/;
+  // 「listOnlyに依存し、かつ作図状態をリセットする」effectを数える
+  const listOnlyEffectsResettingDraw = (body) => {
+    const calls = [
+      ...findEffectCalls(body, "useEffect"),
+      ...findEffectCalls(body, "useLayoutEffect"),
+    ];
+    return calls.filter(c => /\blistOnly\b/.test(c.deps) && DRAW_RESET_CALL.test(c.callback));
+  };
+  eq("Googleタブにlistonly依存で作図状態を消すeffectが無い",
+     listOnlyEffectsResettingDraw(googleBody).length, 0);
+  eq("Leafletタブにlistonly依存で作図状態を消すeffectが無い",
+     listOnlyEffectsResettingDraw(leafletBody).length, 0);
 }
 
 // ── 結果 ─────────────────────────────────────────────
