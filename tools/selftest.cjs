@@ -2014,6 +2014,48 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
      fieldMasterBody.includes("共有データと他の端末は変わりません"), true);
 }
 
+// ── 元に戻すUI(v9.20) ────────────────────────────────
+// 戻せない除外は事故ったときに詰む(S3)ので、設定タブから全部/1件ずつ
+// 戻せることを検査する。ファイル全体を対象にした素朴な includes は
+// 同じ文字列がよそにあるだけで通ってしまうため、SettingsTab の中身だけを
+// 切り出して二重に確認する(前ラウンドの欠陥を踏まえて)。
+{
+  const settingsStart = src.indexOf("function SettingsTab(p) {");
+  const settingsEnd = src.indexOf("function DrawBarFull(p) {");
+  eq("SettingsTabの開始位置が見つかる", settingsStart >= 0, true);
+  eq("SettingsTabの終端(次の関数)が見つかる", settingsEnd > settingsStart, true);
+  const settingsBody = src.slice(settingsStart, settingsEnd);
+
+  eq("設定タブに外した件数を出す", src.includes("この端末で外した圃場"), true);
+  eq("全部戻せる", src.includes("すべて一覧に戻す"), true);
+  eq("1件ずつ戻せる", src.includes("toggleExcluded(p.excluded, [id], false)"), true);
+  // 戻す対象の名前は生の fields から引く。除外後の一覧には無い
+  eq("外した圃場の名前は生の一覧から引く", src.includes("fieldsAll: fields,"), true);
+  eq("共有から消えたIDも戻せる", src.includes("(共有データにありません)"), true);
+
+  // 上の5件が SettingsTab 自身の中にあることも確認する
+  // (よそにある同名文字列で通ってしまう抜け穴を塞ぐ)
+  eq("件数表示はSettingsTabの中にある", settingsBody.includes("この端末で外した圃場"), true);
+  eq("全部戻すボタンはSettingsTabの中にある", settingsBody.includes("すべて一覧に戻す"), true);
+  eq("1件戻すボタンはSettingsTabの中にある", settingsBody.includes("toggleExcluded(p.excluded, [id], false)"), true);
+  eq("共有から消えた表記はSettingsTabの中にある", settingsBody.includes("(共有データにありません)"), true);
+  // 除外0件のときはカード自体を出さない
+  eq("除外0件のときはカードを出さない条件がある", settingsBody.includes("p.excluded && p.excluded.length > 0"), true);
+
+  // App が SettingsTab へ渡す props に fieldsAll(生の一覧)/excluded/setExcluded がある。
+  // fieldsShown ではないこと自体は上の "fieldsAll: fields," の検査が担保する
+  // (fieldsShown を渡すコードなら "fieldsAll: fields," という文字列は出ない)。
+  const appStart = src.indexOf("function App() {");
+  const settingsCallStart = src.indexOf("React.createElement(SettingsTab, {", appStart);
+  eq("Appの開始位置が見つかる", appStart >= 0, true);
+  eq("AppがSettingsTabを呼んでいる箇所が見つかる", settingsCallStart > appStart, true);
+  const settingsCallBody = src.slice(settingsCallStart, src.indexOf("})", src.indexOf("forceUpdate", settingsCallStart)) + 2);
+  eq("SettingsTabへfieldsAllを渡す", settingsCallBody.includes("fieldsAll: fields,"), true);
+  eq("SettingsTabへexcludedを渡す", settingsCallBody.includes("excluded,"), true);
+  // setExcluded はオブジェクトの最後のプロパティなので末尾カンマが無い
+  eq("SettingsTabへsetExcludedを渡す", settingsCallBody.includes("setExcluded"), true);
+}
+
 // ── 結果 ─────────────────────────────────────────────
 console.log("");
 if (fails.length === 0) {

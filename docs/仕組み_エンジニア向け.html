@@ -436,6 +436,13 @@ flowchart TD
 
   <h3>日付が化ける</h3>
   <p>スプレッドシートは <code>"2026-08-27"</code> をセルに入れた時点で <code>Date</code> と解釈する。読み戻すと <code>Date</code> オブジェクトになり、テキスト書式の列へ書き戻すと <code>"Mon Jul 13 2026 00:00:00 GMT+0900"</code> になる。<code>WORK_TEXT_COLS</code> で書式を固定しつつ、<code>ymd_()</code> が <code>Date</code>・ISO文字列・化けた文字列のどれでも <code>yyyy-MM-dd</code> に戻す。</p>
+
+  <h3>端末ごとの圃場除外は「削除」ではなく表示フィルタ(v9.19/v9.20)</h3>
+  <p><strong>なぜ削除にしなかったか。</strong>保存データ(<code>tankmix:fields</code>)から消す方式だと、次の受信で戻ってきてしまう。コードを読んで確認した挙動(実機では未確認): <code>pullSharedSync</code>(2970行目付近)は手元の <code>tankmix:fields</code> に無いIDを新規として <code>byId.set(key, itemToField(inc))</code> で入れ直す。<code>cloudLoad</code>(2563行目付近)はさらに単純で、受け取った <code>data.fields</code> をそのまま <code>setFieldsRaw(data.fields)</code> で丸ごと差し替える(2587行目)。どちらも「消した」ことを覚えていないので、保存データから削除しても次の同期で圃場が復活する。そこで <code>tankmix:excluded</code> という除外ID一覧を別に持ち、画面へ渡す一覧だけ <code>applyExclusion</code> で絞るフィルタ方式にした(<code>normalizeExcluded</code> / <code>applyExclusion</code> / <code>toggleExcluded</code>)。</p>
+  <p><strong>なぜ墓標(<code>addTomb</code>)を書かないか。</strong><code>addTomb("fields", id)</code> は <code>deleteField</code> が呼ぶもので、他の全端末とサーバーから該当圃場を消すための印。今回は「自分の端末の一覧・地図に出したくないだけ」で、共有データや他の端末の圃場を消す意図が無い。墓標を書くと、その圃場を使っている他の端末・サーバー側の記録まで失われてしまう。</p>
+  <p><strong>S2の危うさ。</strong><code>cloudSave</code> が除外後の一覧(<code>fieldsShown</code>)を送ると、この端末で外しただけのはずの圃場が共有データからも消え、他の全端末に波及する。これを防ぐため <code>cloudSave</code> は必ず生の <code>fields</code> を送るコード(<code>fields: fields.map(compactField)</code>)になっており、<code>tools/selftest.cjs</code> に「cloudSave は生の fields を送る」「cloudSave は除外後の一覧を送らない」という検査を置いて固定している。定期送信側の <code>pushFieldsSync</code> も、保存データを直接読み <code>fieldsShown</code> を読まないことを検査で固定済み。</p>
+  <p><strong>戻すUI(v9.20)。</strong>設定タブに「この端末で外した圃場」カードを追加し、<code>p.setExcluded([])</code> で全件、<code>toggleExcluded(p.excluded, [id], false)</code> で1件ずつ戻せる。名前は除外後の一覧(<code>fieldsShown</code>)には無いため、<code>App</code> から生の <code>fields</code> をそのまま <code>fieldsAll</code> として渡している。除外したあとに他の端末がその圃場自体を削除した場合、<code>fieldsAll</code> からもIDが見つからなくなる。この場合は <code>"(共有データにありません) ID:" + id</code> とだけ出し、戻すボタンは出したままにする — 出さないと、そのIDが除外リストに永久に残ってしまうため。</p>
+  <p class="sub"><strong>未確認。</strong>この節に書いた挙動はコードを読んで確認したもので、実機(スマホ実物)で「外す」「戻す」を実際に押して確かめてはいない。</p>
   </div>
 </section>
 

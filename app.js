@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.19";
+const APP_VERSION = "v9.20";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -3722,7 +3722,12 @@ function App() {
     seasonStart,
     setSeasonStart,
     eraseAllData,
-    forceUpdate
+    forceUpdate,
+    // 元に戻すUI(v9.20)。外した圃場の名前は除外後の一覧(fieldsShown)には
+    // 無いので、名前を引けるよう生の fields をそのまま渡す
+    fieldsAll: fields,
+    excluded,
+    setExcluded
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
     className: "no-print"
@@ -9589,7 +9594,48 @@ function SettingsTab(p) {
     style: S.note
   }, "※ 対になっていた「☁↑ 端末→共有へ保存」は v8.99 で外しました。全データを1つのセル(上限 45,000文字)に入れる作りで、170圃場なら1日ぶんで 96,587文字になり、押しても必ず失敗しました。共有は上の「🔁 今すぐ同期する」で行います。")), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "共有・送信される内容は、圃場名・作物・面積・圃場の位置情報(地図で囲んだ緯度経度)・地区・薬剤・作業記録・記録者名と、この端末を区別するための端末ID(初回起動時に作られる意味のない文字列で、機種や電話番号とは無関係です)です。作業者の現在地は送信しません。送信先はあなたが設定したGoogleスプレッドシートだけで、このアプリの作者を含む第三者には送信されません。"))), /*#__PURE__*/React.createElement("section", {
+  }, "共有・送信される内容は、圃場名・作物・面積・圃場の位置情報(地図で囲んだ緯度経度)・地区・薬剤・作業記録・記録者名と、この端末を区別するための端末ID(初回起動時に作られる意味のない文字列で、機種や電話番号とは無関係です)です。作業者の現在地は送信しません。送信先はあなたが設定したGoogleスプレッドシートだけで、このアプリの作者を含む第三者には送信されません。"))), p.excluded && p.excluded.length > 0 && /*#__PURE__*/React.createElement("section", {
+    style: S.card
+  }, /*#__PURE__*/React.createElement("div", {
+    style: S.cardLabel
+  }, "この端末で外した圃場(" + p.excluded.length + "件)"), /*#__PURE__*/React.createElement("p", {
+    style: S.note
+  }, "共有データには残っています。この端末の一覧と地図に出さないだけです。"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (confirm("外した" + p.excluded.length + "件をすべてこの端末の一覧へ戻しますか？")) p.setExcluded([]);
+    },
+    style: {
+      ...S.smallDanger,
+      marginTop: 10,
+      marginBottom: 4
+    }
+  }, "すべて一覧に戻す"), /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8
+    }
+  }, p.excluded.map(id => {
+    // 除外したあと他の端末がその圃場を削除した場合、生の一覧からも引けない。
+    // その場合もIDだけ出し、戻すボタンは残す(消さないと永久に残ってしまう)
+    const f = (p.fieldsAll || []).find(x => String(x.id) === id);
+    const label = f ? f.name : "(共有データにありません) ID:" + id;
+    return /*#__PURE__*/React.createElement("div", {
+      key: id,
+      style: {
+        display: "flex",
+        alignItems: "center",
+        gap: 8,
+        padding: "8px 0",
+        borderTop: "1px solid #E3E8E0"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      style: {
+        flex: 1
+      }
+    }, label), /*#__PURE__*/React.createElement("button", {
+      onClick: () => p.setExcluded(toggleExcluded(p.excluded, [id], false)),
+      style: S.smallSecondary
+    }, "戻す"));
+  }))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("農薬データ", openSec.chemdb, () => toggleSec("chemdb")), openSec.chemdb && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel
