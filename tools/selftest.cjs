@@ -33,6 +33,7 @@ const EXPORTS = [
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "pendingOf", "isPending", "progressTargets", "PROGRESS_STATES", "PROGRESS_RANK",
   "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "FIELD_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
+  "EXCLUDED_KEY", "normalizeExcluded", "applyExclusion", "toggleExcluded",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -1914,6 +1915,50 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 const sw = nl(fs.readFileSync(path.join(__dirname, "..", "sw.js"), "utf8"));
 const swVer = (sw.match(/CACHE_VERSION = "tankmix-(v[\d.]+)"/) || [])[1];
 eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
+
+// ── 端末ごとの圃場除外(v9.18) ────────────────────────
+// 除外は「削除」ではなく表示フィルタ。tankmix:fields の中身は変えない。
+// 保存データを変えないので、pull も cloudLoad も無改造で正しく動く。
+{
+  const norm = t.normalizeExcluded, apply = t.applyExclusion, tog = t.toggleExcluded;
+
+  eq("壊れた値は空配列にする", [norm(null), norm(undefined), norm("x"), norm(42)],
+     [[], [], [], []]);
+  eq("数値と文字列のIDを混ぜても同じものとして扱う", norm([1, "1", 2]), ["1", "2"]);
+  eq("並びは入れた順のまま", norm([3, 1, 2]), ["3", "1", "2"]);
+  eq("空文字とnullは捨てる", norm([1, "", null, undefined, 2]), ["1", "2"]);
+
+  const fs = [{ id: 1, name: "北" }, { id: 2, name: "南" }, { id: 3, name: "東" }];
+  eq("除外したものが落ちる", apply(fs, ["2"]).map(f => f.name), ["北", "東"]);
+  eq("空の除外なら全部出る", apply(fs, []).map(f => f.name), ["北", "南", "東"]);
+  eq("数値IDでも落ちる", apply(fs, [2]).map(f => f.name), ["北", "東"]);
+  eq("元の配列を書き換えない", (apply(fs, ["2"]), fs.length), 3);
+  eq("fields が無くても落ちない", apply(null, ["1"]), []);
+
+  eq("足す", tog([], [1, 2], true), ["1", "2"]);
+  eq("重ねて足しても増えない", tog(["1"], [1, 2], true), ["1", "2"]);
+  eq("外す", tog(["1", "2", "3"], [2], false), ["1", "3"]);
+  eq("無いものを外しても壊れない", tog(["1"], [9], false), ["1"]);
+  eq("全部外す", tog(["1", "2"], ["1", "2"], false), []);
+
+  // ★S2: 共有へ送るものは生の一覧のまま。ここが fieldsShown になると、
+  // この端末の除外が他の全端末とサーバーから圃場を消す。
+  eq("cloudSave は生の fields を送る",
+     src.includes("fields: fields.map(compactField)"), true);
+  eq("cloudSave は除外後の一覧を送らない",
+     src.includes("fields: fieldsShown.map(compactField)"), false);
+  // pushFieldsSync は保存済みの一覧を直接読む
+  eq("送信は保存データを直接読む",
+     src.includes('const cur = load("tankmix:fields", []);'), true);
+  // 画面へ渡すのは除外後
+  eq("画面へ渡すのは除外後の一覧",
+     (src.match(/fields: fieldsShown,/g) || []).length, 2);
+  eq("除外リストの鍵", src.includes('"tankmix:excluded"'), true);
+  // ★S4: 作業行の圃場名は resolveWork が引く。ここは App の中にあり
+  // 生の fields を見ているので、除外しても過去の記録の表示は変わらない
+  eq("作業行の圃場名は生の一覧から引く",
+     src.includes("const f = fields.find(x => x.id === w.fieldId);"), true);
+}
 
 // ── 結果 ─────────────────────────────────────────────
 console.log("");

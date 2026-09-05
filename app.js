@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.17";
+const APP_VERSION = "v9.18";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -531,6 +531,46 @@ const save = (key, value) => {
     if (saveFailHook) saveFailHook(full ? "端末の保存領域がいっぱいです。いま入れた内容は保存されていません。設定タブの「データ管理」で書き出してから、古い日の作業を減らしてください" : "保存に失敗しました。いま入れた内容は画面にしか残っていません");
     return false;
   }
+};
+
+// ── この端末の表示から外した圃場(v9.18) ──
+// 「削除」ではなく表示フィルタ。tankmix:fields の中身は減らさない。
+//
+// なぜ消さないか:
+//   保存データから消しても圃場は戻ってくる。pull は手元に無いIDを
+//   新規として入れ直し、cloudLoad は全件を入れ直す(どちらも実測で確認)。
+//   墓標を書けば消せるが、それは他の全端末とサーバーからも消すことになり、
+//   「この端末だけ」という要求に合わない。
+//
+// IDは数値で入っている場所と文字列で入っている場所があるので、
+// 鍵は必ず String に寄せてから比べる。
+const EXCLUDED_KEY = "tankmix:excluded";
+const normalizeExcluded = list => {
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  const seen = new Set();
+  list.forEach(v => {
+    if (v === null || v === undefined || v === "") return;
+    const k = String(v);
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push(k);
+  });
+  return out;
+};
+const applyExclusion = (fields, excluded) => {
+  const set = new Set(normalizeExcluded(excluded));
+  if (!set.size) return Array.isArray(fields) ? fields.slice() : [];
+  return (fields || []).filter(f => !set.has(String(f.id)));
+};
+const toggleExcluded = (excluded, ids, on) => {
+  const cur = normalizeExcluded(excluded);
+  const keys = normalizeExcluded(ids);
+  if (!on) {
+    const drop = new Set(keys);
+    return cur.filter(k => !drop.has(k));
+  }
+  return normalizeExcluded(cur.concat(keys));
 };
 
 // ── 端末ID ──
@@ -1180,6 +1220,16 @@ function App() {
     ratio: ""
   }]);
   const [fields, setFields] = useState(() => load("tankmix:fields", []));
+  // この端末の表示から外した圃場ID。同期しない(S5)。
+  // fields の中身は減らさないので、共有へ送るものは影響を受けない(S2)。
+  const [excluded, setExcludedState] = useState(() => normalizeExcluded(load(EXCLUDED_KEY, [])));
+  const setExcluded = next => {
+    const v = normalizeExcluded(next);
+    setExcludedState(v);
+    save(EXCLUDED_KEY, v);
+  };
+  // 画面へ渡すのはこちら。fields(生)は共有へ送る側が使う。
+  const fieldsShown = React.useMemo(() => applyExclusion(fields, excluded), [fields, excluded]);
   const [works, setWorks] = useState(() => {
     // 既に日付が化けた状態で保存されている端末を直す。
     // ここを通さないと、直した版を入れても「本日の作業が消えたまま」になる。
@@ -3543,7 +3593,7 @@ function App() {
     deletePreset
   }), tab === "work" && /*#__PURE__*/React.createElement(WorkTab, {
     works,
-    fields,
+    fields: fieldsShown,
     workDate,
     setWorkDate,
     resolveWork,
@@ -3600,7 +3650,7 @@ function App() {
     // マップIDを入れ替えたら地図を作り直す。
     // ラスターかベクターかは地図を作るときに決まり、あとから変えられない。
     key: gmapId || "raster",
-    fields,
+    fields: fieldsShown,
     addFieldWithPolygon,
     upsertField,
     // 「📋 一覧」を圃場マスタにしたため、削除と連番振り直しもここで行う
