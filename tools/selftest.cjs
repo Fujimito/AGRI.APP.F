@@ -33,7 +33,7 @@ const EXPORTS = [
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "pendingOf", "isPending", "progressTargets", "PROGRESS_STATES", "PROGRESS_RANK",
   "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "FIELD_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
-  "EXCLUDED_KEY", "normalizeExcluded", "applyExclusion", "toggleExcluded",
+  "EXCLUDED_KEY", "normalizeExcluded", "applyExclusion", "toggleExcluded", "commonNamePrefix",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -142,6 +142,11 @@ const exactEllipsoid = (p1, p2, dl) => {
 // 既存の圃場(旧半径6378137固定で計算したareaA)は、新しい計算式と
 // 緯度33度で最大0.275%しかずれない(実測)ので、measuredAreaIfOffの
 // 1%閾値には引っかからないこと
+//
+// ※ measuredAreaIfOff は現在どの画面からも呼ばれていない(実測。旧データベース
+// タブを外した際=コミット7337d0aに呼び出し元が消えた)。このテストは関数単体の
+// 計算が正しいことだけを確かめるもので、生きたUI上の警告表示を保証するもの
+// ではない(docs/仕組み_エンジニア向け.html の該当節も参照)。
 {
   const poly = sq(33, 130.7, 0.02);
   const toRad = d => d * Math.PI / 180;
@@ -2243,6 +2248,136 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
      listOnlyEffectsResettingDraw(googleBody).length, 0);
   eq("Leafletタブにlistonly依存で作図状態を消すeffectが無い",
      listOnlyEffectsResettingDraw(leafletBody).length, 0);
+}
+
+// ── 除外中の圃場を編集すると登録面積が黙って上書きされる(Finding1, v9.23) ──
+// 表示は除外後(fieldsShown)、書き込みは生(fields)が原則。GoogleMapTab・
+// LeafletMapTab の saveDraw は「形を動かしていなければ登録面積(登記簿値など)を
+// 残す」ガードのために編集対象を p.fields から探していたが、p.fields は
+// 除外後の一覧(fieldsShown)なので、除外中の圃場を編集するとガードの対象が
+// 見つからず(undefined)、黙って計算値で上書きされ、そのまま共有へ送られる
+// (除外中なので編集した本人の画面には変化が見えない)。
+//
+// ここでは実際の app.js の該当箇所を文字列として切り出し、本物のロジックを
+// 実行して確かめる(「p.fieldsAll という文字列があるか」だけの検査だと、
+// p.fieldsAll が中身のない別配列を指すよう変えられても通ってしまうため)。
+{
+  const googleStart = src.indexOf("function GoogleMapTab(p) {");
+  const leafletStart = src.indexOf("function LeafletMapTab(p) {", googleStart);
+  const leafletEnd = src.indexOf("function collapsibleHead(", leafletStart);
+  eq("GoogleMapTabの開始位置が見つかる(Finding1)", googleStart >= 0, true);
+  eq("LeafletMapTabの開始位置が見つかる(Finding1)", leafletStart > googleStart, true);
+  eq("LeafletMapTabの終端が見つかる(Finding1)", leafletEnd > leafletStart, true);
+  const googleBody = src.slice(googleStart, leafletStart);
+  const leafletBody = src.slice(leafletStart, leafletEnd);
+
+  // saveDraw 内の「編集対象を探して、形が同じなら登録面積を残す」ブロックだけを
+  // 切り出して実行する。この2行の外側にある変数(p, editingFieldId, pts, areaA)
+  // だけに依存しているので、それらをダミーで与えて実行できる。
+  const extractEditTargetSnippet = body => {
+    const startMarker = "const editTarget = editingFieldId != null ?";
+    const start = body.indexOf(startMarker);
+    if (start < 0) return null;
+    const endMarker = "areaA = editTarget.areaA;\n    }";
+    const endAt = body.indexOf(endMarker, start);
+    if (endAt < 0) return null;
+    return body.slice(start, endAt + endMarker.length);
+  };
+  const runEditTargetSnippet = (snippet, { p, editingFieldId, pts, areaA }) => {
+    const fn = new Function("p", "editingFieldId", "pts", "areaA",
+      snippet + "\nreturn areaA;");
+    return fn(p, editingFieldId, pts, areaA);
+  };
+
+  const googleSnippet = extractEditTargetSnippet(googleBody);
+  const leafletSnippet = extractEditTargetSnippet(leafletBody);
+  eq("GoogleMapTabのeditTarget切り出しが見つかる(Finding1)", !!googleSnippet, true);
+  eq("LeafletMapTabのeditTarget切り出しが見つかる(Finding1)", !!leafletSnippet, true);
+
+  // 再現条件(仕様書の手順どおり): 登録面積250a・ポリゴンpts で登録済みの
+  // 圃場が、この端末では除外されている(=p.fieldsには無い)。形を動かさずに
+  // 「保存」を押すと、計算し直した面積(243a)ではなく登録済みの250aが
+  // 残らなければならない(除外されていても、である)。
+  const pts = [[35, 135], [35.001, 135], [35.001, 135.001]];
+  const fieldsAllWithTarget = [{ id: "f1", polygon: pts, areaA: 250 }];
+  const scenario = {
+    editingFieldId: "f1",
+    pts,
+    areaA: 243, // ポリゴンから計算し直した値(囲んだ形は動かしていない)
+    p: { fields: [], fieldsAll: fieldsAllWithTarget } // 除外中なのでp.fieldsは空
+  };
+  eq("Google: 除外中の圃場を編集しても登録面積250aが残る(Finding1)",
+     runEditTargetSnippet(googleSnippet, scenario), 250);
+  eq("Leaflet: 除外中の圃場を編集しても登録面積250aが残る(Finding1)",
+     runEditTargetSnippet(leafletSnippet, scenario), 250);
+
+  // 除外されていない場合(p.fieldsにも同じ対象がいる)も、当然これまでどおり残る
+  const scenarioNotExcluded = {
+    editingFieldId: "f1",
+    pts,
+    areaA: 243,
+    p: { fields: fieldsAllWithTarget, fieldsAll: fieldsAllWithTarget }
+  };
+  eq("Google: 除外されていない圃場でも登録面積は残る(回帰確認)",
+     runEditTargetSnippet(googleSnippet, scenarioNotExcluded), 250);
+  eq("Leaflet: 除外されていない圃場でも登録面積は残る(回帰確認)",
+     runEditTargetSnippet(leafletSnippet, scenarioNotExcluded), 250);
+}
+
+// ── 除外中の地区を連番で振り直すと共有データに重複名ができる(Finding2, v9.23) ──
+// FieldMasterPanel の openRenumber は、地区の中身(g.items)を「表示中(検索・
+// 除外を反映した一覧)から組んだグループ」からもらっていた。除外中の圃場は
+// この一覧に出てこないので、連番の対象から漏れ、古い名前のまま残る。
+// renameFields は生の一覧に書き込むため、共有データ上では同じ地区に
+// 同じ名前の圃場が2件できてしまう(除外中の圃場は編集者の画面には出ない)。
+{
+  const fieldMasterStart = src.indexOf("function FieldMasterPanel(p) {");
+  const fieldMasterEnd = src.indexOf("function ChemMasterPanel(p) {");
+  eq("FieldMasterPanelの開始位置が見つかる(Finding2)", fieldMasterStart >= 0, true);
+  eq("FieldMasterPanelの終端が見つかる(Finding2)", fieldMasterEnd > fieldMasterStart, true);
+  const fieldMasterBody = src.slice(fieldMasterStart, fieldMasterEnd);
+
+  // openRenumber(と、それが使うzoneKeyOf)だけを切り出して実行する。
+  // 依存するのは p と、外から与える commonNamePrefix・setRenumber(結果を
+  // 受け取るためのダミー関数)だけ。
+  const openRenumberStart = fieldMasterBody.indexOf("const openRenumber = g => {");
+  eq("openRenumberの開始位置が見つかる(Finding2)", openRenumberStart >= 0, true);
+  // zoneKeyOf は openRenumber の直前で宣言されている前提(そうでなくても
+  // 動くよう、見つからなければ空文字列で扱う)
+  const zoneKeyOfStart = fieldMasterBody.lastIndexOf("const zoneKeyOf = f =>", openRenumberStart);
+  const snippetStart = zoneKeyOfStart >= 0 ? zoneKeyOfStart : openRenumberStart;
+  const renumberListStart = fieldMasterBody.indexOf("const renumberList = () => {", openRenumberStart);
+  eq("renumberListの開始位置が見つかる(Finding2)", renumberListStart > openRenumberStart, true);
+  const openRenumberSnippet = fieldMasterBody.slice(snippetStart, renumberListStart);
+
+  const callOpenRenumber = (p, g) => {
+    let captured = null;
+    const fn = new Function("p", "commonNamePrefix", "setRenumber",
+      openRenumberSnippet + "\nreturn openRenumber;");
+    const openRenumber = fn(p, t.commonNamePrefix, r => { captured = r; });
+    openRenumber(g);
+    return captured;
+  };
+
+  // 大津地区に甲1〜甲10。甲3・甲5・甲9はこの端末で除外中(=p.fieldsに無い)。
+  const zone = "大津";
+  const all = [];
+  for (let i = 1; i <= 10; i++) all.push({ id: "k" + i, name: "甲" + i, area: zone });
+  const excludedNames = ["甲3", "甲5", "甲9"];
+  const shown = all.filter(f => excludedNames.indexOf(f.name) < 0);
+  eq("(内訳確認)表示中は7件", shown.length, 7);
+
+  const p = { fields: shown, fieldsAll: all };
+  // g は実際の呼び出し(fieldGroups由来)と同じ形にする。items は表示中の
+  // (=除外を反映した)7件。壊れた実装(g.itemsをそのまま使う)でもクラッシュ
+  // せず「7件のまま」という誤った結果を返せるようにするため
+  const result = callOpenRenumber(p, { name: zone, items: shown });
+  eq("連番の対象に除外中の3件を含む10件が入る(Finding2)",
+     (result && result.items || []).length, 10);
+  eq("連番の対象名に除外中の甲3も入っている(Finding2)",
+     !!(result && result.items.some(f => f.name === "甲3")), true);
+  eq("連番の対象名に除外中の甲9も入っている(Finding2)",
+     !!(result && result.items.some(f => f.name === "甲9")), true);
 }
 
 // ── 結果 ─────────────────────────────────────────────

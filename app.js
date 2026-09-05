@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.22";
+const APP_VERSION = "v9.23";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -3670,6 +3670,10 @@ function App() {
     // ラスターかベクターかは地図を作るときに決まり、あとから変えられない。
     key: gmapId || "raster",
     fields: fieldsShown,
+    // 表示は除外後(fieldsShown)、書き込みは生(fields)。地図タブの中には
+    // 「編集対象を生の一覧から引き直してから書き込む」処理があるため、
+    // 除外中の圃場も含む生の一覧をここで渡しておく(Finding1, v9.23)。
+    fieldsAll: fields,
     addFieldWithPolygon,
     upsertField,
     // 「📋 一覧」を圃場マスタにしたため、削除と連番振り直しもここで行う
@@ -6625,13 +6629,21 @@ function FieldMasterPanel(p) {
   const closeEdit = () => setEditId(null);
   // 地区の中を連番で付け直す。並べ直してから振るので、
   // 丸数字と普通の数字が混ざっていても順番は崩れない。
-  const openRenumber = g => setRenumber({
-    zone: g.name,
-    items: g.items,
-    prefix: commonNamePrefix(g.items.map(f => f.name)),
-    start: "1",
-    byNumber: true
-  });
+  // ★Finding2(v9.23): 対象は g.items(表示中=除外後の一覧から組んだ地区)ではなく、
+  // 生の一覧(p.fieldsAll)からこの地区に属する圃場を拾い直す。除外は表示だけの
+  // 仕組みなので、除外中の圃場だけ振り直しから漏れると、共有データの上では
+  // 同じ地区に同じ名前の圃場が2件できてしまう(この端末では見えないまま)。
+  const zoneKeyOf = f => (f.area || "").trim() || "未分類";
+  const openRenumber = g => {
+    const items = (p.fieldsAll || p.fields).filter(f => zoneKeyOf(f) === g.name);
+    setRenumber({
+      zone: g.name,
+      items,
+      prefix: commonNamePrefix(items.map(f => f.name)),
+      start: "1",
+      byNumber: true
+    });
+  };
   const renumberList = () => {
     if (!renumber) return [];
     const items = [...renumber.items];
@@ -7954,7 +7966,12 @@ function GoogleMapTab(p) {
     // 形をまったく動かさずに保存したときは、登録されている面積をそのまま残す。
     // 計算し直すと、データベースで手入力した面積(登記簿の値など)が
     // 囲んだ形から出した値で黙って上書きされてしまう。
-    const editTarget = editingFieldId != null ? p.fields.find(x => x.id === editingFieldId) : null;
+    // ★Finding1(v9.23): ここは p.fields(除外後のfieldsShown)ではなく
+    // p.fieldsAll(生の一覧)から探す。upsertField は生の一覧に対して書き込むため、
+    // 除外中の圃場を編集したときに p.fields で探すと見つからず(undefined)、
+    // このガードが黙って外れて登録面積が計算値で上書きされ、そのまま共有へ
+    // 送られてしまう(除外中なので編集した本人の画面には変化が見えない)。
+    const editTarget = editingFieldId != null ? p.fieldsAll.find(x => x.id === editingFieldId) : null;
     if (editTarget && JSON.stringify(editTarget.polygon) === JSON.stringify(pts) && parseFloat(editTarget.areaA) > 0) {
       areaA = editTarget.areaA;
     }
@@ -8323,6 +8340,10 @@ function GoogleMapTab(p) {
   }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement(FieldMasterPanel, {
     // 一覧は圃場マスタそのもの。囲んでいない圃場も含むので p.fields を渡す
     fields: p.fields,
+    // ★Finding2(v9.23): 連番振り直し(🔢)は地区全体が対象。p.fields(除外後)
+    // だけで組むと、除外中の圃場が古い番号のまま残って共有データに重複名が
+    // できるため、生の一覧を別途渡し、除外の有無に関わらず地区全体を拾う。
+    fieldsAll: p.fieldsAll,
     upsertField: p.upsertField,
     deleteField: p.deleteField,
     renameFields: p.renameFields,
@@ -8815,7 +8836,12 @@ function LeafletMapTab(p) {
     // 形をまったく動かさずに保存したときは、登録されている面積をそのまま残す。
     // 計算し直すと、データベースで手入力した面積(登記簿の値など)が
     // 囲んだ形から出した値で黙って上書きされてしまう。
-    const editTarget = editingFieldId != null ? p.fields.find(x => x.id === editingFieldId) : null;
+    // ★Finding1(v9.23): ここは p.fields(除外後のfieldsShown)ではなく
+    // p.fieldsAll(生の一覧)から探す。upsertField は生の一覧に対して書き込むため、
+    // 除外中の圃場を編集したときに p.fields で探すと見つからず(undefined)、
+    // このガードが黙って外れて登録面積が計算値で上書きされ、そのまま共有へ
+    // 送られてしまう(除外中なので編集した本人の画面には変化が見えない)。
+    const editTarget = editingFieldId != null ? p.fieldsAll.find(x => x.id === editingFieldId) : null;
     if (editTarget && JSON.stringify(editTarget.polygon) === JSON.stringify(pts) && parseFloat(editTarget.areaA) > 0) {
       areaA = editTarget.areaA;
     }
@@ -9156,6 +9182,10 @@ function LeafletMapTab(p) {
   }, drawCrossed ? "⚠ 線の交差を直してください" : (editingFieldId != null ? "この圃場を保存(" : "この圃場を登録(") + fmt(drawArea, 2) + " a)"))), listOnly && /*#__PURE__*/React.createElement(FieldMasterPanel, {
     // 一覧は圃場マスタそのもの。囲んでいない圃場も含むので p.fields を渡す
     fields: p.fields,
+    // ★Finding2(v9.23): 連番振り直し(🔢)は地区全体が対象。p.fields(除外後)
+    // だけで組むと、除外中の圃場が古い番号のまま残って共有データに重複名が
+    // できるため、生の一覧を別途渡し、除外の有無に関わらず地区全体を拾う。
+    fieldsAll: p.fieldsAll,
     upsertField: p.upsertField,
     deleteField: p.deleteField,
     renameFields: p.renameFields,
