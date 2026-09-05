@@ -12,3 +12,7 @@ tools/_fontcache/
 
 # Python の中間ファイル
 tools/__pycache__/
+
+# superpowers スキルの作業用ディレクトリ(計画の台帳・レビュー用の差分・試作)。
+# 成果物ではないのでコミットしない。
+.superpowers/
