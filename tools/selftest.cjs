@@ -25,7 +25,7 @@ const src = nl(fs.readFileSync(APP, "utf8"));
 const EXPORTS = [
   "APP_VERSION", "escapeHtml", "fmt", "fmtL", "formLabel", "formOrder", "useLabel",
   "areaUnit", "volUnit", "dispArea", "areaSuffix", "dispVol", "volSuffix",
-  "polygonAreaA", "segIntersects", "polygonSelfIntersects", "polygonCenter",
+  "polygonAreaA", "earthRadiusAt", "measuredAreaIfOff", "segIntersects", "polygonSelfIntersects", "polygonCenter",
   "ptsMove", "ptsRemove", "ptsInsert", "drawMidpoints", "pushDrawHistory", "untwistPts",
   "DRAW_HISTORY_MAX", "naviUrl", "fieldCenter", "planTankRefills",
   "shiftDate", "dateLabel", "newChem", "agriAmountUnit", "stripTrailingZeros",
@@ -98,13 +98,65 @@ const sq = (lat, lng, d) => [[lat, lng], [lat + d, lng], [lat + d, lng + d], [la
 // 北緯35度では約82m。よって 100m x 82m = 8200平方m = 約82a になる。
 near("面積 0.0009度四方(北緯35度)は約82a", t.polygonAreaA(sq(35, 135, 0.0009)), 82.2, 0.5);
 // 赤道上では緯度・経度が同じ長さになるので、同じ度数でも面積が大きくなる
-near("面積 同じ度数でも赤道上では約100a", t.polygonAreaA(sq(0, 135, 0.0009)), 100.4, 0.5);
+// (v9.21で地球半径を緯度ごとの曲率半径にしたため期待値を実測し直した。
+//  旧値100.4は赤道半径6378137固定のときの値。実測99.70に更新)
+near("面積 同じ度数でも赤道上では約100a", t.polygonAreaA(sq(0, 135, 0.0009)), 99.70, 0.05);
 eq("面積 2点では0", t.polygonAreaA([[35, 135], [35.001, 135]]), 0);
 eq("面積 空配列では0", t.polygonAreaA([]), 0);
 eq("面積 nullでも落ちない", t.polygonAreaA(null), 0);
 const a1 = t.polygonAreaA(sq(35, 135, 0.001));
 const a2 = t.polygonAreaA(sq(35, 135, 0.002));
 near("面積 一辺2倍で約4倍", a2 / a1, 4, 0.05);
+
+// ── 地球半径:緯度ごとの曲率半径(v9.21) ─────────────────
+// 赤道半径 6378137 固定だと緯度が低いほど面積が過大になる(実測: 熊本33度で+0.275%)。
+// 緯度ごとの曲率半径(ガウス曲率半径 sqrt(M*N))にすると、WGS84楕円体の
+// 厳密面積と0.001%未満で一致する(実測)。
+eq("地球半径 緯度0は赤道半径より小さい", t.earthRadiusAt(0) < 6378137, true);
+// 緯度0でのsqrt(M*N)は極半径(WGS84長半径×√(1-e^2))に一致する。
+// 子午線曲率半径Mの値(≒6335439)そのものではない点に注意(実測して確認)。
+near("地球半径 緯度0はおよそ6356752m", t.earthRadiusAt(0), 6356752.31, 1);
+eq("地球半径 緯度90は赤道半径より大きい", t.earthRadiusAt(90) > 6378137, true);
+near("地球半径 緯度90はおよそ6399594m", t.earthRadiusAt(90), 6399593.63, 1);
+near("地球半径 緯度33はおよそ6369400m", t.earthRadiusAt(33), 6369400.45, 1);
+
+// WGS84楕円体の厳密面積(緯度p1〜p2・経度幅dl度の帯,m2)。task-4-brief.md記載の式をそのまま使う
+const exactEllipsoid = (p1, p2, dl) => {
+  const A = 6378137, E2 = 0.00669437999014, E = Math.sqrt(E2);
+  const rad = d => d * Math.PI / 180;
+  const f = phi => {
+    const s = Math.sin(rad(phi));
+    return s / (1 - E2 * s * s) + Math.log((1 + E * s) / (1 - E * s)) / (2 * E);
+  };
+  return rad(dl) * A * A * (1 - E2) / 2 * (f(p2) - f(p1));
+};
+[24, 33, 43].forEach(lat => {
+  [0.0009, 0.01].forEach(d => {
+    const areaA = t.polygonAreaA(sq(lat, 135, d));
+    const exactA = exactEllipsoid(lat, lat + d, d) / 100;
+    const errPct = Math.abs(areaA - exactA) / exactA * 100;
+    eq("面積 緯度" + lat + " 一辺" + d + "度は厳密解と0.001%未満で一致", errPct < 0.001, true);
+  });
+});
+
+// 既存の圃場(旧半径6378137固定で計算したareaA)は、新しい計算式と
+// 緯度33度で最大0.275%しかずれない(実測)ので、measuredAreaIfOffの
+// 1%閾値には引っかからないこと
+{
+  const poly = sq(33, 130.7, 0.02);
+  const toRad = d => d * Math.PI / 180;
+  let sum = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const p1 = poly[i],
+      p2 = poly[(i + 1) % poly.length];
+    sum += toRad(p2[1] - p1[1]) * (2 + Math.sin(toRad(p1[0])) + Math.sin(toRad(p2[0])));
+  }
+  const R_OLD = 6378137; // 旧実装の固定半径
+  const oldAreaA = Math.abs(sum * R_OLD * R_OLD / 2) / 100;
+  const oldField = { areaA: oldAreaA, polygon: poly };
+  eq("面積 旧半径のareaAは1%閾値に引っかからない(measuredAreaIfOff)",
+     t.measuredAreaIfOff(oldField), null);
+}
 
 // ── 自己交差(ねじれ)の判定 ───────────────────────────
 const bowtie = [[35, 135], [35.001, 135.001], [35.001, 135], [35, 135.001]];

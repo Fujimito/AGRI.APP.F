@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.20";
+const APP_VERSION = "v9.21";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -200,11 +200,30 @@ const areaSuffix = unitKey => ({
   tan: "反",
   cho: "町"
 })[unitKey] || "a";
+// ── その緯度における地球の曲率半径(ガウス曲率半径) ──
+// 赤道半径 6378137 を固定で使うと、緯度が低いほど面積が過大になる。
+// 熊本(北緯33度)で +0.275%、300a の圃場で 0.826a ぶん多く出る(実測)。
+// Google マップ自身は平均半径 6371009 を使っているが、それでも緯度33度で
+// +0.05%、緯度24度で +0.23% 残る(実測)。緯度ごとに求めれば
+// WGS84 楕円体の厳密面積と 0.001%未満で一致する(実測。tools/selftest.cjs参照)。
+const WGS84_A = 6378137; // 長半径(m)
+const WGS84_E2 = 0.00669437999014; // 第一離心率の2乗
+const earthRadiusAt = latDeg => {
+  const s = Math.sin(latDeg * Math.PI / 180);
+  const w = 1 - WGS84_E2 * s * s;
+  const N = WGS84_A / Math.sqrt(w); // 卯酉線曲率半径
+  const M = WGS84_A * (1 - WGS84_E2) / Math.pow(w, 1.5); // 子午線曲率半径
+  return Math.sqrt(M * N);
+};
 // ポリゴン(緯度経度[[lat,lng],...])の測地線面積を計算してa(アール)で返す
 const polygonAreaA = latlngs => {
   if (!Array.isArray(latlngs) || latlngs.length < 3) return 0;
-  const R = 6378137; // 地球半径(m)
   const toRad = d => d * Math.PI / 180;
+  // 半径はその圃場の緯度で決める。圃場1枚の南北の広がりでは
+  // 平均緯度で十分(一辺1kmでも厳密解と0.001%未満で一致。実測)
+  let latSum = 0;
+  for (let i = 0; i < latlngs.length; i++) latSum += latlngs[i][0];
+  const R = earthRadiusAt(latSum / latlngs.length);
   let sum = 0;
   for (let i = 0; i < latlngs.length; i++) {
     const p1 = latlngs[i];
