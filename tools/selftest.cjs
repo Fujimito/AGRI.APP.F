@@ -1987,6 +1987,33 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
      src.includes("const f = fields.find(x => x.id === w.fieldId);"), true);
 }
 
+// ── 一覧の選択と一括除外(v9.19) ────────────────────────
+// FieldTab は Leaflet 版と Google 版の2つある。片方だけ直す事故が
+// v9.10・v9.11 で実際に起きているので、2箇所あることを数える
+{
+  eq("2つの地図タブの両方から excluded を渡している",
+     (src.match(/excluded: p\.excluded,/g) || []).length, 2);
+  eq("2つの地図タブの両方から setExcluded を渡している",
+     (src.match(/setExcluded: p\.setExcluded,/g) || []).length, 2);
+
+  // FieldMasterPanel の中身だけを切り出す。ファイル全体を対象にすると、
+  // 同じ文字列が別の場所にたまたま存在するだけで検査が通ってしまう
+  // (前回のラウンドで実際に起きた欠陥)。次の関数宣言の手前までを本体とみなす。
+  const fieldMasterStart = src.indexOf("function FieldMasterPanel(p) {");
+  const fieldMasterEnd = src.indexOf("function ChemMasterPanel(p) {");
+  eq("FieldMasterPanelの開始位置が見つかる", fieldMasterStart >= 0, true);
+  eq("FieldMasterPanelの終端(次の関数)が見つかる", fieldMasterEnd > fieldMasterStart, true);
+  const fieldMasterBody = src.slice(fieldMasterStart, fieldMasterEnd);
+
+  eq("選択の状態を持っている", fieldMasterBody.includes("const [sel, setSel] = useState"), true);
+  eq("外すのは toggleExcluded を通す", fieldMasterBody.includes("toggleExcluded(p.excluded"), true);
+  // 文言。「削除」と書くと共有からも消えると誤解される
+  eq("文言は「削除」ではなく「外す」", fieldMasterBody.includes("この端末の一覧から外す"), true);
+  eq("地区ごとに外せる", fieldMasterBody.includes("この地区を端末から外す"), true);
+  eq("確認文で共有に影響しないと伝える",
+     fieldMasterBody.includes("共有データと他の端末は変わりません"), true);
+}
+
 // ── 結果 ─────────────────────────────────────────────
 console.log("");
 if (fails.length === 0) {

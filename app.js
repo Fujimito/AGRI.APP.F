@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.18";
+const APP_VERSION = "v9.19";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -3665,6 +3665,9 @@ function App() {
     gmapKey,
     gmapId,
     setTab,
+    // 端末ごとの圃場除外(v9.19)。FieldMasterPanel の一覧に渡す
+    excluded,
+    setExcluded,
     // 表示中かどうか。隠れている間は大きさを測れないので採寸を止め、
     // 戻ってきたときに測り直させる
     active: tab === "map"
@@ -6531,6 +6534,22 @@ function FieldMasterPanel(p) {
   // 手入力だと位置のない圃場が増え、進捗地図にもナビにも使えない。
   // 編集(名前・作物・面積・地区)はこれまでどおり一覧の「編集」からできる。
   const [fq, setFq] = useState("");
+  // 選択中の圃場ID(文字列)。一覧を離れたら消えてよいので保存しない
+  const [sel, setSel] = useState(() => new Set());
+  const selHas = id => sel.has(String(id));
+  const selToggle = id => setSel(s => {
+    const n = new Set(s);
+    const k = String(id);
+    if (n.has(k)) n.delete(k);else n.add(k);
+    return n;
+  });
+  // 「外す」は削除ではない。共有データも他の端末も変わらない
+  const excludeIds = ids => {
+    const list = (ids || []).map(String);
+    if (!list.length) return;
+    p.setExcluded(toggleExcluded(p.excluded, list, true));
+    setSel(new Set());
+  };
   // 圃場編集ポップアップ(編集対象のID。nullなら閉じている)
   const [editId, setEditId] = useState(null);
   const [mf, setMf] = useState({
@@ -6752,7 +6771,27 @@ function FieldMasterPanel(p) {
     }
   }), p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
-  }, "まだ圃場が登録されていません。上の「🗺 地図」に切り替えて「✏ 圃場を囲む」から登録してください。"), fieldGroups.map(g => /*#__PURE__*/React.createElement(React.Fragment, {
+  }, "まだ圃場が登録されていません。上の「🗺 地図」に切り替えて「✏ 圃場を囲む」から登録してください。"), p.setExcluded && sel.size > 0 && /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      alignItems: "center",
+      marginBottom: 10
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "num"
+  }, sel.size, "件を選択中"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSel(new Set()),
+    style: S.smallSecondary
+  }, "選択を解除"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      if (confirm(sel.size + "件をこの端末の一覧から外しますか？\n\n共有データと他の端末は変わりません。\n設定タブからいつでも戻せます。")) excludeIds(Array.from(sel));
+    },
+    style: {
+      ...S.smallDanger,
+      marginLeft: "auto"
+    }
+  }, "この端末の一覧から外す")), fieldGroups.map(g => /*#__PURE__*/React.createElement(React.Fragment, {
     key: "zone:" + g.name
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -6784,10 +6823,31 @@ function FieldMasterPanel(p) {
       padding: "4px 8px"
     },
     title: "この地区を地図に出す／隠す"
-  }, g.items.every(f => isHidden(f.id)) ? "🙈" : "👁")), isOpen(g.name) && g.items.map(f => /*#__PURE__*/React.createElement("div", {
+  }, g.items.every(f => isHidden(f.id)) ? "🙈" : "👁"), p.setExcluded && /*#__PURE__*/React.createElement("button", {
+    onClick: e => {
+      e.stopPropagation();
+      if (confirm("地区「" + g.name + "」の" + g.items.length + "件を、この端末の一覧から外しますか？\n\n共有データと他の端末は変わりません。\n設定タブからいつでも戻せます。")) excludeIds(g.items.map(f => f.id));
+    },
+    style: {
+      ...S.smallSecondary,
+      padding: "4px 8px"
+    },
+    title: "この地区を端末から外す"
+  }, "🚫")), isOpen(g.name) && g.items.map(f => /*#__PURE__*/React.createElement("div", {
     key: f.id,
     style: S.listItem
-  }, /*#__PURE__*/React.createElement("div", {
+  }, p.setExcluded && /*#__PURE__*/React.createElement("input", {
+    type: "checkbox",
+    checked: selHas(f.id),
+    onChange: () => selToggle(f.id),
+    style: {
+      width: 20,
+      height: 20,
+      marginRight: 8,
+      flexShrink: 0
+    },
+    title: "選んでまとめて外す"
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       flex: 1,
       minWidth: 0
@@ -8248,6 +8308,8 @@ function GoogleMapTab(p) {
     areaUnitKey: p.areaUnitKey,
     hidden: hidden,
     setHidden: setHidden,
+    excluded: p.excluded,
+    setExcluded: p.setExcluded,
     onFocus: f => {
       setListOnly(false);
       if (mapRef.current && f.center) {
@@ -9079,6 +9141,8 @@ function LeafletMapTab(p) {
     areaUnitKey: p.areaUnitKey,
     hidden: hidden,
     setHidden: setHidden,
+    excluded: p.excluded,
+    setExcluded: p.setExcluded,
     onFocus: f => {
       setListOnly(false);
       if (mapRef.current && f.center) mapRef.current.setView(f.center, 16);
