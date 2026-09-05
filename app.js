@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.21";
+const APP_VERSION = "v9.22";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -8192,7 +8192,7 @@ function GoogleMapTab(p) {
     saveDraw,
     crops: p.crops,
     areas: p.areas
-  }), drawing && !fullMap && /*#__PURE__*/React.createElement("div", {
+  }), drawing && !listOnly && !fullMap && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.settingsBox,
       marginTop: 12
@@ -9025,7 +9025,7 @@ function LeafletMapTab(p) {
     saveDraw,
     crops: p.crops,
     areas: p.areas
-  }), drawing && !fullMap && /*#__PURE__*/React.createElement("div", {
+  }), drawing && !listOnly && !fullMap && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.settingsBox,
       marginTop: 12

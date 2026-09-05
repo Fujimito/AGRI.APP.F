@@ -2111,6 +2111,60 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
   eq("SettingsTabへsetExcludedを渡す", settingsCallBody.includes("setExcluded"), true);
 }
 
+// ── 一覧タブで作図パネルを隠す(v9.22) ──────────────────
+// 圃場登録の 📋一覧 モードでは地図が隠れる(mapHidden = listOnly || ...)ので、
+// 「頂点N点/面積N a」「この圃場を登録」などの作図パネルが出ても操作できず
+// 面積0aのまま固まる。listOnly のときは作図パネル自体を出さないようにする。
+//
+// GoogleMapTab・LeafletMapTab の2つに全く同じゲートが並んで存在し、
+// 片方だけ直す事故が v9.10・v9.11 で実際に起きているので、ここでも
+// 「両方に効いているか」を数で確認する(前段の一覧除外の検査と同じ形)。
+{
+  const fixedGate = "drawing && !listOnly && !fullMap &&";
+  const oldGate = "drawing && !fullMap &&";
+  eq("作図パネルのゲートにlistOnlyが入っている箇所が2つある(Google/Leaflet)",
+     (src.match(/drawing && !listOnly && !fullMap &&/g) || []).length, 2);
+  // 直し忘れの旧ゲートが残っていないこと。fixedGate は oldGate を
+  // 部分文字列として含まないので、この2つの数え方は独立して意味を持つ
+  eq("listOnly抜きの旧ゲートは残っていない",
+     (src.match(/drawing && !fullMap &&/g) || []).length, 0);
+  // oldGateがfixedGateの部分文字列だと「旧ゲート0件」の検査が
+  // fixedGateの一致でも巻き添えで通ってしまう。そうなっていないことの確認
+  eq("(内訳確認)oldGateはfixedGateの部分文字列ではない",
+     fixedGate.includes(oldGate), false);
+
+  // GoogleMapTab / LeafletMapTab それぞれの本体だけを切り出して、
+  // ゲートがその関数の中にあることも確認する(よそに同名の文字列が
+  // あるだけで通ってしまう抜け穴を塞ぐ。マーカーの並び順を先に確認する)。
+  const googleStart = src.indexOf("function GoogleMapTab(p) {");
+  const leafletStart = src.indexOf("function LeafletMapTab(p) {", googleStart);
+  const leafletEnd = src.indexOf("function collapsibleHead(", leafletStart);
+  eq("GoogleMapTabの開始位置が見つかる", googleStart >= 0, true);
+  eq("LeafletMapTabの開始位置がGoogleMapTabより後にある", leafletStart > googleStart, true);
+  eq("LeafletMapTabの終端(次の関数)がLeafletMapTabの開始より後にある", leafletEnd > leafletStart, true);
+  const googleBody = src.slice(googleStart, leafletStart);
+  const leafletBody = src.slice(leafletStart, leafletEnd);
+
+  eq("GoogleMapTabの中にlistOnly入りゲートがある", googleBody.includes(fixedGate), true);
+  eq("LeafletMapTabの中にlistOnly入りゲートがある", leafletBody.includes(fixedGate), true);
+
+  // 「一覧へ切り替えても作図は消えない(隠すだけ)」の担保。
+  // 📋一覧 ボタンの onClick は setListOnly(true) 一発の式であって、
+  // { ... } ブロックではない。ブロックでない=その式の中に setDrawing(false) や
+  // 頂点クリアなど他の副作用を書き足す余地が無い、という構造上の担保になる。
+  // (もし将来ブロック化してリセットを足せば、この厳密一致は落ちる)
+  eq("Googleタブの一覧切替はsetListOnly(true)単体(ブロックでない)",
+     googleBody.includes("onClick: () => setListOnly(true),"), true);
+  eq("Leafletタブの一覧切替はsetListOnly(true)単体(ブロックでない)",
+     leafletBody.includes("onClick: () => setListOnly(true),"), true);
+  // 念のため、その式の中に drawing を消す・リセットする呼び出しが
+  // 併記されていないことも文字列として確認する
+  eq("Googleタブのその式にsetDrawing(false)は無い",
+     googleBody.includes("onClick: () => setListOnly(true), setDrawing"), false);
+  eq("Leafletタブのその式にsetDrawing(false)は無い",
+     leafletBody.includes("onClick: () => setListOnly(true), setDrawing"), false);
+}
+
 // ── 結果 ─────────────────────────────────────────────
 console.log("");
 if (fails.length === 0) {
