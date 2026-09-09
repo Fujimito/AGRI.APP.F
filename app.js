@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.23";
+const APP_VERSION = "v9.24";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -9645,9 +9645,7 @@ function SettingsTab(p) {
     style: S.note
   }, "共有・送信される内容は、圃場名・作物・面積・圃場の位置情報(地図で囲んだ緯度経度)・地区・薬剤・作業記録・記録者名と、この端末を区別するための端末ID(初回起動時に作られる意味のない文字列で、機種や電話番号とは無関係です)です。作業者の現在地は送信しません。送信先はあなたが設定したGoogleスプレッドシートだけで、このアプリの作者を含む第三者には送信されません。"))), p.excluded && p.excluded.length > 0 && /*#__PURE__*/React.createElement("section", {
     style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "この端末で外した圃場(" + p.excluded.length + "件)"), /*#__PURE__*/React.createElement("p", {
+  }, collapsibleHead("この端末で外した圃場(" + p.excluded.length + "件)", openSec.excluded, () => toggleSec("excluded")), openSec.excluded && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "共有データには残っています。この端末の一覧と地図に出さないだけです。"), /*#__PURE__*/React.createElement("button", {
     onClick: () => {
@@ -9684,7 +9682,7 @@ function SettingsTab(p) {
       onClick: () => p.setExcluded(toggleExcluded(p.excluded, [id], false)),
       style: S.smallSecondary
     }, "戻す"));
-  }))), /*#__PURE__*/React.createElement("section", {
+  })))), /*#__PURE__*/React.createElement("section", {
     style: S.card
   }, collapsibleHead("農薬データ", openSec.chemdb, () => toggleSec("chemdb")), openSec.chemdb && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.smallLabel

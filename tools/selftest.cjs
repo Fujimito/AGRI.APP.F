@@ -2102,6 +2102,21 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
   // 除外0件のときはカード自体を出さない
   eq("除外0件のときはカードを出さない条件がある", settingsBody.includes("p.excluded && p.excluded.length > 0"), true);
 
+  // 外した圃場のカードも他の設定カードと同じ開閉見出しにする(v9.24)。
+  // 見出しだけ足しても中身が常に出ていては折りたためないので、
+  // 「見出し → 開閉の判定 → 中身」の順序まで確認する
+  eq("外した圃場のカードは開閉見出しを使う",
+     settingsBody.includes('collapsibleHead("この端末で外した圃場('), true);
+  eq("外した圃場の開閉は toggleSec を通す",
+     settingsBody.includes('toggleSec("excluded")'), true);
+  {
+    const headAt = settingsBody.indexOf('collapsibleHead("この端末で外した圃場(');
+    const gateAt = settingsBody.indexOf("openSec.excluded &&", headAt);
+    const bodyAt = settingsBody.indexOf("p.setExcluded([])", headAt);
+    eq("中身は openSec.excluded で囲む", gateAt > headAt, true);
+    eq("開閉の判定は中身より前に来る", gateAt < bodyAt, true);
+  }
+
   // App が SettingsTab へ渡す props に fieldsAll(生の一覧)/excluded/setExcluded がある。
   // fieldsShown ではないこと自体は上の "fieldsAll: fields," の検査が担保する
   // (fieldsShown を渡すコードなら "fieldsAll: fields," という文字列は出ない)。
