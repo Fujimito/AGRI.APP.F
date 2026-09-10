@@ -580,8 +580,9 @@ const F2 = {
   // (record は Task3 で消した)ので、ここも pushWorks で書かせる
   post(ctx, { type: "pushWorks", team: TEAM, items: [{
     id: 9101, workDate: "2026-08-20", fieldId: 1, fieldName: "北の田",
-    status: "planned", plannedL: 10, sprayedL: 0, reportAreaA: "",
-    chemCount: 0, chemText: "", crop: "水稲", areaA: 12, chems: [],
+    status: "mixed", plannedL: 10, sprayedL: 0, reportAreaA: "",
+    chemCount: 1, chemText: "薬剤A(1000倍)", crop: "水稲", areaA: 12,
+    chems: [{ name: "薬剤A", ratio: 1000 }],
     totalL: 10, waterMl: 0, memo: "", reportMemo: "", seq: 0,
     by: "藤本", deviceId: "d1", reportedAt: "",
     updatedAt: "2026-08-20T04:00:00.000Z",
@@ -774,10 +775,13 @@ const F2 = {
   const ctx = makeContext({});
   const mk = (id, day, done, by, name) => ({
     id: id, workDate: day, fieldId: 1, fieldName: name,
-    status: done ? "done" : "planned", plannedL: 10,
+    // 予定だけ(薬剤も実績も無い)の作業は台帳に載せない規則(v9.25)。
+    // ここは作り直しの足す/直すを見る検査なので、未実施側は調合済で作る
+    status: done ? "done" : "mixed", plannedL: 10,
     sprayedL: done ? 33 : 0, reportAreaA: done ? 12 : "",
-    chemCount: 0, chemText: "", crop: "水稲", areaA: 12, chems: [],
-    totalL: 0, waterMl: 0, memo: "", reportMemo: "", seq: 0,
+    chemCount: 1, chemText: "薬剤A(1000倍)", crop: "水稲", areaA: 12,
+    chems: [{ name: "薬剤A", ratio: 1000 }],
+    totalL: 10, waterMl: 0, memo: "", reportMemo: "", seq: 0,
     by: by, deviceId: "d1",
     reportedAt: done ? day + "T04:00:00.000Z" : "",
     updatedAt: day + "T04:00:00.000Z",
@@ -814,7 +818,7 @@ const F2 = {
   eq("下見の結果", [dry.ok, dry.dryRun, dry.added, dry.updated, dry.untouched], [true, true, 2, 1, 0]);
   // 「足す 2 件」の中身が分かること(v9.09)。実施済なのか予定のままなのかで、
   // 元帳に入れてよいかの判断が変わる
-  eq("足す行の内訳", dry.addedBy, { "調合済・薬剤なし": 1, "散布済・薬剤なし": 1 });
+  eq("足す行の内訳", dry.addedBy, { "調合済・薬剤あり": 1, "散布済・薬剤あり": 1 });
   eq("直る列が分かる", dry.cols.map(c => c.col).sort(),
      ["記録者", "実散布量(L)", "報告日", "状態"].sort());
   eq("下見では行が増えていない", lg.getLastRow(), 2);
@@ -1007,10 +1011,13 @@ const F2 = {
   const ctx = makeContext({});
   const mk = (id, day, done, by, name) => ({
     id: id, workDate: day, fieldId: 5, fieldName: name,
-    status: done ? "done" : "planned", plannedL: 20,
+    // 予定だけ(薬剤も実績も無い)の作業は台帳に載せない規則(v9.25)。
+    // ここは pushWorks が台帳を書くこと自体の検査なので、未実施側は調合済で作る
+    status: done ? "done" : "mixed", plannedL: 20,
     sprayedL: done ? 18 : 0, reportAreaA: done ? 10 : "",
-    chemCount: 0, chemText: "", crop: "大豆", areaA: 10, chems: [],
-    totalL: 0, waterMl: 0, memo: "予定メモ", reportMemo: done ? "実績メモ" : "",
+    chemCount: 1, chemText: "薬剤A(1000倍)", crop: "大豆", areaA: 10,
+    chems: [{ name: "薬剤A", ratio: 1000 }],
+    totalL: 20, waterMl: 0, memo: "予定メモ", reportMemo: done ? "実績メモ" : "",
     seq: 0, by: by, deviceId: "d1",
     reportedAt: done ? day + "T04:00:00.000Z" : "",
     updatedAt: day + "T04:00:00.000Z",
@@ -1557,6 +1564,69 @@ const F2 = {
     eq("散布日 " + pid + " の背景色は文字列(継承したプロパティを拾っていない)",
        typeof bg[0][0], "string");
   });
+}
+
+// ── 25. 予定だけの作業は台帳に載せない(v9.25) ────────────────
+//
+// 実データで起きたこと: 9/6 に圃場を予定へ入れた時点で、薬剤も実績も無い
+// まま台帳に34行が書かれた。その日は撒かずに翌日へ引き継いだので、
+// 9/6 の行は「調合済・薬剤数0・実散布量空」のまま凍った。台帳は行を
+// 消さない(S3)ので自己修復しない。使う人からは「送信したのに薬剤と
+// 実散布量が反映されない」に見える(実際の反映先は 9/7 の別の行)。
+//
+// 台帳は印刷して残す元帳なので、薬剤が決まった行と実績が入った行だけを
+// 載せる。予定だけの段階は「作業」シートに残るので失われない。
+{
+  const ctx = makeContext({});
+  const base = (id, day, name) => ({
+    id: id, workDate: day, fieldId: 7, fieldName: name,
+    status: "planned", plannedL: 30, sprayedL: 0, reportAreaA: "",
+    chemCount: 0, chemText: "", crop: "水稲", areaA: 30, chems: [],
+    totalL: 0, waterMl: 0, memo: "", reportMemo: "", seq: 0,
+    by: "藤本", deviceId: "d1", reportedAt: "",
+    updatedAt: day + "T01:00:00.000Z",
+  });
+
+  // 1. 予定を入れただけでは台帳に行ができない
+  const r1 = post(ctx, { type: "pushWorks", team: TEAM, items: [base(9601, "2026-09-06", "波野")] });
+  eq("予定だけなら台帳に足さない", [r1.ok, r1.ledgerAdded, r1.ledgerUpdated], [true, 0, 0]);
+  const lg = ctx.SHEET_STATE.getSheetByName("防除記録");
+  eq("台帳は見出しだけ(行が増えていない)", lg.getLastRow(), 1);
+  // 作業シートには残る。台帳に載せないだけで、記録を捨てるわけではない
+  const wk = ctx.SHEET_STATE.getSheetByName("作業");
+  eq("作業シートには残る", wk.getLastRow(), 2);
+
+  // 2. 予定だけの作業は照合の「台帳に無い(作業にはある)」にも数えない。
+  //    数えると、直しようのない食い違いが毎回出て照合が使えなくなる
+  const c1 = post(ctx, { type: "ledgerCheck", team: TEAM });
+  eq("照合は予定だけの作業を数えない",
+     [c1.ok, c1.same, c1.differ, c1.onlyWork, c1.onlyLedger], [true, 0, 0, 0, 0]);
+
+  // 3. 作り直しでも足さない(足すと、書かない規則が作り直しで元に戻る)
+  const d1 = post(ctx, { type: "ledgerRebuild", team: TEAM, dryRun: true });
+  eq("作り直しでも足さない", [d1.ok, d1.added, d1.updated], [true, 0, 0]);
+
+  // 4. 薬剤が決まったら載る(調合済)
+  const r2 = post(ctx, { type: "pushWorks", team: TEAM, items: [
+    Object.assign(base(9601, "2026-09-06", "波野"), {
+      status: "mixed", chemCount: 1, chemText: "薬剤A(1000倍)",
+      chems: [{ name: "薬剤A", ratio: 1000 }], totalL: 30,
+      updatedAt: "2026-09-06T02:00:00.000Z" }),
+  ]});
+  eq("薬剤が決まったら台帳に足す", [r2.ledgerAdded, r2.ledgerUpdated], [1, 0]);
+  eq("台帳に1行できる", lg.getLastRow(), 2);
+  eq("状態は調合済", lg.getRange(2, 13).getValue(), "調合済");
+  eq("薬剤数が入る", lg.getRange(2, 8).getValue(), 1);
+
+  // 5. 薬剤が無いまま実績だけ入った作業も載る(薬剤を登録せずに撒く運用がある)
+  const r3 = post(ctx, { type: "pushWorks", team: TEAM, items: [
+    Object.assign(base(9602, "2026-09-06", "原野"), {
+      status: "done", sprayedL: 25, reportAreaA: 30,
+      reportedAt: "2026-09-06T05:00:00.000Z",
+      updatedAt: "2026-09-06T05:00:00.000Z" }),
+  ]});
+  eq("実績が入っていれば薬剤が無くても載せる", r3.ledgerAdded, 1);
+  eq("台帳が2行になる", lg.getLastRow(), 3);
 }
 
 // ─────────── 結果 ───────────

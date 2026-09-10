@@ -977,6 +977,27 @@ function jstStamp_(v) {
   return Utilities.formatDate(d, "Asia/Tokyo", "yyyy-MM-dd HH:mm:ss");
 }
 
+// 台帳(防除記録)に載せる行かどうか。
+//
+// 台帳は人が読んで印刷する元帳で、行を消さない(S3)。そこへ「圃場を予定に
+// 入れただけ」の作業まで書くと、撒かずに翌日へ引き継いだ日の行が
+// 「調合済・薬剤数0・実散布量空」のまま永久に残る(実測: 2026-09-06 の行が
+// 34圃場ぶん凍っていた)。使う人からは「送信したのに薬剤と実散布量が
+// 反映されない」に見える。実際には反映先が別の行(翌日ぶん)だった。
+//
+// 載せるのは、薬剤が決まった行(調合済)と実績が入った行(散布済)だけ。
+// 予定だけの段階は「作業」シートに残っており、失われない。
+//
+// ★ ledgerSyncWorks_(書き込み) / ledgerCheck_(照合) / ledgerRebuild_(作り直し)
+//   の3か所で必ず同じ判定を通すこと。1か所だけ変えると、書かないのに
+//   照合が「台帳に無い」と言い続ける、作り直しで復活する、が起きる。
+function ledgerWorthy_(r) {
+  if (String(r[5] || "") === "done") return true;   // 状態
+  if (Number(r[9]) || 0) return true;               // 薬剤数
+  if (Number(r[7]) || 0) return true;               // 実績L
+  return false;
+}
+
 function ledgerRowFromWork_(r) {
   const done = String(r[5] || "") === "done";
   // 面積は実績面積を優先する。実績が入っていなければ登録上の面積。
@@ -1084,6 +1105,7 @@ function ledgerSyncWorks_(rows, team) {
   for (var k = 0; k < rows.length; k++) {
     var r = rows[k];
     if (r[16]) continue;                 // 削除済みは台帳に足さない(S3)
+    if (!ledgerWorthy_(r)) continue;     // 予定だけの段階は載せない
     var want = ledgerRowFromWork_(r);    // S4: 照合と同じ関数を通す
     // key は r[0] を直接使わず、ledgerRowFromWork_ が正規化した後の
     // want[1] を使う。r[0] は workRow_ が safeCell_ を通した記録IDだと
@@ -1157,6 +1179,7 @@ function ledgerCheck_(team) {
       if (!r[0] && r[0] !== 0) continue;
       if (team && String(r[1]) !== String(team)) continue;
       if (r[16]) continue; // 削除済み
+      if (!ledgerWorthy_(r)) continue; // 予定だけの段階は載せない
       const row = ledgerRowFromWork_(r);
       // key は r[0] を直接使わず、ledgerSyncWorks_ と同じく
       // ledgerRowFromWork_ が正規化した後の row[1] を使う。r[0] のままだと、
@@ -1291,6 +1314,7 @@ function ledgerRebuild_(team, dryRun) {
       if (!r[0] && r[0] !== 0) continue;
       if (team && String(r[1]) !== String(team)) continue;
       if (r[16]) continue; // 削除済みは台帳に足さない(既にある行は消さない)
+      if (!ledgerWorthy_(r)) continue; // 予定だけの段階は載せない
       const id = String(r[0]);
       if (!made[id]) order.push(id);
       made[id] = ledgerRowFromWork_(r);
