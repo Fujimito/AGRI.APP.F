@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.38";
+const APP_VERSION = "v9.39";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -606,8 +606,29 @@ const newChem = () => ({
   name: "",
   form: "sc",
   use: "fungicide",
-  ratio: ""
+  ratio: "",
+  // 10aあたりの薬量(mL)。調合タブで倍率と相互に変換するためだけに持つ(v9.39)。
+  // ラベルは「8倍・10aあたり0.8L」のように、倍率と散布量の組で書かれている。
+  // 散布量を別の値に寄せると倍率も変わるので、その引き直しを手計算させない
+  mlPer10a: ""
 });
+// 倍率 ⇄ 10aあたりの薬量。どちらも「10aあたり何mLの薬剤を撒くか」を
+// 別の書き方で表しているだけ。散布量(L/10a)が決まって初めて相互に変換できる。
+//   10aあたり薬量(mL) = 散布量(L/10a) × 1000 ÷ 倍率
+//   倍率             = 散布量(L/10a) × 1000 ÷ 10aあたり薬量(mL)
+// 例: 8倍・0.8L/10a の薬剤は 10aあたり100mL。1L/10a に寄せるなら 10倍になる
+const doseFromRatio = (ratePer10a, ratio) => {
+  const rate = parseFloat(ratePer10a) || 0;
+  const r = parseFloat(ratio) || 0;
+  if (!(rate > 0) || !(r > 0)) return "";
+  return Math.round(rate * 1000 / r * 100) / 100;
+};
+const ratioFromDose = (ratePer10a, mlPer10a) => {
+  const rate = parseFloat(ratePer10a) || 0;
+  const ml = parseFloat(mlPer10a) || 0;
+  if (!(rate > 0) || !(ml > 0)) return "";
+  return Math.round(rate * 1000 / ml * 100) / 100;
+};
 const load = (key, fallback) => {
   try {
     const v = localStorage.getItem(key);
@@ -2254,10 +2275,26 @@ function App() {
   const over = totalMl > 0 && waterMl < 0;
   const ready = totalMl > 0 && calc.some(c => c.valid) && !over;
   const mixOrder = calc.filter(c => c.valid).slice().sort((a, b) => formOrder(a.form) - formOrder(b.form));
-  const update = (id, k, v) => setChems(chems.map(c => c.id === id ? {
-    ...c,
-    [k]: v
-  } : c));
+  // 倍率と10aあたり薬量は同じことの別の書き方なので、片方を直せば
+  // もう片方も出し直す(v9.39)。散布量(L/10a)が決まっているときだけ。
+  // 「面積から計算」でない(＝散布量が無い)ときは倍率だけを扱う
+  const update = (id, k, v) => setChems(chems.map(c => {
+    if (c.id !== id) return c;
+    const next = { ...c, [k]: v };
+    if (mode !== "area") return next;
+    if (k === "ratio") next.mlPer10a = doseFromRatio(ratePer10a, v);
+    if (k === "mlPer10a") next.ratio = ratioFromDose(ratePer10a, v);
+    return next;
+  }));
+  // 散布量を変えたら、10aあたり薬量の表示も出し直す。
+  // 倍率のほうを正とする(アプリの計算は倍率を使っているため)
+  useEffect(() => {
+    if (mode !== "area") return;
+    setChems(cur => cur.map(c => {
+      const ml = doseFromRatio(ratePer10a, c.ratio);
+      return String(c.mlPer10a) === String(ml) ? c : { ...c, mlPer10a: ml };
+    }));
+  }, [ratePer10a, mode]);
   const updateChemName = (id, name) => {
     // 名前の照合は正規化してから。半角カナで打った名前が全角カナで登録された
     // マスタに当たらず、剤型・種類が引き継がれない取りこぼしを防ぐ
@@ -4026,7 +4063,32 @@ function CalcTab(p) {
     className: "num"
   }), /*#__PURE__*/React.createElement("span", {
     style: S.midUnit
-  }, "倍")), /*#__PURE__*/React.createElement("div", {
+  }, "倍"),
+  // 10aあたりの薬量(v9.39)。ラベルは「8倍・10aあたり0.8L」のように
+  // 倍率と散布量の組で書かれている。散布量を別の値に寄せると倍率も
+  // 変わるので、その引き直しをここで見えるようにする。
+  // 「面積から計算」で散布量が決まっているときだけ扱える
+  p.mode === "area" && /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    step: "any",
+    placeholder: "10aあたり",
+    value: c.mlPer10a,
+    onChange: e => p.update(c.id, "mlPer10a", e.target.value),
+    disabled: !(parseFloat(p.ratePer10a) > 0),
+    title: parseFloat(p.ratePer10a) > 0
+      ? "この薬剤を10aあたり何mL撒くか。倍率と相互に出し直します"
+      : "10aあたりの散布量を入れると使えます",
+    style: {
+      ...S.ratioInput,
+      marginLeft: 8,
+      opacity: parseFloat(p.ratePer10a) > 0 ? 1 : 0.5
+    },
+    className: "num"
+  }), p.mode === "area" && /*#__PURE__*/React.createElement("span", {
+    style: S.midUnit
+  }, "mL/10a")), /*#__PURE__*/React.createElement("div", {
     style: S.chemResult,
     className: "num"
   }, c.valid && p.totalMl > 0 ? /*#__PURE__*/React.createElement("span", null, "→ ", /*#__PURE__*/React.createElement("strong", null, fmt(c.ml)), (agriAmountUnit(c.form) === "kg" ? " g" : " mL")) : /*#__PURE__*/React.createElement("span", {

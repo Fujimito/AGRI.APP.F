@@ -30,6 +30,7 @@ const EXPORTS = [
   "DRAW_HISTORY_MAX", "naviUrl", "fieldCenter",
   "shiftDate", "dateLabel", "newChem", "agriAmountUnit", "stripTrailingZeros",
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
+  "doseFromRatio", "ratioFromDose",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "pendingOf", "isPending", "progressTargets", "PROGRESS_STATES", "PROGRESS_RANK",
   "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "FIELD_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
@@ -2697,6 +2698,49 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
 
   eq("実績の保存で前回の薬液に残す",
     /const submitReport[\s\S]{0,1400}rememberMix\(validDayChems\)/.test(src), true);
+}
+
+// ── 倍率 ⇄ 10aあたりの薬量(v9.39・調合タブだけの計算) ──────────
+//
+// ラベルは「8倍・10aあたり0.8L」のように、倍率と散布量の組で書かれている。
+// 散布量を別の値に寄せると倍率も変わるので、その引き直しを手計算させない。
+// 実際にあった組み合わせ: 8倍/0.8L と 10倍/1L は、どちらも 10aあたり100mL。
+{
+  const D = t.doseFromRatio, R = t.ratioFromDose;
+  eq("8倍・0.8L/10a は 10aあたり100mL", D("0.8", "8"), 100);
+  eq("10倍・1L/10a も 10aあたり100mL", D("1", "10"), 100);
+  // 1L/10a に寄せたとき、8倍のままだと 125mL(25%過剰)になる
+  eq("寄せただけで倍率を直さないと過剰になる", D("1", "8"), 125);
+  // 100mL に直すと倍率は10倍
+  eq("薬量から倍率を出す", R("1", "100"), 10);
+  eq("0.8L/10a で100mLなら8倍", R("0.8", "100"), 8);
+  // 割り切れない値も小数2桁までで返す(画面に出す値なので丸める)
+  eq("小数2桁に丸める", D("1", "3"), 333.33);
+  // 片方でも入っていなければ空。0や空欄で割らない
+  eq("散布量が無ければ空", D("", "10"), "");
+  eq("倍率が無ければ空", D("1", ""), "");
+  eq("薬量が0なら空", R("1", "0"), "");
+  eq("散布量が0なら空", R("0", "100"), "");
+  eq("数値でない入力でも落ちない", [D("あ", "10"), R("1", "あ")], ["", ""]);
+  // 往復して元に戻る
+  eq("倍率→薬量→倍率で戻る", R("1", D("1", "10")), 10);
+}
+
+// ── 調合タブへの配線 ──
+{
+  eq("薬剤に10aあたりの薬量を持たせる", src.includes("mlPer10a: \"\""), true);
+  eq("倍率を直したら薬量も出し直す",
+    src.includes('if (k === "ratio") next.mlPer10a = doseFromRatio(ratePer10a, v);'), true);
+  eq("薬量を直したら倍率も出し直す",
+    src.includes('if (k === "mlPer10a") next.ratio = ratioFromDose(ratePer10a, v);'), true);
+  eq("散布量を変えたら薬量を出し直す",
+    /useEffect\(\(\) => \{[\s\S]{0,300}doseFromRatio\(ratePer10a, c\.ratio\)[\s\S]{0,200}\}, \[ratePer10a, mode\]\)/.test(src), true);
+  // 総量を直接入力しているときは散布量が無いので扱えない
+  eq("面積から計算のときだけ出す", src.includes('p.mode === "area" && /*#__PURE__*/React.createElement("input"'), true);
+  eq("総量モードでは変換しない", src.includes('if (mode !== "area") return next;'), true);
+  // 作業タブには持ち込まない(調合タブだけで完結させる)
+  eq("この日の薬剤には足していない",
+    /const addDayChem[\s\S]{0,400}mlPer10a/.test(src), false);
 }
 
 // ── 結果 ─────────────────────────────────────────────
