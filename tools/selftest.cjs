@@ -34,6 +34,7 @@ const EXPORTS = [
   "syncFingerprint", "stampUpdated", "pendingOf", "isPending", "progressTargets", "PROGRESS_STATES", "PROGRESS_RANK",
   "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "FIELD_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
   "EXCLUDED_KEY", "normalizeExcluded", "applyExclusion", "toggleExcluded", "commonNamePrefix",
+  "normalizeFieldName", "centerDistanceM", "duplicateFieldGroups", "DUP_NEAR_M", "DUP_AREA_RATIO",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -2476,6 +2477,113 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
      !!(result && result.items.some(f => f.name === "甲3")), true);
   eq("連番の対象名に除外中の甲9も入っている(Finding2)",
      !!(result && result.items.some(f => f.name === "甲9")), true);
+}
+
+// ── 圃場の重複を疑う(v9.29) ──────────────────────────
+//
+// 圃場IDは端末ごとの採番(uid())。同じ田んぼを2台がそれぞれ登録すると
+// 別の圃場になり、作業ID(日付＋圃場ID)も別になるので、防除記録にも
+// 別の行として並ぶ。上書きで合流しないので重複は増え続ける。
+// 台帳の照合で「記録IDが重なっている行 0件」なのに同じ圃場名が2行ある、
+// という実データの形はこれで説明が付く。
+//
+// ここでは「疑い」を出すところまで。統合は人が決める(S7)。
+{
+  const N = t.normalizeFieldName;
+  eq("前後の空白を落とす", N("  北の田  "), "北の田");
+  eq("全角と半角を揃える", N("北の田１"), N("北の田1"));
+  eq("中の空白は無視する", N("波野 箱石"), N("波野箱石"));
+  eq("記号の違いは無視する", N("波野・箱石"), N("波野箱石"));
+  eq("丸数字は残す(連番の区別に使っている)", N("波野①") === N("波野②"), false);
+  eq("空の名前は空", N(""), "");
+  eq("null でも落ちない", N(null), "");
+
+  const D = t.centerDistanceM;
+  // 緯度1度 ≒ 111km。0.001度 ≒ 111m を目安に確かめる
+  eq("同じ点は0m", Math.round(D([33, 130], [33, 130])), 0);
+  eq("緯度0.001度は約111m", Math.round(D([33, 130], [33.001, 130])), 111);
+  eq("座標が無ければ null", D(null, [33, 130]), null);
+
+  const G = t.duplicateFieldGroups;
+  const f = (id, name, lat, lng, areaA) => ({
+    id: id, name: name, areaA: areaA,
+    center: lat == null ? null : [lat, lng],
+    polygon: lat == null ? [] : [[lat, lng], [lat + 0.0001, lng], [lat, lng + 0.0001]],
+  });
+
+  eq("圃場が無ければ0組", G([]).length, 0);
+  eq("null でも落ちない", G(null).length, 0);
+  eq("重複が無ければ0組",
+    G([f(1, "北の田", 33, 130, 12), f(2, "南の田", 34, 131, 8)]).length, 0);
+
+  // 名前が一致すれば、離れていても1組にする。
+  // 同じ田んぼを別の位置で囲み直していることがあるため(位置より名前を信じる)
+  {
+    const g = G([f(1, "北の田", 33, 130, 12), f(2, "北の田", 35, 135, 99)]);
+    eq("同名は1組になる", g.length, 1);
+    eq("組には2件入る", g[0].fields.length, 2);
+    eq("理由は名前", g[0].why, "name");
+  }
+  // 名前が違っても、重心が近く面積も近ければ疑う
+  {
+    const g = G([f(1, "北の田", 33, 130, 12), f(2, "きたのた", 33.0001, 130, 12.5)]);
+    eq("近くて同じ広さなら1組になる", g.length, 1);
+    eq("理由は場所", g[0].why, "near");
+  }
+  // 近くても広さが違えば別の圃場(隣り合う田んぼを誤って束ねない)
+  eq("近くても広さが違えば疑わない",
+    G([f(1, "北の田", 33, 130, 12), f(2, "別の田", 33.0001, 130, 30)]).length, 0);
+  // 同じ広さでも離れていれば別の圃場
+  eq("離れていれば疑わない",
+    G([f(1, "北の田", 33, 130, 12), f(2, "別の田", 33.01, 130, 12)]).length, 0);
+  // 位置が無い圃場は場所では疑えない(名前が同じなら疑う)
+  eq("位置が無ければ場所では疑わない",
+    G([f(1, "北の田", null, null, 12), f(2, "別の田", null, null, 12)]).length, 0);
+  // 3件が同じ名前なら1組に3件。2組に割らない
+  {
+    const g = G([f(1, "北の田", 33, 130, 12), f(2, "北の田", 33, 131, 12), f(3, "北の田", 34, 130, 12)]);
+    eq("3件でも1組にまとめる", [g.length, g[0].fields.length], [1, 3]);
+  }
+  // いったん別々にできた2組が、あとから繋がったら1組に合流する。
+  // 合流させないと、同じ田んぼの一団が2つの組に割れて出る
+  {
+    // 名前「あ」で1組(1・2・5)、名前「そ」で1組(3・4)ができたあと、
+    // 5 が 3 のすぐ隣(約5m・同じ広さ)だと分かって2組が繋がる。
+    // 突き合わせは添字の順に見るので、この並びでないと合流の経路を通らない
+    const g = G([
+      f(1, "あの田", 33, 130, 12),
+      f(2, "あの田", 33.5, 130, 12),
+      f(3, "その田", 34, 131, 12),
+      f(4, "その田", 34.5, 131, 12),
+      f(5, "あの田", 34.00005, 131, 12),   // 3 のすぐ隣
+    ]);
+    eq("繋がった2組は1組に合流する", g.length, 1);
+    eq("合流後は5件とも同じ組", g[0].fields.length, 5);
+    const ids = g[0].fields.map(x => x.id).sort();
+    eq("欠けも重複もない", ids, [1, 2, 3, 4, 5]);
+  }
+  // ── 一覧への配線 ──
+  // 判定は生の一覧で行う。除外中(この端末で外した)圃場を落とすと、
+  // 外したほうが重複相手だったときに片方しか見えず、疑いが消える
+  eq("重複の判定は生の一覧で行う",
+    src.includes("duplicateFieldGroups(p.fieldsAll || p.fields)"), true);
+  eq("一覧に組数を出す",
+    src.includes('"⚠ 同じ圃場が二重に登録されている疑い ", dupGroups.length'), true);
+  eq("既定は畳んでおく", src.includes("useState(false); // ") ||
+    /const \[dupOpen, setDupOpen\] = useState\(false\)/.test(src), true);
+  // どちらを残すか決める材料として作業の件数を出す。works が届いていないと
+  // 全部 0 件に見えて、判断を誤らせる
+  eq("作業の件数を出す", src.includes("dupWorkCount(f.id)"), true);
+  eq("一覧へ works を渡している",
+    (src.match(/works: p\.works,/g) || []).length >= 2, true);
+
+  // 1つの圃場が2つの組に現れない(統合の候補が二重に出ると操作が壊れる)
+  {
+    const g = G([f(1, "北の田", 33, 130, 12), f(2, "北の田", 33.0001, 130, 12), f(3, "きたのた", 33.0001, 130, 12)]);
+    const ids = [];
+    g.forEach(x => x.fields.forEach(y => ids.push(y.id)));
+    eq("同じ圃場が2つの組に出ない", ids.length, new Set(ids).size);
+  }
 }
 
 // ── 結果 ─────────────────────────────────────────────

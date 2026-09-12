@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.28";
+const APP_VERSION = "v9.29";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -420,6 +420,105 @@ const naviUrl = center => center ? "https://www.google.com/maps/dir/?api=1&desti
 // 圃場から目的地の座標を得る。center が未設定でもポリゴンがあれば重心を使う
 // (作業タブは resolveWork が圃場マスタの実体を返すため、そのまま渡せる)
 const fieldCenter = f => f ? f.center || polygonCenter(f.polygon) : null;
+
+// ── 圃場の重複を疑う(v9.29) ──────────────────────────
+//
+// 圃場IDは端末ごとの採番(uid())。同じ田んぼを2台がそれぞれ登録すると
+// 別IDの別圃場になり、作業ID(日付＋圃場ID)も別になるので、防除記録にも
+// 別の行として並ぶ。上書きで合流しないため、重複は消えずに増え続ける。
+// 実データの台帳で「記録IDが重なっている行 0件」なのに同じ圃場名が
+// 2行あったのは、この形だと説明が付く。
+//
+// ここでやるのは「疑い」を出すところまで。どれを残すかは人が決める。
+// 自動で統合しない(共有データを書き換え、他の端末にも及ぶため)。
+
+// 名前を突き合わせる形に揃える。全角半角・前後と中の空白・区切り記号の
+// 違いを吸収する。丸数字は落とさない。地区の連番に使っていて、
+// 「波野①」と「波野②」は別の圃場だから(ここを潰すと全部1組になる)
+const normalizeFieldName = name => (name || "").normalize("NFKC")
+  .replace(/[\s　]+/g, "")
+  .replace(/[・･,、.。\-ー_\/／()（）]/g, "");
+
+// 2点の距離(m)。どちらかが無ければ null。
+// 半径はその緯度の曲率半径を使う(面積計算と同じ考え方・v9.21)
+const centerDistanceM = (a, b) => {
+  if (!a || !b || a[0] == null || b[0] == null) return null;
+  const toRad = d => d * Math.PI / 180;
+  const lat1 = Number(a[0]), lng1 = Number(a[1]);
+  const lat2 = Number(b[0]), lng2 = Number(b[1]);
+  if (!isFinite(lat1) || !isFinite(lng1) || !isFinite(lat2) || !isFinite(lng2)) return null;
+  const R = earthRadiusAt((lat1 + lat2) / 2);
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const s = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+};
+
+// 「近い」「同じ広さ」の目安。**どちらも暫定値(未計測)。**
+// 実データで何組出るかを見てから決め直すこと。狭くすると取りこぼし、
+// 広げると隣り合う別の田んぼまで束ねる
+const DUP_NEAR_M = 30;
+const DUP_AREA_RATIO = 0.2;
+
+// 重複の疑いを組にして返す。返すのは [{ why, fields:[...] }]。
+// why は "name"(名前が一致) か "near"(近くて同じ広さ)。
+// 1つの圃場が2つの組に入らないようにする。入ると統合の操作が壊れる
+const duplicateFieldGroups = fields => {
+  const list = (fields || []).filter(f => f && f.id !== undefined && f.id !== null);
+  const groupOf = new Map();   // 圃場ID → 組の添字
+  const groups = [];
+  const join = (a, b, why) => {
+    const ga = groupOf.get(a.id), gb = groupOf.get(b.id);
+    if (ga !== undefined && gb !== undefined) {
+      if (ga === gb) return;
+      // 別々の組に入っていたら片方へ寄せる。寄せないと同じ圃場が
+      // 2つの組に出たままになる
+      groups[gb].fields.forEach(f => {
+        groups[ga].fields.push(f);
+        groupOf.set(f.id, ga);
+      });
+      groups[gb].fields = [];
+      return;
+    }
+    if (ga !== undefined) {
+      groups[ga].fields.push(b);
+      groupOf.set(b.id, ga);
+      return;
+    }
+    if (gb !== undefined) {
+      groups[gb].fields.push(a);
+      groupOf.set(a.id, gb);
+      return;
+    }
+    groups.push({ why: why, fields: [a, b] });
+    groupOf.set(a.id, groups.length - 1);
+    groupOf.set(b.id, groups.length - 1);
+  };
+  for (let i = 0; i < list.length; i++) {
+    for (let j = i + 1; j < list.length; j++) {
+      const a = list[i], b = list[j];
+      // 名前が一致すれば、離れていても疑う。同じ田んぼを別の位置で
+      // 囲み直していることがあるので、位置より名前を信じる
+      const na = normalizeFieldName(a.name), nb = normalizeFieldName(b.name);
+      if (na && na === nb) {
+        join(a, b, "name");
+        continue;
+      }
+      // 名前が違うときは、重心が近く、広さも近いものだけ疑う。
+      // 広さを見ないと、隣り合う別の田んぼまで束ねてしまう
+      const d = centerDistanceM(fieldCenter(a), fieldCenter(b));
+      if (d === null || d > DUP_NEAR_M) continue;
+      const aa = Number(a.areaA) || 0, ab = Number(b.areaA) || 0;
+      if (aa <= 0 || ab <= 0) continue;
+      const diff = Math.abs(aa - ab) / Math.max(aa, ab);
+      if (diff > DUP_AREA_RATIO) continue;
+      join(a, b, "near");
+    }
+  }
+  return groups.filter(g => g.fields.length > 1);
+};
 // ナビボタン。座標が無い圃場でもボタン自体は出して登録方法を案内する。
 // href="#" だと画面が飛んでしまうので、座標が無いときは a ではなく button にする
 const naviLink = (center, style, label) => center ? /*#__PURE__*/React.createElement("a", {
@@ -3704,6 +3803,7 @@ function App() {
     // 「編集対象を生の一覧から引き直してから書き込む」処理があるため、
     // 除外中の圃場も含む生の一覧をここで渡しておく(Finding1, v9.23)。
     fieldsAll: fields,
+    works,
     addFieldWithPolygon,
     upsertField,
     // 「📋 一覧」を圃場マスタにしたため、削除と連番振り直しもここで行う
@@ -6618,6 +6718,15 @@ function FieldMasterPanel(p) {
     areaA: ""
   });
   const [closed, setClosed] = useState([]); // 閉じている地区名
+  // 重複の疑い(v9.29)。既定は畳んでおく。圃場が多いと縦に伸びるため
+  const [dupOpen, setDupOpen] = useState(false);
+  // 判定は生の一覧で行う。除外中(この端末で外した)圃場を落とすと、
+  // 「外したほうが重複相手だった」ときに片方しか見えず、疑いが消える
+  const dupGroups = React.useMemo(
+    () => duplicateFieldGroups(p.fieldsAll || p.fields),
+    [p.fieldsAll, p.fields]);
+  // どちらを残すか決める材料。作業の多いほうを残すのが普通なので件数を出す
+  const dupWorkCount = id => (p.works || []).filter(w => String(w.fieldId) === String(id)).length;
   // 連番で付け直すときの入力(null なら閉じている)
   const [renumber, setRenumber] = useState(null);
   const hidden = p.hidden || [];
@@ -6836,7 +6945,53 @@ function FieldMasterPanel(p) {
       ...S.fieldInput,
       marginBottom: 10
     }
-  }), p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
+  }), dupGroups.length > 0 && /*#__PURE__*/React.createElement("div", {
+    // 重複の疑い(v9.29)。同じ田んぼが端末ごとに別の圃場として登録されると、
+    // 作業も台帳も別行になり、防除記録に同じ圃場名が2行並ぶ。
+    // ここでは気づけるようにするだけで、統合はしない
+    style: {
+      marginBottom: 10,
+      padding: "10px 12px",
+      borderRadius: 8,
+      background: "#FFF4D6",
+      border: "1px solid #E3B505",
+      fontSize: 12,
+      lineHeight: 1.6,
+      color: "#6B4E00"
+    }
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setDupOpen(!dupOpen),
+    style: {
+      ...S.smallSecondary,
+      width: "100%",
+      textAlign: "left"
+    }
+  }, "⚠ 同じ圃場が二重に登録されている疑い ", dupGroups.length, " 組 ", dupOpen ? "▲" : "▼"), dupOpen && /*#__PURE__*/React.createElement("div", {
+    style: {
+      marginTop: 8
+    }
+  }, /*#__PURE__*/React.createElement("p", {
+    style: {
+      margin: "0 0 8px"
+    }
+  }, "同じ田んぼを別の端末がそれぞれ登録すると、別の圃場として扱われます。作業も防除記録も別の行になり、同じ圃場名が2行並びます。どちらを残すかは人が決めることなので、ここでは知らせるだけです。"), dupGroups.map((g, i) => /*#__PURE__*/React.createElement("div", {
+    key: i,
+    style: {
+      marginTop: 8,
+      paddingTop: 8,
+      borderTop: "1px solid #E3B505"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    style: {
+      fontWeight: 700
+    }
+  }, g.why === "name" ? "名前が同じ" : "近くにあって広さも同じ", " (", g.fields.length, "件)"), g.fields.map(f => /*#__PURE__*/React.createElement("div", {
+    key: f.id,
+    className: "num",
+    style: {
+      paddingLeft: 8
+    }
+  }, "・", f.name || "(名前なし)", " ／ ", f.areaA ? dispArea(f.areaA, p.areaUnitKey) + " " + areaSuffix(p.areaUnitKey) : "面積なし", " ／ ", hasPoly(f) ? "位置あり" : "位置なし", " ／ 作業 ", dupWorkCount(f.id), " 件")))))), p.fields.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "まだ圃場が登録されていません。上の「🗺 地図」に切り替えて「✏ 圃場を囲む」から登録してください。"), p.setExcluded && sel.size > 0 && /*#__PURE__*/React.createElement("div", {
     style: {
@@ -8375,6 +8530,7 @@ function GoogleMapTab(p) {
     // だけで組むと、除外中の圃場が古い番号のまま残って共有データに重複名が
     // できるため、生の一覧を別途渡し、除外の有無に関わらず地区全体を拾う。
     fieldsAll: p.fieldsAll,
+    works: p.works,
     upsertField: p.upsertField,
     deleteField: p.deleteField,
     renameFields: p.renameFields,
@@ -9217,6 +9373,7 @@ function LeafletMapTab(p) {
     // だけで組むと、除外中の圃場が古い番号のまま残って共有データに重複名が
     // できるため、生の一覧を別途渡し、除外の有無に関わらず地区全体を拾う。
     fieldsAll: p.fieldsAll,
+    works: p.works,
     upsertField: p.upsertField,
     deleteField: p.deleteField,
     renameFields: p.renameFields,
