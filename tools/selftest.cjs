@@ -2654,6 +2654,21 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
   // 使った薬剤はマスタと「前回と同じ薬液」に残す(適用のときにやっていた仕事)
   eq("実績の保存で薬剤マスタに残す",
     /const submitReport[\s\S]{0,1200}upsertChemMaster\(validDayChems/.test(src), true);
+  // その日の投下量を覚えて、圃場を入れた時点で予定薬液量を計算する(v9.36)。
+  // 覚えていないと、圃場を外して入れ直したとき予定が0に戻り、
+  // 地図の吹き出しから「予定散布量」が消える
+  eq("その日の投下量を保存する", src.includes('save("tankmix:dayrate", next)'), true);
+  eq("日付が変われば投下量も空から",
+    src.includes('dayRateRaw && dayRateRaw.date === workDate ? dayRateRaw.rate : ""'), true);
+  eq("作業を作るときに面積から予定を出す",
+    /const makeWork[\s\S]{0,900}plannedLFromArea\(area, rate\)/.test(src), true);
+  eq("投下量が無ければ予定は0のまま",
+    /const makeWork[\s\S]{0,900}rate > 0 && area > 0 \? plannedLFromArea\(area, rate\) : 0/.test(src), true);
+  eq("一括計算を押したら投下量を覚える",
+    /const applyRatePerDay[\s\S]{0,300}setDayRate\(ratePer10a\)/.test(src), true);
+  // 入力欄は App 側の値を使う。WorkTab の state のままだとタブを移ると消える
+  eq("投下量の入力欄はApp側の値", src.includes("const ratePerDay = p.dayRate;"), true);
+
   // 散布済にしたら、予定量をそのまま実績の初手として入れる(v9.35)。
   // 予定どおりに撒くことが多いので、実績入力を開かずに済ませたい
   eq("散布済で予定量を実績に入れる",

@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.35";
+const APP_VERSION = "v9.36";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -1370,6 +1370,12 @@ function App() {
   // 作業タブで入力する「この日に使用した薬剤」。{date, chems:[{id,name,form,use,ratio}]}
   // タブを切り替えても消えないようApp側で持ち、localStorageにも保存する。
   const [dayMix, setDayMix] = useState(() => load("tankmix:daymix", null));
+  // その日の「本日の散布投下量(L/10a)」。{date, rate} で持つ(v9.36)。
+  // 覚えていないと、圃場を外して入れ直したとき予定薬液量が 0 に戻り、
+  // 地図の吹き出しから「予定散布量」が消える。あとから足した圃場も同じ。
+  // 予定薬液量は「面積 ÷ 10 × 投下量」で出せるので、投下量さえ残っていれば
+  // 作業を作る時点で計算できる。
+  const [dayRateRaw, setDayRateRaw] = useState(() => load("tankmix:dayrate", null));
   const [gasUrl, setGasUrlState] = useState(() => localStorage.getItem("tankmix:gasurl") || "");
   const [recorder, setRecorderState] = useState(() => localStorage.getItem("tankmix:recorder") || "");
   const [teamCode, setTeamCodeState] = useState(() => localStorage.getItem("tankmix:teamcode") || "");
@@ -1873,8 +1879,16 @@ function App() {
       crop: f.crop || "",
       areaA: f.areaA
     },
-    // 予定薬液量はマスタに持たせず、その日の「本日の投下量」計算からのみ入る(日をまたいで古い値を引きずらない)
-    plannedL: 0,
+    // 予定薬液量はマスタに持たせず、その日の投下量から計算する
+    // (日をまたいで古い値を引きずらない)。
+    // v9.36 まではここが必ず 0 で、「面積から一括計算」を押すまで入らなかった。
+    // そのため、圃場を外して入れ直す・あとから足すと予定が 0 に戻り、
+    // 地図の吹き出しから「予定散布量」が消えていた。
+    plannedL: (() => {
+      const rate = parseFloat(dayRate) || 0;
+      const area = parseFloat(f.areaA) || 0;
+      return rate > 0 && area > 0 ? plannedLFromArea(area, rate) : 0;
+    })(),
     chems: [],
     totalL: 0,
     waterMl: 0,
@@ -1956,8 +1970,9 @@ function App() {
   // ── 前の日のやり残しを今日へ引き継ぐ ──
   // 170圃場を1日で回りきれないとき、翌日に「まだ済んでいない圃場だけ」を
   // 手で選び直すのは現実的でない。押す前に件数と圃場名を出す。
-  // 圃場だけを入れ、薬剤と投下量は空で始める。希釈倍率はその日の投下量で
+  // 圃場だけを入れ、薬剤は空で始める。希釈倍率はその日の投下量で
   // 決まる設計なので、前日の値をそのまま持ってくると用量を外す。
+  // 予定薬液量は、その日の投下量を既に入れてあればそれで計算される(v9.36)。
   const carryOverIds = () => carryOverFieldIds(works, workDate, PROGRESS_CARRY_DAYS);
   const carryOverWorks = () => {
     const ids = carryOverIds();
@@ -1971,7 +1986,7 @@ function App() {
     });
     const head = names.slice(0, 12).join("、");
     const rest = names.length > 12 ? "\nほか" + (names.length - 12) + "圃場" : "";
-    if (!confirm("直近" + PROGRESS_CARRY_DAYS + "日でまだ済んでいない " + ids.length + "圃場を、" + dateLabel(workDate) + "のリストに追加します。\n\n" + head + rest + "\n\n薬剤と投下量は入りません(その日の値を入れ直してください)。前の日の記録はそのまま残ります。")) return;
+    if (!confirm("直近" + PROGRESS_CARRY_DAYS + "日でまだ済んでいない " + ids.length + "圃場を、" + dateLabel(workDate) + "のリストに追加します。\n\n" + head + rest + "\n\n薬剤は入りません(その日の薬剤を入れ直してください)。予定薬液量は、その日の投下量を入れてあれば面積から計算されます。前の日の記録はそのまま残ります。")) return;
     addWorks(ids);
   };
   const removeWork = id => {
@@ -2024,6 +2039,16 @@ function App() {
       ratio: c.ratio,
       ml: r > 0 ? perMl / r : 0
     };
+  };
+  // 表示中の作業日の投下量。日付が変われば空から始める
+  const dayRate = dayRateRaw && dayRateRaw.date === workDate ? dayRateRaw.rate : "";
+  const setDayRate = v => {
+    const next = {
+      date: workDate,
+      rate: v
+    };
+    setDayRateRaw(next);
+    save("tankmix:dayrate", next);
   };
   // 表示中の作業日の薬剤。日付が変われば空から始める
   const dayChems = dayMix && dayMix.date === workDate ? dayMix.chems : [];
@@ -2096,6 +2121,8 @@ function App() {
       flash("10aあたりの量を入力してください");
       return;
     }
+    // ここで覚える。あとから足した圃場にも同じ投下量で予定が入る(v9.36)
+    setDayRate(ratePer10a);
     const dayWorks = works.filter(w => w.workDate === workDate && !w.reported);
     if (dayWorks.length === 0) {
       flash("この日の作業リストが空です");
@@ -3692,6 +3719,8 @@ function App() {
     presets,
     lastMix,
     chemMaster,
+    dayRate,
+    setDayRate,
     dayChems,
     validDayChems,
     addDayChem,
@@ -4215,7 +4244,10 @@ function WorkTab(p) {
     area: "",
     areaA: ""
   });
-  const [ratePerDay, setRatePerDay] = useState("");
+  // 投下量の入力欄は App 側で日付ごとに持つ(v9.36)。ここに state を置くと
+  // タブを移るたびに消え、覚えている値と画面が食い違う
+  const ratePerDay = p.dayRate;
+  const setRatePerDay = p.setDayRate;
   const [zoneFilter, setZoneFilter] = useState(""); // 圃場を追加するときの地区の絞り込み
   const [dayChemsOpen, setDayChemsOpen] = useState(false);
   // 実績入力済みの行は1行に畳む。開いている行のIDを1つだけ保持する
