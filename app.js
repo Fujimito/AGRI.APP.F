@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.37";
+const APP_VERSION = "v9.38";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -1652,24 +1652,12 @@ function App() {
   // 作業が変わったら自動で送る。v8.57までは「散布済」の入れ外しと
   // 実績の保存のときだけ送っていたため、作業リストへ圃場を入れても
   // 他の端末には何も出なかった。入れても・薬剤を当てても・外しても送る。
-  const autoPushWorkRef = useRef(null);
-  const autoPushWorks = () => {
-    if (!syncReady()) return;
-    if (autoPushWorkRef.current) clearTimeout(autoPushWorkRef.current);
-    autoPushWorkRef.current = setTimeout(() => {
-      autoPushWorkRef.current = null;
-      pushProgress({
-        quiet: true
-      });
-    }, 1500);
-  };
-  // 作業を触った経路は多い(追加・削除・並べ替え・薬剤の適用・実績)。
-  // 呼び出しを全部に入れて回ると必ず入れ忘れるので、保存された
-  // 結果を見て一ヶ所で送る。送るものが無ければ pushProgress は
-  // 通信せずに戻るので、この形でもGASの実行回数は増えない。
-  useEffect(() => {
-    autoPushWorks();
-  }, [works]);
+  // v9.38: 作業が変わるたびの自動送信をやめた。
+  // 進捗を送るのは「☁ 進捗を送信」を押したときだけにする。
+  // 途中の状態(圃場を入れただけ・薬剤を入れただけ)が相手の画面に
+  // 流れ込むのを止めたい、という運用側の判断。
+  // 圃場マスタと薬剤マスタの同期(autoPushFields / autoPushChems)は
+  // そのまま残す。ここで止めるのは「本日の作業」の送信だけ。
   // 共有をオンに戻したら、オフの間にたまったぶんを追いかけて送り、
   // ついでに取り直す。オンにした直後にsyncReady()を呼んでも、
   // setStateはすぐには反映されないので、効果として shareOn の変化を見る。
@@ -1697,10 +1685,9 @@ function App() {
         quiet: true
       });
       if (!alive) return;
-      await pushProgress({
-        quiet: true
-      });
-      if (!alive) return;
+      // v9.38: ここで進捗(本日の作業)は送らない。送るのは
+      // 「☁ 進捗を送信」を押したときだけ。圃場マスタと薬剤マスタは
+      // 名前帳なので、オンに戻した時点で追いかけて送る(従来どおり)
       // 直前まで取りに行っていても、ここでは必ず取り直す
       autoPullAtRef.current = 0;
       await pullSharedSync({
@@ -1994,9 +1981,6 @@ function App() {
     setWorksSave(works.filter(w => w.id !== id));
     // 墓標を積むだけでは、他の端末の進捗マップはその圃場を実績済のまま出し続ける。
     // 送るところまでやって初めて色が戻る
-    pushProgress({
-      quiet: true
-    });
   };
   // 複数の作業をまとめて外す(選択削除・一括削除用)。
   // 1件ずつremoveWorkを呼ぶと古いworksを元に上書きし合って1件しか消えないため、必ずまとめて処理する。
@@ -2009,10 +1993,7 @@ function App() {
     const list = (Array.isArray(ids) ? ids : [ids]).filter(x => x !== null && x !== undefined && x !== "");
     if (list.length === 0) return;
     addTomb("works", list);
-    flash(list.length + "件をサーバーから外しています…");
-    pushProgress({
-      quiet: true
-    });
+    flash(list.length + "件を外しました。「☁ 進捗を送信」を押すとサーバーからも消えます");
   };
   const removeWorks = ids => {
     const set = new Set(ids);
@@ -2023,10 +2004,7 @@ function App() {
     // 「🗑 選択して削除」だと消えない、という差になっていた。
     addTomb("works", [...set]);
     setWorksSave(works.filter(w => !set.has(w.id)));
-    flash(set.size + "件をこの日のリストから外しました");
-    pushProgress({
-      quiet: true
-    });
+    flash(set.size + "件をこの日のリストから外しました。「☁ 進捗を送信」を押すと他の端末にも反映されます");
   };
 
   // 1圃場ぶんの薬量 = 予定薬液量 ÷ 希釈倍率
@@ -2213,9 +2191,6 @@ function App() {
       };
     }));
     // 進捗マップの色をその場で他の端末へ届ける。圏外なら未送信のまま残る
-    pushProgress({
-      quiet: true
-    });
   };
 
   // ── 投下量から実績をまとめて入れる ──
@@ -2259,9 +2234,6 @@ function App() {
     }
     setWorksRaw(stampUpdated(withSeq(next), cur));
     flash(updated + "圃場に実績を入れました" + (noArea > 0 ? "(面積未入力 " + noArea + "件は対象外)" : "") + "。送信は下の「☁ 進捗を送信」から");
-    pushProgress({
-      quiet: true
-    });
   };
 
   // 面積から計算するときは作業タブの一括計算と同じ端数処理を通す(0.01L単位)
@@ -2403,21 +2375,15 @@ function App() {
       rememberMix(validDayChems);
     }
     flash(validDayChems.length
-      ? "実績を保存しました(この日の薬剤を記録しました)。作業終了後に一括送信してください"
-      : "実績を保存しました。作業終了後に一括送信してください");
+      ? "実績を保存しました(この日の薬剤を記録しました)。作業終了後に「☁ 進捗を送信」を押してください"
+      : "実績を保存しました。作業終了後に「☁ 進捗を送信」を押してください");
     // 進捗マップ用の送信だけは、その場で自動で試みる。圏外なら失敗するが
     // 未送信のまま残るので、電波が戻ってから手動または次の保存時に送られる
-    pushProgress({
-      quiet: true
-    });
   };
 
   const deleteWork = id => {
     addTomb("works", id);
     setWorksSave(works.filter(w => w.id !== id));
-    pushProgress({
-      quiet: true
-    });
   };
   const post = async (body, retries = 2) => {
     const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
@@ -3493,22 +3459,9 @@ function App() {
   // 未送信の件数は「選んでいる作業日」ぶんだけを数える(見出しのバッジに出す表示用)
   const pendingCount = works.filter(w => w.workDate === workDate && isPending(w)).length;
 
-  // 電波が戻ったら自動で送信を試みる。
-  // v9.15: 台帳(防除記録)は pushWorks を受けた側が直接書くようになったので、
-  // 端末が自動で送り直すのも pushProgress(進捗の送信)だけになった。
-  // pushProgress は「選んでいる作業日」に絞らず、たまっている未送信を
-  // 全部まとめて送る作りなので、ここの発火判定も日で絞らない
-  // (以前は workDate で絞っていたが、それだと選んでいる日以外の分しか
-  // 未送信が無いときに自動送信が発火せず、電波復帰の意味が薄れていた)
-  useEffect(() => {
-    const onOnline = () => {
-      const url = (localStorage.getItem("tankmix:gasurl") || "").trim();
-      const pend = load("tankmix:works", []).some(isPending);
-      if (shareOn && url && pend) pushProgress();
-    };
-    window.addEventListener("online", onOnline);
-    return () => window.removeEventListener("online", onOnline);
-  }, [shareOn]);
+  // v9.38: 電波が戻ったときの自動送信もやめた。進捗を送るのは
+  // 「☁ 進捗を送信」を押したときだけ。未送信は件数で見えているので、
+  // いつ送るかは人が決める。
 
   // 見た目の表示用。上の効果は「戻ったときに送る」ためのもので、
   // 役割が違うので別に持つ。

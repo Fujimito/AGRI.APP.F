@@ -463,7 +463,9 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     eq("削除 " + name + " が見つかる", b !== null, true);
     if (!b) return;
     eq("削除 " + name + " が墓標を積む", /addTomb\("works"/.test(b), true);
-    eq("削除 " + name + " が進捗を送る", /pushProgress\(/.test(b), true);
+    // v9.38: その場で送るのはやめた。送信は「☁ 進捗を送信」を押したときだけ。
+    // 墓標は積まれたまま残り、次の送信でまとめて送られる
+    eq("削除 " + name + " はその場で送らない", /pushProgress\(/.test(b), false);
   });
 }
 
@@ -1145,11 +1147,11 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   // 実態と食い違っていた。ボタン2つと表現を揃える
   eq("見出しのバッジの文言も「進捗を送信」になっている",
     src.includes('"☁ 進捗を送信(未送信 " + pendingCount + "件)"'), true);
-  // 電波復帰時の自動送信も、選んでいる日で絞ると「他の日にしか未送信が
-  // 無い」ときに発火しなくなる(pushProgressは日を絞らず全部送るため)。
-  // isPending を全件に対して見るように直した
-  eq("電波復帰の発火判定は日で絞っていない(全件をisPendingで見る)",
-    src.includes('const pend = load("tankmix:works", []).some(isPending);'), true);
+  // v9.38: 電波が戻ったときの自動送信はやめた。進捗を送るのは
+  // 「☁ 進捗を送信」を押したときだけ
+  // (7000行台に残る online の購読は農薬データの読み直しで、送信ではない)
+  eq("電波復帰では進捗を送らない",
+    src.includes("if (shareOn && url && pend) pushProgress();"), false);
   // 中断・途中の圃場から再開する仕組みは record/report を1件ずつ
   // 送っていたときの機能で、pushWorks は1回のまとめ送りなので意味が無い
   eq("「送信を中止」ボタンは無い", src.includes("送信を中止"), false);
@@ -1948,13 +1950,15 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("shareOn の効果が見つかる", !!m, true);
   const body = m ? m[0] : "";
   const at = name => body.indexOf(name);
-  eq("送信3種と受信がこの順で並んでいる",
+  // v9.38: ここで進捗は送らない。圃場マスタ・薬剤マスタ(名前帳)だけを
+  // 追いかけて送り、そのあと取り直す
+  eq("圃場→薬剤→受信の順で並んでいる",
     at("pushFieldsSync") > 0 &&
     at("pushFieldsSync") < at("pushChemsSync") &&
-    at("pushChemsSync") < at("pushProgress") &&
-    at("pushProgress") < at("pullSharedSync"), true);
-  eq("4つとも await している",
-    (body.match(/await (pushFieldsSync|pushChemsSync|pushProgress|pullSharedSync)\(/g) || []).length, 4);
+    at("pushChemsSync") < at("pullSharedSync"), true);
+  eq("進捗はここで送らない", at("pushProgress"), -1);
+  eq("3つとも await している",
+    (body.match(/await (pushFieldsSync|pushChemsSync|pullSharedSync)\(/g) || []).length, 3);
   eq("debounce 付きの auto* を使っていない",
     /auto(PushFields|PushChems|PushWorks|PullShared)\(/.test(body), false);
   eq("途中で打ち切れる(オフに戻したときに送信を飛ばさない)",
