@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.33";
+const APP_VERSION = "v9.34";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -514,26 +514,31 @@ const duplicateFieldGroups = fields => {
   for (let i = 0; i < list.length; i++) {
     for (let j = i + 1; j < list.length; j++) {
       const a = list[i], b = list[j];
-      // 名前が一致すれば、離れていても疑う。同じ田んぼを別の位置で
-      // 囲み直していることがあるので、位置より名前を信じる
+      // 広さが近いことは、名前が同じ場合も含めて必ず要る(v9.34)。
+      //
+      // v9.32 までは「名前が一致すれば離れていても疑う」としていたが、
+      // 実データの「まさのり畑」41.88a と 85.35a は同じ名前の別の田んぼだった。
+      // 人の名前を冠した田んぼが複数あるのは普通で、名前だけでは決められない。
+      // 同じ田んぼを二重に登録したのなら、囲み方の差はあっても広さが倍には
+      // ならない。片方でも面積が未登録なら判断できないので疑わない。
+      const aa = Number(a.areaA) || 0, ab = Number(b.areaA) || 0;
+      if (aa <= 0 || ab <= 0) continue;
+      if (Math.abs(aa - ab) / Math.max(aa, ab) > DUP_AREA_RATIO) continue;
+      // 名前が一致するなら、離れていても疑う。同じ田んぼを別の位置で
+      // 囲み直していることがあるので、そこは位置より名前を信じる
       const na = normalizeFieldName(a.name), nb = normalizeFieldName(b.name);
       if (na && na === nb) {
         join(a, b, "name");
         continue;
       }
-      // 名前が違うときは、重心が近く、広さも近いものだけ疑う。
-      // 広さを見ないと、隣り合う別の田んぼまで束ねてしまう
+      // 名前が違うときは、重心が近いものだけ疑う
       const d = centerDistanceM(fieldCenter(a), fieldCenter(b));
       if (d === null) continue;
-      const aa = Number(a.areaA) || 0, ab = Number(b.areaA) || 0;
-      if (aa <= 0 || ab <= 0) continue;
       // しきい値は小さいほうの圃場に合わせる。大きいほうに合わせると、
       // 大きな圃場の隣にある小さな圃場を巻き込む
       const near = Math.max(DUP_NEAR_MIN_M,
         Math.min(equivRadiusM(aa), equivRadiusM(ab)) * DUP_NEAR_RATIO);
       if (d > near) continue;
-      const diff = Math.abs(aa - ab) / Math.max(aa, ab);
-      if (diff > DUP_AREA_RATIO) continue;
       join(a, b, "near");
     }
   }
