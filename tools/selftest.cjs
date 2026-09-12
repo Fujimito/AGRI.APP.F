@@ -34,7 +34,8 @@ const EXPORTS = [
   "syncFingerprint", "stampUpdated", "pendingOf", "isPending", "progressTargets", "PROGRESS_STATES", "PROGRESS_RANK",
   "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "FIELD_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
   "EXCLUDED_KEY", "normalizeExcluded", "applyExclusion", "toggleExcluded", "commonNamePrefix",
-  "normalizeFieldName", "centerDistanceM", "duplicateFieldGroups", "DUP_NEAR_M", "DUP_AREA_RATIO",
+  "normalizeFieldName", "centerDistanceM", "duplicateFieldGroups", "equivRadiusM",
+  "DUP_NEAR_RATIO", "DUP_NEAR_MIN_M", "DUP_AREA_RATIO",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -2512,15 +2513,58 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
     eq("組には2件入る", g[0].fields.length, 2);
     eq("理由は名前", g[0].why, "name");
   }
-  // 名前が違っても、重心が近く面積も近ければ疑う
+  // 名前が違っても、重心がほぼ重なり面積も近ければ疑う。
+  // しきい値は圃場の大きさに比例する(12a → 相当半径19.5m × 0.4 = 7.8m)
   {
-    const g = G([f(1, "北の田", 33, 130, 12), f(2, "きたのた", 33.0001, 130, 12.5)]);
-    eq("近くて同じ広さなら1組になる", g.length, 1);
+    const g = G([f(1, "北の田", 33, 130, 12), f(2, "きたのた", 33.00003, 130, 12.5)]);
+    eq("重なっていて同じ広さなら1組になる", g.length, 1);
     eq("理由は場所", g[0].why, "near");
   }
   // 近くても広さが違えば別の圃場(隣り合う田んぼを誤って束ねない)
   eq("近くても広さが違えば疑わない",
-    G([f(1, "北の田", 33, 130, 12), f(2, "別の田", 33.0001, 130, 30)]).length, 0);
+    G([f(1, "北の田", 33, 130, 12), f(2, "別の田", 33.00003, 130, 30)]).length, 0);
+
+  // ── 実データでの誤検出(v9.29 → v9.32 で直した) ──
+  // 30m の固定値では、連番の隣り合う田んぼを3組も束ねていた。
+  // 圃場の一辺は 3.18a で 17.8m、22.4a で 47.3m しかないので、
+  // 隣の田んぼでも重心は 30m 以内に入る
+  eq("相当半径(3.18a)", Math.round(t.equivRadiusM(3.18) * 10) / 10, 10.1);
+  eq("相当半径(12.39a)", Math.round(t.equivRadiusM(12.39) * 10) / 10, 19.9);
+  eq("面積が空でも落ちない", t.equivRadiusM(""), 0);
+  {
+    // 嘉島(北側)23 と 24。20m 離れた 3.18a と 3.91a
+    const g = G([f(1, "嘉島（北側）23", 33, 130, 3.18), f(2, "嘉島（北側）24", 33.00018, 130, 3.91)]);
+    eq("連番の隣の田んぼ(3.18a/3.91a・約20m)は疑わない", g.length, 0);
+  }
+  {
+    // 嘉島(北側)51 と 53。35m 離れた 12.39a と 12.14a(面積差2.0%)
+    const g = G([f(1, "嘉島（北側）51", 33, 130, 12.39), f(2, "嘉島（北側）53", 33.00032, 130, 12.14)]);
+    eq("連番の隣の田んぼ(12.39a/12.14a・約35m)は疑わない", g.length, 0);
+  }
+  {
+    // 嘉島(南側)56 と 57。22.4a と 19.53a は面積差 12.8% で外れる
+    const g = G([f(1, "嘉島（南側）56", 33, 130, 22.4), f(2, "嘉島（南側）57", 33.0004, 130, 19.53)]);
+    eq("面積差12.8%の隣の田んぼは疑わない", g.length, 0);
+  }
+  {
+    // 同じ田んぼを二重に囲んだ場合は重心がほぼ重なる(数m)。こちらは拾う
+    const g = G([f(1, "嘉島（北側）23", 33, 130, 3.18), f(2, "嘉島北23", 33.00002, 130, 3.2)]);
+    eq("同じ田んぼを二重に囲んだ形(約2m)は拾う", g.length, 1);
+  }
+  // 上の3件は距離と面積の両方で外れるので、片方を緩めても結果が変わらない。
+  // どちらが効いているのかを切り分けるため、条件を1つずつ単独で見る
+  {
+    // 距離だけで外れる形: 広さは同じ(3.18a)、20m 離れている。
+    // しきい値は max(5, 10.1×0.4)=5m なので外れる。30m の固定値なら束ねてしまう
+    const g = G([f(1, "北の田", 33, 130, 3.18), f(2, "別の田", 33.00018, 130, 3.18)]);
+    eq("広さが同じでも20m離れていれば疑わない(距離だけで判定)", g.length, 0);
+  }
+  {
+    // 面積だけで外れる形: 重心はほぼ重なる(約2m)が、広さが17.4%違う。
+    // 20% のままなら束ねてしまう
+    const g = G([f(1, "北の田", 33, 130, 12.39), f(2, "別の田", 33.00002, 130, 15)]);
+    eq("重なっていても広さが17%違えば疑わない(面積だけで判定)", g.length, 0);
+  }
   // 同じ広さでも離れていれば別の圃場
   eq("離れていれば疑わない",
     G([f(1, "北の田", 33, 130, 12), f(2, "別の田", 33.01, 130, 12)]).length, 0);

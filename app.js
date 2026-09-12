@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.31";
+const APP_VERSION = "v9.32";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -456,11 +456,26 @@ const centerDistanceM = (a, b) => {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
 };
 
-// 「近い」「同じ広さ」の目安。**どちらも暫定値(未計測)。**
-// 実データで何組出るかを見てから決め直すこと。狭くすると取りこぼし、
-// 広げると隣り合う別の田んぼまで束ねる
-const DUP_NEAR_M = 30;
-const DUP_AREA_RATIO = 0.2;
+// 「近い」の目安は圃場の大きさに比例させる(v9.32)。
+//
+// v9.29 は 30m の固定値だった。実データで 4組 出たうち 3組が誤検出で、
+// すべて「嘉島(北側)23 と 24」のような連番の隣り合う田んぼだった。
+// 3.18a の圃場は一辺およそ 17.8m しかないので、隣の田んぼでも重心は
+// 30m 以内に入る。固定値では小さい圃場ほど誤検出する。
+//
+// 同じ田んぼを二重に囲んだのなら重心はほぼ重なる。隣の田んぼなら、
+// 重心の間隔はおおむね一辺ぶん(実データで 17.8〜47.3m)離れる。
+// そこで「その圃場の相当半径 × DUP_NEAR_RATIO」を距離のしきい値にする。
+// 相当半径 = √(面積 ÷ π)。実データでの値:
+//   3.18a → 10.1m(しきい値 5.0m) / 12.39a → 19.9m(7.9m) / 22.4a → 26.7m(10.7m)
+// 下限を置くのは、面積が未登録・極小の圃場で 0m になるのを防ぐため。
+const DUP_NEAR_RATIO = 0.4;
+const DUP_NEAR_MIN_M = 5;
+// 広さの差。v9.29 の 20% では 3.18a と 3.91a(18.7%差)の別圃場を束ねていた。
+// 実データの本当に近い組は 12.39a と 12.14a(2.0%差)なので 10% に締める
+const DUP_AREA_RATIO = 0.1;
+// 面積(a)から相当半径(m)を出す。1a = 100m2
+const equivRadiusM = areaA => Math.sqrt((Number(areaA) || 0) * 100 / Math.PI);
 
 // 重複の疑いを組にして返す。返すのは [{ why, fields:[...] }]。
 // why は "name"(名前が一致) か "near"(近くて同じ広さ)。
@@ -509,9 +524,14 @@ const duplicateFieldGroups = fields => {
       // 名前が違うときは、重心が近く、広さも近いものだけ疑う。
       // 広さを見ないと、隣り合う別の田んぼまで束ねてしまう
       const d = centerDistanceM(fieldCenter(a), fieldCenter(b));
-      if (d === null || d > DUP_NEAR_M) continue;
+      if (d === null) continue;
       const aa = Number(a.areaA) || 0, ab = Number(b.areaA) || 0;
       if (aa <= 0 || ab <= 0) continue;
+      // しきい値は小さいほうの圃場に合わせる。大きいほうに合わせると、
+      // 大きな圃場の隣にある小さな圃場を巻き込む
+      const near = Math.max(DUP_NEAR_MIN_M,
+        Math.min(equivRadiusM(aa), equivRadiusM(ab)) * DUP_NEAR_RATIO);
+      if (d > near) continue;
       const diff = Math.abs(aa - ab) / Math.max(aa, ab);
       if (diff > DUP_AREA_RATIO) continue;
       join(a, b, "near");
