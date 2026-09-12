@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.29";
+const APP_VERSION = "v9.30";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -4646,40 +4646,8 @@ function WorkTab(p) {
   needsRateWarning &&/*#__PURE__*/React.createElement("div", {
     style: S.rateWarnBand,
     className: "no-print"
-  }, /*#__PURE__*/React.createElement("span", null, "⚠"), /*#__PURE__*/React.createElement("span", null, "本日の投下量(L/10a)が未入力の圃場があります。下の欄に入力して「面積から一括計算」を押してください。")), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
-    style: S.naviPanel,
-    className: "no-print"
-  }, naviNext ? /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      flex: 1,
-      minWidth: 0
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.naviPanelLabel
-  }, "順送りナビ (残り ", naviQueue.length, " 件)"), /*#__PURE__*/React.createElement("div", {
-    style: S.naviPanelName
-  }, "次の圃場: ", p.resolveWork(naviNext).name)), naviLink(fieldCenter(p.resolveWork(naviNext)), {
-    ...S.naviBtn,
-    flexShrink: 0
-  }, "🚗 この圃場へナビ"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setNaviSkipped(naviSkipped.concat([naviNext.id])),
-    style: {
-      ...S.smallSecondary,
-      whiteSpace: "nowrap"
-    }
-  }, "⏭ この圃場は飛ばす")) : /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.naviPanelName,
-      flex: 1,
-      minWidth: 0
-    }
-  }, "この日の圃場はすべて回りました"), naviSkipped.length > 0 && /*#__PURE__*/React.createElement("button", {
-    onClick: () => setNaviSkipped([]),
-    style: {
-      ...S.smallSecondary,
-      whiteSpace: "nowrap"
-    }
-  }, "↩ 飛ばした圃場を戻す"))), /*#__PURE__*/React.createElement(WorkProgress, {
+  }, /*#__PURE__*/React.createElement("span", null, "⚠"), /*#__PURE__*/React.createElement("span", null, "本日の投下量(L/10a)が未入力の圃場があります。下の欄に入力して「面積から一括計算」を押してください。")), 
+/*#__PURE__*/React.createElement(WorkProgress, {
     total: dayList.length,
     done: dayList.length - pendingDayList.length
   }), p.dayChems.length > 0 && /*#__PURE__*/React.createElement("button", {
@@ -5213,375 +5181,25 @@ function WorkTab(p) {
       fontSize: 11,
       color: "#6B7A66"
     }
-  }, "実績を入れた作業だけを数えています。名前は各端末の「記録者名」で、表記が違うと別の行になります")), /*#__PURE__*/React.createElement("button", {
-    // v8.74: 作業一覧を別の表示としてはやめた。
-    // 現場で見るのは地図だけで済む。ただし順送りナビ・並べ替え・
-    // まとめ散布・タンク補給の区切り・書き出しは地図に載せられないので、
-    // 消さずにここへ畳んである。
-    onClick: () => setListOpen(v => !v),
-    style: {
-      ...S.smallSecondary,
-      width: "100%",
-      marginTop: 12
-    },
-    className: "no-print"
-  }, listOpen ? "▲ 作業リストを閉じる" : "📋 作業リストを開く(" + dayList.length + "件)"), listOpen && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
-    style: S.card,
-    className: "no-print"
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      flexWrap: "wrap",
-      gap: 8
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, dateLabel(p.workDate), "の作業リスト(", dayList.length, "件)"), dupNames.length > 0 && /*#__PURE__*/React.createElement("div", {
-    // 同じ圃場が2件入っているときの知らせ。黙って片方を消すことはしない。
+  }, "実績を入れた作業だけを数えています。名前は各端末の「記録者名」で、表記が違うと別の行になります")), dupNames.length > 0 && /*#__PURE__*/React.createElement("div", {
+    // 同じ日に同じ圃場が2件入っているときの知らせ。黙って片方を消さない。
+    // v9.30 で作業リストの一覧表示をやめたので、警告だけをここへ残した
+    // (圃場マスタ側の「二重登録の疑い」(v9.29)とは別物。あちらは同じ田んぼが
+    //  別の圃場として登録されている話で、こちらは同じ圃場の作業が2件ある話)
     style: {
       width: "100%",
       background: "#FBF0EE",
       border: "1.5px solid #E8C4BB",
       borderRadius: 10,
       padding: "8px 10px",
-      marginBottom: 10,
+      marginTop: 12,
       fontSize: 13,
       fontWeight: 700,
       color: "#8a2f1c"
-    }
-  }, "⚠ 同じ圃場が2件入っています：", dupNames.slice(0, 5).join("、"), dupNames.length > 5 ? "他" + (dupNames.length - 5) + "件" : "", "。別の端末と重なった可能性があります。どちらかを「外す」で外してください"), dayList.length > 0 && /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8,
-      flexWrap: "wrap"
-    }
-  }, selMode === "none" && dayList.length > pendingDayList.length && /*#__PURE__*/React.createElement("button", {
-    onClick: () => setOnlyPending(!onlyPending),
-    style: onlyPending ? S.smallPrimary : S.smallSecondary
-  }, onlyPending ? "すべて表示" : "未実施のみ"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => switchMode("group"),
-    style: groupMode ? S.smallPrimary : S.smallSecondary
-  }, groupMode ? "まとめ選択を終了" : "🔗 まとめ散布"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => switchMode("delete"),
-    style: deleteMode ? S.smallDangerOn : S.smallSecondary
-  }, deleteMode ? "削除選択を終了" : "🗑 選択して削除"))), deleteMode && /*#__PURE__*/React.createElement("div", {
-    style: S.delBar
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      alignItems: "center",
-      gap: 8,
-      flexWrap: "wrap"
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontSize: 13.5,
-      fontWeight: 700,
-      color: "#8a2f1c",
-      flex: 1,
-      minWidth: 120
-    }
-  }, "外したい圃場をタップで選択(", selected.length, "件)"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setSelected(selected.length === dayList.length ? [] : dayList.map(w => w.id)),
-    style: S.smallSecondary
-  }, selected.length === dayList.length ? "選択を解除" : "すべて選択")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.btnRow,
-      marginTop: 10
-    }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: deleteSelected,
-    disabled: selected.length === 0,
-    style: {
-      ...S.smallDanger,
-      padding: "13px 0",
-      opacity: selected.length === 0 ? 0.4 : 1
-    }
-  }, "🗑 選択した", selected.length, "件を外す"))), dayList.length === 0 && /*#__PURE__*/React.createElement("p", {
-    style: S.empty
-  }, "この日の作業はまだ登録されていません。", /*#__PURE__*/React.createElement("br", null), "上の「🌾 本日の作業圃場登録」→「圃場を追加」で追加するか、地図で圃場をタップして「＋ 本日の作業に追加」を押してください。"), dayList.length > 1 && !groupMode && /*#__PURE__*/React.createElement("p", {
-    style: {
-      ...S.note,
-      marginTop: 0,
-      marginBottom: 10
-    }
-  }, "右の⣿マークを長押ししてドラッグすると、散布する順番を入れ替えられます。"), shownList.map((w, idx) => {
-    const f = p.resolveWork(w);
-    const master = p.fields.find(x => x.id === w.fieldId);
-    // 実績入力済みの行は既定で1行に畳む(タップで開く)
-    const collapsed = selMode === "none" && w.reported && openRowId !== w.id;
-    // この日で次にやる圃場は目立たせる
-    const isNext = selMode === "none" && nextWork && nextWork.id === w.id;
-    // 補給の区切りは未実施の並びに対して打つ。実績入力済みの行が混ざっていても位置がズレない
-    const tank = tankPlan[w.id] || null;
-    return /*#__PURE__*/React.createElement(React.Fragment, {
-      key: w.id
-    }, tank && tank.refill && /*#__PURE__*/React.createElement("div", {
-      style: S.tankBand,
-      className: "num"
-    }, "⛽ ここで補給(タンク" + tank.refill.tankNo + "杯目 " + dispVol(tank.refill.usedL, p.volUnitKey) + " " + volSuffix(p.volUnitKey) + " / " + dispVol(tank.refill.capL, p.volUnitKey) + " " + volSuffix(p.volUnitKey) + ")"), /*#__PURE__*/React.createElement("div", {
-      "data-work-id": w.id,
-      style: {
-        ...S.record,
-        ...(groupMode && selected.includes(w.id) ? S.recordSelected : {}),
-        ...(deleteMode && selected.includes(w.id) ? S.recordDeleting : {}),
-        ...(selMode === "none" && w.reported && w.synced && w.reportSynced ? S.recordSent : {}),
-        ...(isNext ? S.recordNext : {}),
-        ...(dragId === w.id ? {
-          opacity: 0.35,
-          border: "2px dashed #B9C3B4"
-        } : {}),
-        ...(dragOverId === w.id && dragId !== w.id ? {
-          outline: "2.5px solid #2E7D4F",
-          outlineOffset: -2
-        } : {})
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: S.recordHead
-    }, /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        alignItems: "center",
-        gap: 10,
-        minWidth: 0,
-        flex: 1
-      }
-    }, deleteMode ? /*#__PURE__*/React.createElement("button", {
-      onClick: () => toggleSelect(w.id),
-      style: {
-        ...S.checkBtn,
-        ...(selected.includes(w.id) ? S.checkBtnDanger : {})
-      },
-      "aria-label": "削除する圃場として選択"
-    }, selected.includes(w.id) ? "✓" : "") : groupMode ? w.reported ? /*#__PURE__*/React.createElement("span", {
-      style: {
-        ...S.checkBtn,
-        opacity: 0.3
-      },
-      title: "実績入力済みのためまとめ選択の対象外です"
-    }, "済") : /*#__PURE__*/React.createElement("button", {
-      onClick: () => toggleSelect(w.id),
-      style: {
-        ...S.checkBtn,
-        ...(selected.includes(w.id) ? S.checkBtnOn : {})
-      }
-    }, selected.includes(w.id) ? "✓" : "") : /*#__PURE__*/React.createElement("span", {
-      // v8.67 で行頭の散布済チェックを外した。
-      // チェックは「🚦 進捗地図」で圃場をタップして入れる。
-      // ここは実績入力だけに戻してある。
-      style: S.orderNum,
-      className: "num"
-    }, idx + 1), /*#__PURE__*/React.createElement("div", {
-      style: {
-        minWidth: 0,
-        flex: 1
-      }
-    }, isNext && /*#__PURE__*/React.createElement("div", {
-      style: S.nextTag
-    }, "▶ 次の圃場"), /*#__PURE__*/React.createElement("div", {
-      style: S.recordField
-    }, f.name), /*#__PURE__*/React.createElement("div", {
-      style: S.workMeta,
-      className: "num"
-    }, f.areaA ? /*#__PURE__*/React.createElement("span", null, dispArea(f.areaA, p.areaUnitKey), /*#__PURE__*/React.createElement("span", {
-      style: S.workMetaUnit
-    }, areaSuffix(p.areaUnitKey))) : /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: "#a08b5a"
-      }
-    }, "面積未定"), collapsed ? /*#__PURE__*/React.createElement("span", {
-      style: S.workMetaSep
-    }, "／ 実散布 ", /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: "#2E7D4F"
-      }
-    }, dispVol(w.sprayedL, p.volUnitKey), /*#__PURE__*/React.createElement("span", {
-      style: S.workMetaUnit
-    }, volSuffix(p.volUnitKey)))) : w.plannedL ? /*#__PURE__*/React.createElement("span", {
-      style: S.workMetaSep
-    }, "／ 予定 ", /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: "#2b5a7a"
-      }
-    }, dispVol(w.plannedL, p.volUnitKey), /*#__PURE__*/React.createElement("span", {
-      style: S.workMetaUnit
-    }, volSuffix(p.volUnitKey)))) : null,
-    // 累計はその杯の中での合計。予定薬液量が未計算(0)の圃場には出さない
-    tank && tank.planned > 0 && /*#__PURE__*/React.createElement("span", {
-      style: S.workMetaSep
-    }, "／ 累計 ", /*#__PURE__*/React.createElement("span", {
-      style: {
-        color: "#8a5a12"
-      }
-    }, dispVol(tank.cum, p.volUnitKey), /*#__PURE__*/React.createElement("span", {
-      style: S.workMetaUnit
-    }, volSuffix(p.volUnitKey)))), tank && tank.over && /*#__PURE__*/React.createElement("span", {
-      style: S.tankOverWarn
-    }, "⚠ この圃場だけでタンク容量を超えます")))), selMode === "none" && /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        flexDirection: "column",
-        gap: 6,
-        alignItems: "flex-end",
-        flexShrink: 0
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: w.reported ? w.synced && w.reportSynced ? S.badgeOk : S.badgePending : w.chems.length > 0 ? S.badgeOk : S.badgePlan
-    }, w.reported ? w.synced && w.reportSynced ? w.fromTeam ? "✓実施済(他端末)" : "✓送信済" : "実績入力済(未送信)" : w.chems.length > 0 ? "調合済" : "計画"), w.fromTeam && w.by && /*#__PURE__*/React.createElement("span", {
-      style: {
-        ...S.smallLabel,
-        fontSize: 11,
-        color: "#2A5F80"
-      },
-      title: "この作業は他の端末から受け取りました"
-    }, "👥 ", w.by), /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        gap: 6,
-        alignItems: "center"
-      }
-    }, w.reported ? /*#__PURE__*/React.createElement(React.Fragment, null, !collapsed && master && /*#__PURE__*/React.createElement("button", {
-      onClick: () => startEditField(w),
-      style: S.orderBtn,
-      "aria-label": "編集"
-    }, "✎"), /*#__PURE__*/React.createElement("button", {
-      onClick: () => setOpenRowId(openRowId === w.id ? null : w.id),
-      style: S.orderBtn,
-      "aria-label": collapsed ? "詳細を開く" : "詳細を閉じる"
-    }, collapsed ? "▼" : "▲")) : /*#__PURE__*/React.createElement(React.Fragment, null, master && /*#__PURE__*/React.createElement("button", {
-      onClick: () => startEditField(w),
-      style: S.orderBtn,
-      "aria-label": "編集"
-    }, "✎"), /*#__PURE__*/React.createElement("span", {
-      onPointerDown: e => onHandleDown(e, w.id),
-      onTouchStart: e => onHandleDown(e, w.id),
-      style: S.dragHandle,
-      title: "ドラッグで並べ替え",
-      "aria-label": "並べ替え"
-    }, "⣿"))))), !collapsed && /*#__PURE__*/React.createElement("div", {
-      style: S.recordBody
-    }, w.chems.length > 0 && /*#__PURE__*/React.createElement("div", {
-      style: S.recordTotal,
-      className: "num"
-    }, "🧪 総量 ", /*#__PURE__*/React.createElement("strong", null, fmt(w.totalL, 2), " L"), "(薬剤", w.chems.length, "種):", w.chems.map(c => c.name + " " + c.ratio + "倍").join(" ／ ")), w.reported && /*#__PURE__*/React.createElement("div", {
-      style: S.recordTotal,
-      className: "num"
-    }, "🚁 実散布 ", /*#__PURE__*/React.createElement("strong", null, dispVol(w.sprayedL, p.volUnitKey), " ", volSuffix(p.volUnitKey)), w.reportAreaA ? " ／ " + dispArea(w.reportAreaA, p.areaUnitKey) + " " + areaSuffix(p.areaUnitKey) : "", w.flights && w.flights.length > 1 ? " ／ " + w.flights.length + "フライト" : "", (w.reportMemo || w.memo) && /*#__PURE__*/React.createElement("div", {
-      style: S.memoLine
-    }, "備考:", w.reportMemo || w.memo)), selMode === "none" && /*#__PURE__*/React.createElement("div", {
-      style: {
-        display: "flex",
-        flexWrap: "wrap",
-        gap: 10,
-        marginTop: 6
-      }
-    }, /*#__PURE__*/React.createElement("button", {
-      onClick: () => openReport(w),
-      style: {
-        ...S.reportBtn,
-        flex: "1 1 130px",
-        marginTop: 0
-      }
-    }, w.reported ? "✎ 実績を修正" : "🚁 実績入力"), naviLink(fieldCenter(f), {
-      ...S.naviBtn,
-      alignSelf: "stretch"
-    }, "🚗 ナビ"), /*#__PURE__*/React.createElement("button", {
-      onClick: () => {
-        if (confirm("「" + f.name + "」をこの日のリストから外しますか？\n" + (w.reported ? "入力済みの実績も消えます。\n" : "") + "(圃場マスタには残ります)")) p.removeWork(w.id);
-      },
-      style: {
-        ...S.smallDanger,
-        alignSelf: "stretch"
-      }
-    }, "外す")))));
-  }), groupMode && selected.length >= 2 && !gFormOpen && /*#__PURE__*/React.createElement("button", {
-    onClick: openGroupForm,
-    style: {
-      ...S.bigSendBtn,
-      background: "#B78A1F",
-      marginTop: 6
-    }
-  }, "🔗 選択した", selected.length, "圃場をまとめて実績入力"), groupMode && selected.length < 2 && /*#__PURE__*/React.createElement("p", {
-    style: {
-      ...S.memoLine,
-      textAlign: "center",
-      marginTop: 8
-    }
-  }, "まとめたい圃場を2つ以上タップして選択してください"), gFormOpen && (() => {
-    const members = p.works.filter(w => selected.includes(w.id));
-    const areas = members.map(w => parseFloat(p.resolveWork(w).areaA) || 0);
-    const areaSum = areas.reduce((s, a) => s + a, 0);
-    const total = parseFloat(gSprayed) || 0;
-    const useEqual = areaSum <= 0;
-    let allocated = 0;
-    const preview = members.map((w, i) => {
-      let share;
-      if (i === members.length - 1) share = Math.round((total - allocated) * 100) / 100;else {
-        const r = useEqual ? 1 / members.length : areas[i] / areaSum;
-        share = Math.round(total * r * 100) / 100;
-        allocated += share;
-      }
-      return {
-        name: p.resolveWork(w).name,
-        area: areas[i],
-        share
-      };
-    });
-    return /*#__PURE__*/React.createElement("div", {
-      style: {
-        ...S.reportForm,
-        marginTop: 10
-      }
-    }, /*#__PURE__*/React.createElement("div", {
-      style: S.smallLabel
-    }, "連続散布の実績(", selected.length, "圃場)"), /*#__PURE__*/React.createElement("label", {
-      style: {
-        ...S.areaField,
-        marginTop: 8
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: S.smallLabel
-    }, "フライト実績の合計散布量(L)"), /*#__PURE__*/React.createElement("input", {
-      type: "number",
-      inputMode: "decimal",
-      min: "0",
-      value: gSprayed,
-      onChange: e => setGSprayed(e.target.value),
-      style: S.midInput,
-      className: "num"
-    })), /*#__PURE__*/React.createElement("div", {
-      style: S.anbunBox
-    }, /*#__PURE__*/React.createElement("div", {
-      style: S.anbunTitle
-    }, useEqual ? "面積未入力のため均等割り" : "面積比で按分"), preview.map((pv, i) => /*#__PURE__*/React.createElement("div", {
-      key: i,
-      style: S.anbunRow,
-      className: "num"
-    }, /*#__PURE__*/React.createElement("span", null, pv.name, /*#__PURE__*/React.createElement("span", {
-      style: S.tdSub
-    }, pv.area ? fmt(pv.area, 1) + "a" : "面積未定")), /*#__PURE__*/React.createElement("strong", null, fmt(pv.share, 2), " L")))), /*#__PURE__*/React.createElement("input", {
-      value: gMemo,
-      placeholder: "備考(任意)",
-      onChange: e => setGMemo(e.target.value),
-      style: {
-        ...S.fieldInput,
-        marginTop: 10
-      }
-    }), /*#__PURE__*/React.createElement("div", {
-      style: {
-        ...S.btnRow,
-        marginTop: 12
-      }
-    }, /*#__PURE__*/React.createElement("button", {
-      onClick: () => setGFormOpen(false),
-      style: S.secondaryBtn
-    }, "キャンセル"), /*#__PURE__*/React.createElement("button", {
-      onClick: sendGroup,
-      style: S.primaryBtn
-    }, "按分して保存")));
-  })()), /*#__PURE__*/React.createElement("section", {
+    },
+    className: "no-print"
+  }, "⚠ 同じ圃場が2件入っています：", dupNames.slice(0, 5).join("、"), dupNames.length > 5 ? "他" + (dupNames.length - 5) + "件" : "", "。別の端末と重なった可能性があります。地図で圃場をタップして「本日の作業から外す」で片方を外してください"), 
+/*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -5713,7 +5331,8 @@ function WorkTab(p) {
     }, fmt(c.ml), (agriAmountUnit(c.form) === "kg" ? " g" : " mL")))), (w.reportMemo || w.memo) && /*#__PURE__*/React.createElement("div", {
       style: S.memoLine
     }, "備考:", w.reportMemo || w.memo)));
-  }))))); // 帯を外したので、その高さぶんの下余白(76px)も不要になった
+  })))); // 帯を外したので、その高さぶんの下余白(76px)も不要になった
+  // v9.30: 作業リストの一覧表示をやめたので、それを畳んでいた Fragment も消した
 }
 
 // ═══════════════════ 作業の進捗バー ═══════════════════
@@ -10092,7 +9711,7 @@ function SettingsTab(p) {
     desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、「🧪 薬剤・プリセット」に登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。このタブはタンク1杯分を計算するための電卓です。圃場への薬剤の適用は作業タブの「この日に使用した薬剤」で行います。何度も使う組み合わせは「⭐プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます。上限は薬剤ごとに調合タブの「🧪 薬剤・プリセット」で登録でき、未登録の薬剤は既定3回です。設定タブの「農薬の使用回数」で作期の開始日を設定すると、その日以降の実績だけを数えます(作期が変わったら日付を更新するとカウントがやり直しになります)。"
   }, {
     title: "🚁 作業予定・進捗確認タブ(以下「作業タブ」)",
-    desc: "日付ごとに回る圃場をリスト化し、実績を入力・送信します。圃場の追加は「圃場を追加」の1か所にまとまっています。登録済みの圃場が一覧で出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると一覧上部に注意バナーが出ます)。計算式は圃場ごとに「面積÷10×投下量」で、調合タブの「面積から計算」とまったく同じ式・同じ端数処理(0.01L単位)です。投下量の欄の下に出る「対象◯圃場 ／ 合計◯a → ◯L」は、実際に書き換わる圃場だけを、書き換わる値そのもので合計した予告なので、押した結果と必ず一致します(実績を入力済みの圃場は上書きされません)。集計バーの「合計薬液量」は、実績を入力した圃場だけ実散布量に切り替わるため、まだ実績のない状態の予定合計とは差が出ます。実績が何圃場ぶん混ざっているかは「実績 ◯/◯圃場」で分かります。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力して圃場に適用します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。薬量は各圃場の予定薬液量÷希釈倍率で自動計算されます。入力した薬剤はタブを移動しても保持され、日付を変えると空から始まります。圃場は右の⣿マークを長押ししてドラッグすると散布順を並べ替えられます(誤って動かないよう、左の番号部分では並べ替えできません。実施済みの圃場も並べ替え対象外です)。✎ボタンで圃場名・作物名・面積などをその場で編集できます(圃場マスタにも反映されます)。「実績入力」ボタンを押すとその場にポップアップが開き、散布量・フライト数を空欄から記録します(入力するのは散布量だけです。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは✎から圃場の面積を編集してください)。実績を入力しても圃場は一覧に残ったまま実際の数値がその場に表示され、「✎ 実績を修正」を押すと入力済みの値が入った状態でポップアップが開き、いつでも直せます。圃場を外したいときは各行の「外す」のほか、「🗑 選択して削除」で複数の圃場を選んでまとめて外したり、「この日をすべて外す」で一括削除できます(どちらも確認画面が出ます。圃場マスタには残ります)。「☁ 進捗を送信」で送信が完了すると色が変わり「✓送信済」と表示されます。各圃場には「累計」が出ます。その日に回る順で予定薬液量を足した値で、タンク容量(設定タブの「散布タンク」。既定200L)を超える手前には「⛽ ここで補給」の区切りが入り、その後は累計を数え直します。実績入力済みの圃場は累計に入れないので、これから回る分だけが分かります。並べ替えると累計も補給の位置も計算し直されます。各圃場の「🚗 ナビ」でその圃場までのナビをGoogleマップで開けます(地図タブで囲んで登録した圃場のみ。囲んでいない圃場はボタンが薄く表示されます)。進捗地図で圃場をタップしたときの吹き出しからも、同じナビを開けます(吹き出しの先頭にあります)。進捗地図の「🏷 札あり／🏷 札なし」で、圃場名と面積の札を消せます(全画面でも地図の右わきの🏷で切り替えられます)。札は45秒ごとの描き直しのたびに作り直され、圃場が多いとそこで画面が止まります。動きが重いと感じたら消してください(消しても圃場をタップすれば名前・面積・実績は吹き出しに出ます)。進捗地図は直近3日を見ます。今日の作業に入っていない圃場でも、直近3日のうちに散布し終えていれば「前日までに済」(青)で出るので、済んだ場所へまた向かわずに済みます。まだ済んでいない圃場は「↩ 直近3日のやり残し ◯圃場を引き継ぐ」でその日のリストに入れられます(圃場だけが入り、薬剤と投下量はその日の値を入れ直してください)。前の日の記録はそのまま残ります。進捗地図には現在地が常に青い丸で出ます(まわりの薄い円は測位の精度で、大きいときは位置がずれている可能性があります)。現在地が出ていないときは「📍 位置情報を使う」が出るので、押すと位置情報の確認が出ます(すでに拒否している場合はブラウザが確認を出さないため、「⚠ 位置情報が拒否されています」と出て端末の設定から戻す案内になります)。地図が現在地を追いかけて動くことはないので、「📍 現在地」を押したときだけ寄ります。「⛶ 地図を全画面で見る」にすると上のツールバーは隠れますが、地図の右わきに小さなボタンが縦に4つ出ます(✕ 全画面をやめる ／ 📍 現在地 ／ ⊙ 今日の圃場 ／ 🏷 札の出し入れ)。位置情報は地図に出すためだけに使い、スプレッドシートにも他の端末にも送信しません。進捗地図を閉じると測位も止まります。上部の「順送りナビ」は、その日の圃場を並び順に1つずつ案内します。実績を入力すると自動で次の圃場に進み、「⏭ この圃場は飛ばす」で順番を飛ばせます(飛ばした記録は保存されず、日付を変えるとリセットされます)。下部の「記録」欄は一覧表示をせず、CSV出力・印刷のみに使います。"
+    desc: "その日に回る圃場を登録し、地図を見ながら実績を入力して送信します。圃場の追加は「🌾 本日の作業圃場登録」にまとまっています。登録済みの圃場が出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると注意バナーが出ます)。計算式は圃場ごとに「面積÷10×投下量」で、調合タブの「面積から計算」とまったく同じ式・同じ端数処理(0.01L単位)です。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。現場の操作は進捗地図で行います。圃場をタップすると吹き出しが開き、そこから「🚗 この圃場へナビ」「✓ 散布済にする」「🚁 実績入力」「本日の作業から外す」ができます。まだ撒いていない圃場には「予定散布量 ◯L」が出るので、積んで行く量が地図だけで分かります(v9.26)。実績を入れた圃場は「実散布量 ◯L(予定 ◯L)」に変わります。実績入力では散布量だけを入れます。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは圃場一覧の「編集」から直してください。進捗地図の「🏷 札あり／🏷 札なし」で、圃場名と面積の札を消せます(全画面でも地図の右わきの🏷で切り替えられます)。札は45秒ごとの描き直しのたびに作り直され、圃場が多いとそこで画面が止まります。動きが重いと感じたら消してください。進捗地図は直近3日を見ます。今日の作業に入っていない圃場でも、直近3日のうちに散布し終えていれば「前日までに済」(青)で出るので、済んだ場所へまた向かわずに済みます。まだ済んでいない圃場は「↩ 直近3日のやり残し ◯圃場を引き継ぐ」でその日のリストに入れられます(圃場だけが入り、薬剤と投下量はその日の値を入れ直してください)。前の日の記録はそのまま残ります。現在地は常に青い丸で出ます(まわりの薄い円は測位の精度です)。出ていないときは「📍 位置情報を使う」を押してください。地図が現在地を追いかけて動くことはなく、「📍 現在地」を押したときだけ寄ります。位置情報は地図に出すためだけに使い、スプレッドシートにも他の端末にも送信しません。進捗地図を閉じると測位も止まります。「☁ 進捗を送信」で送信します。防除記録(台帳)に載るのは実績を入れた圃場だけで、予定と調合は共有されますが台帳には書きません(v9.28)。下部の「記録」欄は一覧表示をせず、アグリノート転記・CSV出力・印刷に使います。※ v9.30 で作業リストの一覧表示をやめました。並べ替え・タンク補給の区切り・順送りナビ・まとめ散布も一緒に外しています。圃場の登録と実績の入力は、上の「本日の作業圃場登録」と進捗地図で行ってください。"
   }, {
     title: "🗺 圃場登録・圃場一覧タブ(以下「地図タブ」)",
     desc: "衛星写真上で圃場を囲んで登録できます。地図エンジンは設定タブで「無料地図(Leaflet)」と「Google マップ」を切り替えられます(既定は無料地図)。どちらで登録した圃場も共通のデータとして扱われ、エンジンを切り替えても圃場は消えません。「✏ 圃場を囲む」を押してから地図をタップすると頂点が打たれ、打った点はドラッグで位置調整できます。作図パネルの「頂点を追加」をOFFにすると、地図をタップしても頂点が増えません。形を整えている最中に地図を触って離れた場所に点ができるのを防げます(登録済みの圃場をタップして編集を始めたときは最初からOFFです)。頂点を消すときは「🗑 頂点を消す」をONにしてから頂点をタップします。ONの間は全部の頂点が✕になり、タップしたものがその場で消えます(ONの間は「頂点を追加」は自動でOFFになります)。頂点と頂点の間に出る小さな丸をドラッグすると、その辺の途中に頂点を足せるので、四角形以外の形も囲めます(触れただけでは増えません。形を確かめたいときに誤って頂点が増えないようにしてあります)。「↩ 1つ戻す」は追加・移動・削除・挿入を1手ずつ戻せます。3点以上打つと面積が自動計算されます。圃場名を入力して「この圃場を登録」で保存すると圃場マスタにも自動登録されます。無料地図では国土地理院の衛星写真と国土地理院の標準地図(道路・地名)を、Googleマップでは衛星写真と道路・地名を同時表示(hybrid)と地図表示を切り替えられます。「📍 現在地」でGPS位置を地図に表示できます。「🔍 住所・地名を入力して地図を移動」に住所や地名を入れると、その場所へ地図がジャンプします(国土地理院の住所検索を使うためAPIキー不要で、無料地図・Googleマップの両方で使えます)。PC・タブレットでは地図がフルワイドで大きく表示されます。「🚗 ナビ」でGoogleマップアプリのナビが起動します。登録済みの圃場は赤い輪郭で表示されます。衛星写真は緑や茶が大半なので、赤が最も輪郭を追いやすいためです。中の作物の様子が見えるよう、塗りは薄く輪郭は濃くしてあります。拡大すると圃場名・作物名・面積の札が出ます。地図は画面の縦幅いっぱいに自動で広がるので、スクロールせずに全体を見られます。「⛶」を押すと見出しやタブバーも隠して完全な全画面になります。全画面で作図していないときは下の帯に「✏ 圃場を囲む」と「✕ 全画面」が出るので、全画面のまま次の圃場を囲めます(登録した圃場をタップすれば、全画面のまま形を直せます)。作図中は右上の「✕ 全画面をやめる」で戻ります。圃場の一覧は上の「📋 一覧」に切り替えると出ます。一覧は地区ごとに折りたためて検索もでき、見出しの「👁 表示中」を押すとその地区を地図から一時的に消せます(端末には保存されないので、アプリを開き直すと元に戻ります)。各行の👁でも1圃場ずつ切り替えられます。Googleマップを使うには設定タブでAPIキーの登録が必要です。"
