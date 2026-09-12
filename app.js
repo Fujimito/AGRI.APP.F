@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.27";
+const APP_VERSION = "v9.28";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -5039,7 +5039,7 @@ function WorkTab(p) {
     }
   }, p.syncing ? "送信中…" : pending === 0 ? "☁ 送信するものはありません" : "☁ 進捗を送信(未送信 " + pending + "件)"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "台帳(防除記録)へはこの送信で直接記録されます。送信済みは二重登録されません")) ), recSummary.length > 0 && /*#__PURE__*/React.createElement("section", {
+  }, "台帳(防除記録)へ載るのは実績を入れた圃場だけです。予定と調合は共有されますが、台帳には書きません。送信済みは二重登録されません")) ), recSummary.length > 0 && /*#__PURE__*/React.createElement("section", {
     style: {
       ...S.card,
       marginTop: 12
@@ -5500,7 +5500,7 @@ function WorkTab(p) {
     }
   }, p.syncing ? "送信中…" : !p.gasUrl ? "☁ 送信先が未設定です" : pending === 0 ? "☁ 送信するデータはありません" : "☁ 進捗を送信(未送信 " + pending + "件)"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "台帳(防除記録)へはこの送信で直接記録されます。電波のある場所で押してください。送信済みは二重登録されません。")), /*#__PURE__*/React.createElement("section", {
+  }, "台帳(防除記録)へ載るのは実績を入れた圃場だけです。予定と調合は共有されますが、台帳には書きません。電波のある場所で押してください。送信済みは二重登録されません。")), /*#__PURE__*/React.createElement("section", {
     style: S.card,
     id: "print-area"
   }, /*#__PURE__*/React.createElement("div", {

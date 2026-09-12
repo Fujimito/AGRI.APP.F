@@ -985,15 +985,25 @@ function jstStamp_(v) {
 // 34圃場ぶん凍っていた)。使う人からは「送信したのに薬剤と実散布量が
 // 反映されない」に見える。実際には反映先が別の行(翌日ぶん)だった。
 //
-// 載せるのは、薬剤が決まった行(調合済)と実績が入った行(散布済)だけ。
-// 予定だけの段階は「作業」シートに残っており、失われない。
+// v9.25 では「薬剤が決まった行(調合済)」も載せていた。これをやめる(v9.28)。
+//
+// 薬剤を圃場へ適用した時点では、まだ1滴も撒いていない。撒く前の予定が
+// 元帳に載ると、薬剤を差し替えた・その日を取りやめた・圃場を外した場合に
+// 「調合済」の行が残る。v9.25 で塞いだ凍った行の問題が、予定(planned)から
+// 調合済へ移るだけで同じ形で再発する。
+//
+// 防除記録は転記元に使う1枚なので、載せるのは**実際に撒いたものだけ**にする。
+// 予定と調合は「作業」シートと進捗地図が持っており、失われない。
+//
+// 実績L だけ入っていて状態が done でない行は、理屈の上では作れない
+// (実績Lはアプリが実績入力のときにだけ書く)。が、古い版で作られた行や
+// 手で直した行のために残してある。載せ漏らすより載せるほうが安全側。
 //
 // ★ ledgerSyncWorks_(書き込み) / ledgerCheck_(照合) / ledgerRebuild_(作り直し)
 //   の3か所で必ず同じ判定を通すこと。1か所だけ変えると、書かないのに
 //   照合が「台帳に無い」と言い続ける、作り直しで復活する、が起きる。
 function ledgerWorthy_(r) {
   if (String(r[5] || "") === "done") return true;   // 状態
-  if (Number(r[9]) || 0) return true;               // 薬剤数
   if (Number(r[7]) || 0) return true;               // 実績L
   return false;
 }
@@ -1105,7 +1115,6 @@ function ledgerSyncWorks_(rows, team) {
   for (var k = 0; k < rows.length; k++) {
     var r = rows[k];
     if (r[16]) continue;                 // 削除済みは台帳に足さない(S3)
-    if (!ledgerWorthy_(r)) continue;     // 予定だけの段階は載せない
     var want = ledgerRowFromWork_(r);    // S4: 照合と同じ関数を通す
     // key は r[0] を直接使わず、ledgerRowFromWork_ が正規化した後の
     // want[1] を使う。r[0] は workRow_ が safeCell_ を通した記録IDだと
@@ -1123,6 +1132,10 @@ function ledgerSyncWorks_(rows, team) {
         .setValues([want.slice(1).map(safeCell_)]);
       updated++;
     } else {
+      // 台帳に無い行を新しく作るのは、実績が入ったものだけ(v9.28)。
+      // 既にある行は上の分岐で必ず更新する。これを逆にすると、実績を
+      // 取り消したときに台帳が「散布済」のまま取り残される
+      if (!ledgerWorthy_(r)) continue;
       appendAt[key] = append.length;
       append.push(want.map(safeCell_));
       added++;
@@ -1172,6 +1185,8 @@ function ledgerCheck_(team) {
   // データを持たず made 自身の [[Prototype]] を書き換えてしまう
   // (代入の特殊挙動。have と同じ実測・同じ直し方)。Object.create(null) にする
   const made = Object.create(null);   // 記録ID → 作り直した行
+  // 記録ID → 台帳に載せるべき行か(v9.28)。台帳に無いときだけ効かせる
+  const worthyOf = Object.create(null);
   if (wk.getLastRow() >= 2) {
     const rows = wk.getRange(2, 1, wk.getLastRow() - 1, WORK_HEADERS.length).getValues();
     for (let i = 0; i < rows.length; i++) {
@@ -1179,8 +1194,12 @@ function ledgerCheck_(team) {
       if (!r[0] && r[0] !== 0) continue;
       if (team && String(r[1]) !== String(team)) continue;
       if (r[16]) continue; // 削除済み
-      if (!ledgerWorthy_(r)) continue; // 予定だけの段階は載せない
+      // 実績の無い作業も made に入れる(v9.28)。台帳に既にある行は、実績を
+      // 取り消しても実態に合わせて更新され続ける(ledgerSyncWorks_)ので、
+      // ここで落とすと「作業に無い(台帳にはある)」に数えられてしまう。
+      // 台帳に無い場合だけ「無くて正しい」として下の突き合わせで飛ばす
       const row = ledgerRowFromWork_(r);
+      worthyOf[String(row[1])] = ledgerWorthy_(r);
       // key は r[0] を直接使わず、ledgerSyncWorks_ と同じく
       // ledgerRowFromWork_ が正規化した後の row[1] を使う。r[0] のままだと、
       // 先頭アポストロフィの剥がし方が台帳(have)側と食い違い、同じ記録IDでも
@@ -1239,6 +1258,8 @@ function ledgerCheck_(team) {
   const bump = (m, k) => { m[k] = (m[k] || 0) + 1; };
   for (const id in made) {
     if (!have[id]) {
+      // 実績の無い作業が台帳に無いのは正しい姿(v9.28)。数えない
+      if (!worthyOf[id]) continue;
       onlyWork++;
       bump(onlyWorkBy, String(made[id][12] || "?") + (Number(made[id][7]) ? "・薬剤あり" : "・薬剤なし"));
       push({ id: id, why: "台帳に無い" });
@@ -1337,6 +1358,10 @@ function ledgerRebuild_(team, dryRun, purge) {
   // Object.create(null) で継承の無い辞書にする
   const made = Object.create(null);
   const order = [];
+  // 記録ID → 台帳に載せるべき行か(v9.28)。台帳に無いときだけ効かせる。
+  // ledgerSyncWorks_ と同じ規則: 新しく足すのは実績のある行だけ、
+  // 既にある行は実態に合わせて直す
+  const worthyOf = Object.create(null);
   if (wk.getLastRow() >= 2) {
     const rows = wk.getRange(2, 1, wk.getLastRow() - 1, WORK_HEADERS.length).getValues();
     for (let i = 0; i < rows.length; i++) {
@@ -1344,10 +1369,10 @@ function ledgerRebuild_(team, dryRun, purge) {
       if (!r[0] && r[0] !== 0) continue;
       if (team && String(r[1]) !== String(team)) continue;
       if (r[16]) continue; // 削除済みは台帳に足さない(既にある行は消さない)
-      if (!ledgerWorthy_(r)) continue; // 予定だけの段階は載せない
       const id = String(r[0]);
       if (!made[id]) order.push(id);
       made[id] = ledgerRowFromWork_(r);
+      worthyOf[String(made[id][1])] = ledgerWorthy_(r);
     }
   }
 
@@ -1387,6 +1412,8 @@ function ledgerRebuild_(team, dryRun, purge) {
     const id = order[k];
     const want = made[id];
     if (!(id in rowOf)) {
+      // 台帳に無い行を作るのは実績のあるものだけ(v9.28)
+      if (!worthyOf[id]) continue;
       added++;
       bump(addedBy, String(want[12] || "?") + (Number(want[7]) ? "・薬剤あり" : "・薬剤なし"));
       if (!dryRun) append.push(want.map(safeCell_));
