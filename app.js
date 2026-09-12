@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.30";
+const APP_VERSION = "v9.31";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -548,48 +548,6 @@ const volSuffix = unitKey => ({
   kg: "kg",
   g: "g"
 })[unitKey] || "L";
-// 散布車のタンク1杯で回れる圃場を割り出す純関数。
-// works には「その日の未実施の圃場」を回る順番どおりに渡す(実績入力済みは散布も補給も
-// 済んでいる前提なので数えない)。戻り値は work.id をキーにした辞書:
-//   { planned, cum, tankNo, over, refill }
-//   cum    … その杯の中での累計(この圃場ぶんを含む)
-//   over   … その圃場1つだけでタンク容量を超える
-//   refill … この圃場の手前に補給の区切りを出す場合だけ {tankNo, usedL, capL}
-// 結果を state に持たず描画のたびに呼ぶ想定。並べ替え・追加削除・実績入力に自動追従する。
-function planTankRefills(works, capacityL) {
-  const cap = parseFloat(capacityL);
-  // 空欄・0・負数・数値でない入力のときはタンク容量の機能を使わない(累計だけ出す)
-  const useCap = isFinite(cap) && cap > 0;
-  const info = {};
-  let cum = 0;
-  let tankNo = 1;
-  (works || []).forEach(w => {
-    const v = parseFloat(w.plannedL);
-    // 投下量が未計算の圃場は 0 として扱う(未入力の警告は既存のバナーが担当する)
-    const planned = isFinite(v) && v > 0 ? v : 0;
-    // cum が 0 のときは区切らない。1圃場だけで容量を超える場合でも必ず前へ進むので無限ループにならない
-    const needsRefill = useCap && planned > 0 && cum > 0 && cum + planned > cap;
-    let refill = null;
-    if (needsRefill) {
-      refill = {
-        tankNo: tankNo,
-        usedL: cum,
-        capL: cap
-      };
-      tankNo += 1;
-      cum = 0;
-    }
-    cum += planned;
-    info[w.id] = {
-      planned: planned,
-      cum: cum,
-      tankNo: tankNo,
-      over: useCap && planned > cap,
-      refill: refill
-    };
-  });
-  return info;
-}
 const today = () => {
   const d = new Date();
   return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
@@ -2268,26 +2226,6 @@ function App() {
     });
   };
 
-  // ドラッグ&ドロップ:この日の可視リスト内で、fromの圃場をtoの位置へ移動
-  const reorderWork = (fromId, toId) => {
-    if (fromId === toId) return;
-    const dayW = works.filter(w => w.workDate === workDate && !w.reported);
-    const fromIdx = dayW.findIndex(w => w.id === fromId);
-    const toIdx = dayW.findIndex(w => w.id === toId);
-    if (fromIdx < 0 || toIdx < 0) return;
-    const reordered = [...dayW];
-    const [moved] = reordered.splice(fromIdx, 1);
-    reordered.splice(toIdx, 0, moved);
-    // 元の並びで「この日の可視作業」があった位置に、並べ替え後の列を差し込む
-    const result = [];
-    let ri = 0;
-    works.forEach(w => {
-      if (w.workDate === workDate && !w.reported) {
-        result.push(reordered[ri++]);
-      } else result.push(w);
-    });
-    setWorksSave(result);
-  };
   // 面積から計算するときは作業タブの一括計算と同じ端数処理を通す(0.01L単位)
   const effTotalL = mode === "direct" ? parseFloat(totalL) || 0 : plannedLFromArea(areaA, ratePer10a);
   const totalMl = effTotalL * 1000;
@@ -2402,63 +2340,6 @@ function App() {
     });
   };
 
-  // まとめ散布(複数圃場):フライト実績総量を面積比で各圃場に按分し、
-  // それぞれ独立した散布実績として記録する
-  const submitGroupReport = (ids, rep) => {
-    const members = works.filter(w => ids.includes(w.id));
-    if (members.length < 2) return;
-    const groupId = "G" + Date.now();
-    const totalSprayed = parseFloat(rep.sprayedL) || 0;
-
-    // 各圃場の面積(未入力は0扱い)。面積合計が0なら均等割り
-    const areas = members.map(w => parseFloat(resolveWork(w).areaA) || 0);
-    const areaSum = areas.reduce((s, a) => s + a, 0);
-    const useEqual = areaSum <= 0;
-    const groupSize = members.length;
-
-    // 端数が合計とズレないよう、最後の圃場で調整
-    let allocated = 0;
-    const shares = members.map((w, i) => {
-      let share;
-      if (i === groupSize - 1) {
-        share = Math.round((totalSprayed - allocated) * 100) / 100;
-      } else {
-        const ratio = useEqual ? 1 / groupSize : areas[i] / areaSum;
-        share = Math.round(totalSprayed * ratio * 100) / 100;
-        allocated += share;
-      }
-      return share;
-    });
-    const names = members.map(w => resolveWork(w).name).join("＋");
-    // 按分値は members(= works の並び順)の添字で計算している。書き戻しも同じ
-    // 基準で引くこと。タップした順の ids で引くと、一覧と違う順に選んだときに
-    // 圃場と按分値の対応がズレる(プレビューと保存値が食い違う)
-    const shareById = new Map(members.map((w, i) => [w.id, shares[i]]));
-    const next = works.map(w => {
-      if (!shareById.has(w.id)) return w;
-      const f = resolveWork(w);
-      return {
-        ...w,
-        reported: true,
-        reportSynced: false,
-        sprayedL: shareById.get(w.id),
-        // まとめ散布に圃場ごとのフライト内訳は無い。個別入力していた記録を
-        // まとめ散布で上書きしたとき、古い内訳が実散布量と食い違って残るのを防ぐ
-        flights: [],
-        reportAreaA: parseFloat(f.areaA) || "",
-        reportMemo: (rep.memo ? rep.memo + " " : "") + "【連続散布 " + names + " 合計" + fmt(totalSprayed, 2) + "L を面積比按分】",
-        reportDate: today(),
-        reportAt: w.reportAt || nowIso(),
-        by: w.by || recorder,
-        flightGroupId: groupId
-      };
-    });
-    setWorksSave(next);
-    flash(members.length + "圃場に面積比で按分して記録しました(合計" + fmt(totalSprayed, 2) + "L)");
-    pushProgress({
-      quiet: true
-    });
-  };
   const deleteWork = id => {
     addTomb("works", id);
     setWorksSave(works.filter(w => w.id !== id));
@@ -3748,7 +3629,6 @@ function App() {
     addWork,
     removeWork,
     removeWorks,
-    reorderWork,
     upsertField,
     areas,
     addWorks,
@@ -3759,7 +3639,6 @@ function App() {
     removeServerWorks,
     bulkReportFromRate,
     submitReport,
-    submitGroupReport,
     deleteWork,
     pushProgress,
     syncing,
@@ -4285,21 +4164,6 @@ function WorkTab(p) {
   const [agriOpen, setAgriOpen] = useState(false); // アグリノート転記ビュー
   const [repFlights, setRepFlights] = useState([""]);
   const [repMemo, setRepMemo] = useState("");
-  const [selected, setSelected] = useState([]);
-  // 選択モードは1つだけ:"none"=通常 / "group"=まとめ散布 / "delete"=選択削除。
-  // 1つの状態にまとめることで、2つの選択モードが同時に動いて取り違える事故を防いでいる。
-  const [selMode, setSelMode] = useState("none");
-  const groupMode = selMode === "group";
-  const deleteMode = selMode === "delete";
-  const [gSprayed, setGSprayed] = useState("");
-  const [gMemo, setGMemo] = useState("");
-  const [gFormOpen, setGFormOpen] = useState(false);
-  // モード切替時は必ず選択をリセットする(前のモードの選択が残らないように)
-  const switchMode = m => {
-    setSelMode(prev => prev === m ? "none" : m);
-    setSelected([]);
-    setGFormOpen(false);
-  };
   const [editingFieldId, setEditingFieldId] = useState(null);
   const [ef, setEf] = useState({
     name: "",
@@ -4313,7 +4177,6 @@ function WorkTab(p) {
   // 実績入力済みの行は1行に畳む。開いている行のIDを1つだけ保持する
   const [openRowId, setOpenRowId] = useState(null);
   // 「未実施のみ表示」フィルタ
-  const [onlyPending, setOnlyPending] = useState(false);
   // 作業タブの表示切替。"list"=作業一覧 / "map"=進捗地図。
   // 作業日と集計は両方で共通に出し、その下だけを差し替える。
   // 選んだ表示は端末に残す(見たい側が人によって違うため)
@@ -4327,28 +4190,10 @@ function WorkTab(p) {
   const [prepOpen, setPrepOpen] = useState(() => p.works.filter(w => w.workDate === p.workDate).length === 0);
   const [pickForDay, setPickForDay] = useState(false);
   const [chemTargetIds, setChemTargetIds] = useState([]); // 薬剤の適用先としてチェックした圃場ID
-  const [dragId, setDragId] = useState(null); // ドラッグ中の圃場ID
-  const [dragOverId, setDragOverId] = useState(null); // ドロップ先候補
-  const [dragPos, setDragPos] = useState(null); // 指・ポインタの現在位置(フロートするチップの表示用)
-  // 順送りナビで「飛ばす」を押した作業ID。その場限りの操作なので保存データには入れない
-  const [naviSkipped, setNaviSkipped] = useState([]);
-  const dragIdRef = useRef(null);
-  // 作業日を切り替えたら「飛ばした」記録は破棄する(前の日の除外を持ち越さないため)
-  useEffect(() => {
-    setNaviSkipped([]);
-  }, [p.workDate]);
   // 実績入力済みでも当日リストからは消さず、そのまま表示・編集できるようにする
   const dayList = p.works.filter(w => w.workDate === p.workDate);
   // 薬剤の一括適用・投下量計算など「未実施の圃場」だけを対象にすべき操作用
   const pendingDayList = dayList.filter(w => !w.reported);
-  // 画面に出す行。「未実施のみ」がONなら実績入力済みを隠す(並べ替えは通常表示のときだけ)
-  const shownList = onlyPending ? pendingDayList : dayList;
-  // 次にやる圃場(この日の並び順で最初の未実施)
-  // この日の並びで最初の未実施。一覧で「▶ 次の圃場」と印を付けるのに使う
-  const nextWork = pendingDayList[0] || null;
-  // タンクの累計と補給位置。state に持たず毎回 pendingDayList から導出するので、
-  // 並べ替え・圃場の追加削除・実績入力のたびに自動で計算し直される
-  const tankPlan = planTankRefills(pendingDayList, p.tankCapacityL);
   // 同じ圃場がこの日に2件以上入っていないか。
   // v8.73 でIDを「日付＋圃場ID」から決めたので新しくは増えないが、
   // それ以前に別の端末と重なった分は残っている。黙って消すのは危ないので、
@@ -4369,23 +4214,12 @@ function WorkTab(p) {
   }, [dayList]);
   // 本日の投下量(L/10a)がまだ計算されていない圃場がある場合は警告バナーを出す
   const needsRateWarning = pendingDayList.some(w => !(parseFloat(w.plannedL) > 0));
-  // 順送りナビの対象。nextWork(一覧の印)は壊さず、飛ばした分だけを別に除く
-  const naviQueue = pendingDayList.filter(w => !naviSkipped.includes(w.id));
-  const naviNext = naviQueue[0] || null;
   const history = p.works.filter(w => w.reported).sort((a, b) => b.id - a.id);
   // 未送信の件数表示は「選んでいる作業日」ぶんだけ数える。
   // ただし送信ボタン(pushProgress)自体は日をまたいでたまっている分をまとめて送る
   const pendingWorks = dayList.filter(w => !w.synced || w.reported && !w.reportSynced);
   const pending = pendingWorks.length;
 
-  // ドラッグ&ドロップ並べ替え(タッチ・マウス両対応)。共通処理を利用
-  const onHandleDown = (e, id) => startDragReorder(e, id, "data-work-id", {
-    ref: dragIdRef,
-    setDragId,
-    setDragOverId,
-    setDragPos,
-    onDrop: p.reorderWork
-  });
   // 集計バーは「圃場数・合計面積・合計薬液量」なので、実績入力済みも含めた
   // その日のリスト全体で集計する(見出しの「合計」と中身を一致させる)
   const sumArea = dayList.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
@@ -4456,31 +4290,6 @@ function WorkTab(p) {
     setReportingId(null);
     setRepFlights([""]);
   };
-  const toggleSelect = id => setSelected(selected.includes(id) ? selected.filter(x => x !== id) : [...selected, id]);
-  const openGroupForm = () => {
-    const members = p.works.filter(w => selected.includes(w.id));
-    setGSprayed(String(members.reduce((s, w) => s + (w.totalL || 0), 0) || ""));
-    setGMemo("");
-    setGFormOpen(true);
-  };
-  const sendGroup = () => {
-    p.submitGroupReport(selected, {
-      sprayedL: gSprayed,
-      memo: gMemo
-    });
-    setSelected([]);
-    setSelMode("none");
-    setGFormOpen(false);
-  };
-  // 選択削除:チェックした圃場をこの日のリストから外す
-  const deleteSelected = () => {
-    const names = p.works.filter(w => selected.includes(w.id)).map(w => p.resolveWork(w).name);
-    if (names.length === 0) return;
-    if (!confirm(names.length + "件の圃場をこの日のリストから外します。\n" + names.join("、") + "\n\n(圃場マスタには残ります。実績を入力済みの記録も消えます)\nよろしいですか？")) return;
-    p.removeWorks(selected);
-    setSelected([]);
-    setSelMode("none");
-  };
   // 一括削除:この日のリストを丸ごと空にする
   const deleteAllToday = () => {
     if (dayList.length === 0) return;
@@ -4524,7 +4333,6 @@ function WorkTab(p) {
     const idx = dayList.findIndex(w => w.fieldId === fieldId);
     return idx >= 0 ? idx + 1 : 0;
   };
-  const draggingWork = dragId != null ? dayList.find(w => w.id === dragId) : null;
   // ポップアップ用:編集中の圃場・実績入力中の作業(元データが消えていたら閉じた扱い)
   const editingField = editingFieldId != null ? p.fields.find(f => f.id === editingFieldId) : null;
   const reportingWork = reportingId != null ? p.works.find(w => w.id === reportingId) : null;
@@ -4566,7 +4374,7 @@ function WorkTab(p) {
   // v8.56: 画面下に固定していた「▶ 次の圃場／🚁 実績入力」の帯を外した。
   // 同じ内容が上の「順送りナビ」と各行の実績入力ボタンにあり、常に画面を
   // 塞ぐぶんだけ地図と一覧が狭くなっていた。
-  draggingWork && dragPos && dragChip(dragPos, p.resolveWork(draggingWork).name), /*#__PURE__*/React.createElement("section", {
+  /*#__PURE__*/React.createElement("section", {
     style: S.card,
     className: "no-print"
   }, /*#__PURE__*/React.createElement("div", {
@@ -5368,85 +5176,7 @@ function WorkProgress(p) {
   })));
 }
 
-// ═══════════════════ 長押しドラッグで並べ替える共通処理 ═══════════════════
-// attr で指定した data属性を持つ行を探し、指を離した位置の行へ移動する。
-// 作業タブの圃場並べ替えで使う。
-function startDragReorder(e, id, attr, o) {
-  e.preventDefault();
-  o.setDragId(id);
-  o.ref.current = id;
-  o.setDragOverId(id);
-  const p0 = e.touches ? e.touches[0] : e;
-  o.setDragPos({
-    x: p0.clientX,
-    y: p0.clientY
-  });
-  const rowAt = (x, y) => {
-    const el = document.elementFromPoint(x, y);
-    return el && el.closest ? el.closest("[" + attr + "]") : null;
-  };
-  const move = ev => {
-    const pt = ev.touches ? ev.touches[0] : ev;
-    o.setDragPos({
-      x: pt.clientX,
-      y: pt.clientY
-    });
-    const row = rowAt(pt.clientX, pt.clientY);
-    if (row) {
-      const overId = Number(row.getAttribute(attr));
-      if (overId) o.setDragOverId(overId);
-    }
-  };
-  const up = ev => {
-    const pt = ev.changedTouches ? ev.changedTouches[0] : ev;
-    const row = rowAt(pt.clientX, pt.clientY);
-    const fromId = o.ref.current;
-    if (row) {
-      const toId = Number(row.getAttribute(attr));
-      if (toId && fromId && toId !== fromId) o.onDrop(fromId, toId);
-    }
-    o.setDragId(null);
-    o.ref.current = null;
-    o.setDragOverId(null);
-    o.setDragPos(null);
-    window.removeEventListener("pointermove", move);
-    window.removeEventListener("pointerup", up);
-    window.removeEventListener("touchmove", move);
-    window.removeEventListener("touchend", up);
-  };
-  window.addEventListener("pointermove", move);
-  window.addEventListener("pointerup", up);
-  window.addEventListener("touchmove", move, {
-    passive: false
-  });
-  window.addEventListener("touchend", up);
-}
 
-// ドラッグ中に指の位置へ浮かぶ名札
-function dragChip(pos, label) {
-  return /*#__PURE__*/React.createElement("div", {
-    className: "no-print",
-    style: {
-      position: "fixed",
-      left: pos.x,
-      top: pos.y - 46,
-      transform: "translateX(-50%)",
-      zIndex: 900,
-      pointerEvents: "none",
-      background: "#1C2B21",
-      color: "#fff",
-      fontWeight: 800,
-      fontSize: 14.5,
-      padding: "9px 16px",
-      borderRadius: 20,
-      boxShadow: "0 6px 18px rgba(0,0,0,0.3)",
-      whiteSpace: "nowrap",
-      maxWidth: "80vw",
-      overflow: "hidden",
-      textOverflow: "ellipsis"
-    }
-  }, "⣿ ", label);
-}
 
 // ═══════════════════ 登録薬剤の呼び出しポップアップ ═══════════════════
 // データベースタブで登録した薬剤(名前・種類・剤型・希釈倍率)を一覧から選んで

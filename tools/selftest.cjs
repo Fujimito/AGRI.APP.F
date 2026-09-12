@@ -27,7 +27,7 @@ const EXPORTS = [
   "areaUnit", "volUnit", "dispArea", "areaSuffix", "dispVol", "volSuffix",
   "polygonAreaA", "earthRadiusAt", "measuredAreaIfOff", "segIntersects", "polygonSelfIntersects", "polygonCenter",
   "ptsMove", "ptsRemove", "ptsInsert", "drawMidpoints", "pushDrawHistory", "untwistPts",
-  "DRAW_HISTORY_MAX", "naviUrl", "fieldCenter", "planTankRefills",
+  "DRAW_HISTORY_MAX", "naviUrl", "fieldCenter",
   "shiftDate", "dateLabel", "newChem", "agriAmountUnit", "stripTrailingZeros",
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
@@ -204,18 +204,6 @@ for (let i = 0; i < t.DRAW_HISTORY_MAX + 20; i++) hist = t.pushDrawHistory(hist,
 eq("履歴 上限を超えて溜まらない", hist.length, t.DRAW_HISTORY_MAX);
 eq("履歴 古いものから捨てる", hist[hist.length - 1], [[t.DRAW_HISTORY_MAX + 19, t.DRAW_HISTORY_MAX + 19]]);
 
-// ── タンク補給の区切り ────────────────────────────────
-const w = (id, l) => ({ id, plannedL: l, reported: false });
-const plan = t.planTankRefills([w(1, 80), w(2, 80), w(3, 80)], 200);
-eq("タンク 3圃場で補給1回", [1, 2, 3].filter(id => plan[id].refill).length, 1);
-eq("タンク 補給は3圃場目の前", !!plan[3].refill, true);
-eq("タンク 補給直前までの使用量", plan[3].refill.usedL, 160);
-eq("タンク 補給後は累計を数え直す", plan[3].cum, 80);
-eq("タンク 補給後はタンク番号が進む", plan[3].tankNo, 2);
-eq("タンク 1圃場で容量超過を検出", t.planTankRefills([w(1, 250)], 200)[1].over, true);
-eq("タンク 容量未設定なら区切らない", !!t.planTankRefills([w(1, 80), w(2, 80), w(3, 80)], "")[3].refill, false);
-eq("タンク 容量未設定でも累計は出す", t.planTankRefills([w(1, 80), w(2, 80), w(3, 80)], "")[3].cum, 240);
-eq("タンク 予定未入力は0として扱う", t.planTankRefills([{ id: 1, plannedL: "" }], 200)[1].planned, 0);
 
 // ── 薬剤名の正規化(半角カナ・全角英数を吸収) ──────────────
 eq("正規化 半角カナ→全角", t.normalizeChemName("ﾍﾞｼﾞｾｲﾊﾞｰ"), "ベジセイバー");
