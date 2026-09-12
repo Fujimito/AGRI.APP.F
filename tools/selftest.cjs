@@ -2654,6 +2654,14 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
   // 使った薬剤はマスタと「前回と同じ薬液」に残す(適用のときにやっていた仕事)
   eq("実績の保存で薬剤マスタに残す",
     /const submitReport[\s\S]{0,1200}upsertChemMaster\(validDayChems/.test(src), true);
+  // 散布済にしたら、予定量をそのまま実績の初手として入れる(v9.35)。
+  // 予定どおりに撒くことが多いので、実績入力を開かずに済ませたい
+  eq("散布済で予定量を実績に入れる",
+    /const already = parseFloat\(x\.sprayedL\) \|\| 0;[\s\S]{0,200}const sprayed = already > 0 \? already : planned;/.test(src), true);
+  eq("手で入れた値は上書きしない", src.includes("already > 0 ? already : planned"), true);
+  eq("散布済でも薬液を焼き付ける",
+    /const toggleDone[\s\S]{0,1800}\.\.\.stampDayChems\(x, sprayed\)/.test(src), true);
+
   eq("実績の保存で前回の薬液に残す",
     /const submitReport[\s\S]{0,1400}rememberMix\(validDayChems\)/.test(src), true);
 }

@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.34";
+const APP_VERSION = "v9.35";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2159,13 +2159,23 @@ function App() {
           unreportPending: x.reportSynced ? true : x.unreportPending
         };
       }
+      // 散布済にしたら、予定量をそのまま実績の初手として入れる(v9.35)。
+      // 予定どおりに撒くことが多く、その場合は実績入力を開かずに済む。
+      // 違ったら吹き出しの「実績を直す」で上書きできる。
+      // 手で入れた値がある(0より大きい)ときは触らない。
+      // 予定が未計算(0)なら 0 のまま。「終わった」ことは色で伝わる。
+      const already = parseFloat(x.sprayedL) || 0;
+      const planned = parseFloat(x.plannedL) || 0;
+      const sprayed = already > 0 ? already : planned;
       return {
         ...x,
+        // 実績が入るので、その日の薬液もここで焼き付ける(v9.33 と同じ扱い)。
+        // 通さないと、散布済で入れた圃場だけ薬剤の無い記録になる
+        ...stampDayChems(x, sprayed),
         reported: true,
         reportSynced: false,
         unreportPending: false,
-        // 散布量はここでは入れない。0のままでも「終わった」ことは伝わる
-        sprayedL: parseFloat(x.sprayedL) || 0,
+        sprayedL: sprayed,
         reportAreaA: parseFloat(f.areaA) || "",
         reportDate: today(),
         // 実施した刻(ISO)。同じ日に2人が同じ圃場を済ませたとき、
