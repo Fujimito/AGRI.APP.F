@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.26";
+const APP_VERSION = "v9.27";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2406,6 +2406,11 @@ function App() {
   // シートを丸ごと2枚読むので、自動では呼ばない(このボタンからだけ)。
   const [ledgerReport, setLedgerReport] = useState(() => load(LEDGER_CHECK_KEY, null));
   const [ledgerPlan, setLedgerPlan] = useState(() => load(LEDGER_PLAN_KEY, null));
+  // 作り直しを実行した結果(v9.27)。下見(ledgerPlan)は実行すると捨てるので、
+  // そのままだと「消した件数」と「退避先のシート名」がどこにも残らない。
+  // 実行の直後に出る知らせも、続けて走る照合の知らせで上書きされる。
+  // 退避先の名前は、元に戻したいときに要る唯一の手がかりなので画面に残す。
+  const [ledgerDone, setLedgerDone] = useState(null);
   const ledgerCheck = async () => {
     if (!syncReady()) {
       flash(notReadyMsg());
@@ -2443,8 +2448,13 @@ function App() {
   //
   // 台帳は印刷して残す元帳なので、いきなり書かない。
   // 先に下見(dryRun)を出して、何が足りて何が直るかを見せてから実行する。
-  // 行は消さない。台帳にしか無い行(古い版で入れた記録)はそのまま残る。
-  const ledgerRebuild = async dryRun => {
+  //
+  // purge を付けたときだけ、作業シートにもう無い行を消す(v9.27)。
+  // 台帳は転記元にする1枚なので、予定のまま凍った行や、統合で消えた圃場の
+  // 行が残っていると読み違える。消す前にGAS側が丸ごと退避シートへ複製する。
+  // 下見は常に purge を付けて呼び、「消せる件数」まで見せる。実際に消すのは
+  // 別のボタン(「余分な行も消して作り直す」)を押したときだけ。
+  const ledgerRebuild = async (dryRun, purge) => {
     if (!syncReady()) {
       flash(notReadyMsg());
       return;
@@ -2470,8 +2480,13 @@ function App() {
         // 必ず「足す行」の直下に置く(離すと別の項目の内訳に見える)
         Object.keys(d.addedBy || {}).map(k => "　　└ " + k + " " + d.addedBy[k] + " 件\n").join("") +
         "・直す行 " + d.updated + " 件\n" +
-        "・触らない行 " + (d.untouched + d.kept) + " 件\n\n" +
-        "行は消しません。受信日時も書き換えません。\n" +
+        "・触らない行 " + (d.untouched + d.kept) + " 件\n" +
+        (purge
+          ? "・消す行 " + (d.purgeable || 0) + " 件(作業シートにもう無い行)\n\n" +
+            "消す前に「防除記録」を丸ごと " + (d.backupName || "防除記録_旧_…") + " へ退避します。\n" +
+            "他のチームの行と、チーム欄が空の古い行は消しません。\n"
+          : "\n行は消しません。") +
+        "受信日時は書き換えません。\n" +
         "元に戻す機能はありません。スプレッドシートの版履歴から戻せます。\n\n" +
         "実行しますか？")) return;
     }
@@ -2479,7 +2494,8 @@ function App() {
     const j = await post({
       type: "ledgerRebuild",
       team: teamCode.trim(),
-      dryRun: !!dryRun
+      dryRun: !!dryRun,
+      purge: !!purge
     }, 1);
     if (!j) {
       flash("実行できません(電波を確認してください)");
@@ -2487,7 +2503,11 @@ function App() {
     }
     if (!j.ok) {
       const old = j.error === "unknown type" || j.error === "invalid payload";
-      flash(old
+      // 退避に失敗したときはGAS側が1行も触らずに戻している。
+      // 「失敗した＝途中まで消えたかもしれない」と読ませない書き方にする
+      flash(j.error === "backup"
+        ? "退避シートを作れなかったので中止しました。台帳は1行も変わっていません。シートの数や権限を確認してください"
+        : old
         ? "スプレッドシート側のスクリプトが古い版です。Code.gs を貼り直して「新バージョン」でデプロイしてください"
         : "実行できません(" + (j.error || "不明") + ")");
       return;
@@ -2498,13 +2518,18 @@ function App() {
     if (dryRun) {
       save(LEDGER_PLAN_KEY, j);
       setLedgerPlan(j);
+      setLedgerDone(null);
     } else {
       localStorage.removeItem(LEDGER_PLAN_KEY);
       setLedgerPlan(null);
+      setLedgerDone(j);
     }
     flash((dryRun ? "下見しました: " : "✅ 作り直しました: ") +
       "足す " + j.added + " 件 / 直す " + j.updated + " 件 / 触らない " +
-      (j.untouched + j.kept) + " 件");
+      (j.untouched + j.kept) + " 件" +
+      (dryRun
+        ? (j.purgeable ? " / 消せる " + j.purgeable + " 件" : "")
+        : (j.purged ? " / 消した " + j.purged + " 件(退避先 " + j.backupName + ")" : "")));
     if (!dryRun) ledgerCheck();
   };
 
@@ -3724,6 +3749,7 @@ function App() {
     ledgerReport,
     ledgerRebuild,
     ledgerPlan,
+    ledgerDone,
     cloudSave,
     cloudLoad,
     syncShared,
@@ -9255,7 +9281,15 @@ function ledgerPlanBlock(j) {
       j.dryRun ? "下見の結果(まだ書いていません)" : "作り直しました"),
     /*#__PURE__*/React.createElement("div", null,
       "足す " + j.added + " 件 / 直す " + j.updated + " 件 / そのまま " + j.untouched +
-      " 件 / 台帳にしか無い(触らない) " + j.kept + " 件"),
+      " 件 / 台帳にしか無い " + j.kept + " 件"),
+    // 台帳にしか無い行のうち、消せるのはチーム一致のものだけ(v9.27)。
+    // 「台帳にしか無い」との差が、他チームとチーム欄が空の古い行にあたる
+    j.dryRun && j.purgeable ? /*#__PURE__*/React.createElement("div", {
+      style: { marginTop: 6, fontWeight: 700, color: "#9A3B26" }
+    }, "うち消せる " + j.purgeable + " 件(このチームの行だけ。他チームとチーム欄が空の行は消しません)") : null,
+    !j.dryRun && j.purged ? /*#__PURE__*/React.createElement("div", {
+      style: { marginTop: 6, fontWeight: 700 }
+    }, "消した " + j.purged + " 件 ／ 退避先 " + j.backupName) : null,
     Object.keys(j.addedBy || {}).length ? /*#__PURE__*/React.createElement("div", { style: { marginTop: 6 } },
       /*#__PURE__*/React.createElement("div", { style: { fontWeight: 700 } }, "足す行の内訳"),
       /*#__PURE__*/React.createElement("table", { style: { fontSize: 12, borderCollapse: "collapse" } },
@@ -9560,7 +9594,9 @@ function SettingsTab(p) {
       marginTop: 8
     }
   }, "🧾 台帳の照合(開発用)"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => p.ledgerRebuild(true),
+    // 下見は常に purge 付きで呼ぶ。消せる件数まで見せておかないと、
+    // 「余分な行も消す」のボタンを出すかどうかが決められない(v9.27)
+    onClick: () => p.ledgerRebuild(true, true),
     style: {
       ...S.smallSecondary,
       width: "100%",
@@ -9573,7 +9609,16 @@ function SettingsTab(p) {
       width: "100%",
       marginTop: 6
     }
-  }, "✍ 下見のとおりに作り直す(足す " + p.ledgerPlan.added + " / 直す " + p.ledgerPlan.updated + ")"), ledgerPlanBlock(p.ledgerPlan), /*#__PURE__*/React.createElement("p", {
+  }, "✍ 下見のとおりに作り直す(足す " + p.ledgerPlan.added + " / 直す " + p.ledgerPlan.updated + ")"), p.ledgerPlan && p.ledgerPlan.ok && p.ledgerPlan.dryRun && p.ledgerPlan.purgeable > 0 && /*#__PURE__*/React.createElement("button", {
+    // 行を消す唯一の入口(v9.27)。足す・直すだけのボタンとは分けてある。
+    // 同じボタンに相乗りさせると、消すつもりが無いときにも消えてしまう
+    onClick: () => p.ledgerRebuild(false, true),
+    style: {
+      ...S.smallDanger,
+      width: "100%",
+      marginTop: 6
+    }
+  }, "🧹 余分な行も消して作り直す(消す " + p.ledgerPlan.purgeable + ")"), ledgerPlanBlock(p.ledgerPlan), ledgerPlanBlock(p.ledgerDone), /*#__PURE__*/React.createElement("p", {
     style: S.note
   }, "「台帳の照合」は、「防除記録」シートを「作業」シートから作り直せるかを見るためのものです(読むだけで、シートは書き換えません)。v9.15 で、端末が台帳へ別に送っていた仕組み(調合・実績・取り消しの個別送信)は既にやめてあります。台帳は進捗の送信(pushWorks)を受けたGAS側が直接書きます。ここは食い違いが出ていないかを確かめる開発用の道具として残しています。"), ledgerReportBlock(p.ledgerReport), /*#__PURE__*/React.createElement("p", {
     style: S.note

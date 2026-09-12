@@ -44,8 +44,11 @@ function coerceIn(v, isText) {
 }
 
 class FakeSheet {
-  constructor(name) {
+  constructor(name, ss) {
     this.name = name;
+    // 改名(setName)は所属するスプレッドシートの索引も直す必要がある。
+    // 実物は親を辿れるので、張りぼてでも親を持たせる
+    this.ss = ss || null;
     this.rows = [];      // rows[r][c] (0始まり)
     this.frozen = 0;
     // 実物のシートは既定1000行で、その外を getRange で掴むと例外になる。
@@ -155,6 +158,33 @@ class FakeSheet {
     this.rows[at] = values.map((v, j) => coerceIn(v, this._isText(j)));
   }
   setFrozenRows(n) { this.frozen = n; }
+  setName(n) {
+    if (this.ss) {
+      if (this.ss.sheets[n] && this.ss.sheets[n] !== this) {
+        // 実物も同名のシートがあると例外を投げる
+        throw new Error("A sheet with the name \"" + n + "\" already exists.");
+      }
+      delete this.ss.sheets[this.name];
+      this.ss.sheets[n] = this;
+    }
+    this.name = n;
+    return this;
+  }
+  copyTo(ss) {
+    // 退避(バックアップ)の再現。実物は「<元の名前> のコピー」で作られる
+    if (ss && ss.COPY_FAIL) throw new Error("copyTo failed (test)");
+    const target = ss || this.ss;
+    let name = this.name + " のコピー";
+    let i = 2;
+    while (target.sheets[name]) name = this.name + " のコピー " + i++;
+    const c = new FakeSheet(name, target);
+    c.rows = this.rows.map(r => (r ? r.slice() : r));
+    c.maxRows = this.maxRows;
+    c.frozen = this.frozen;
+    c.formats = Object.assign({}, this.formats);
+    target.sheets[name] = c;
+    return c;
+  }
   deleteRows(start, count) {
     // 実物は行ごと消すので、シートの行数そのものが減る
     this.rows.splice(start - 1, count);
@@ -165,7 +195,7 @@ class FakeSheet {
 class FakeSpreadsheet {
   constructor() { this.sheets = {}; }
   getSheetByName(n) { return this.sheets[n] || null; }
-  insertSheet(n) { this.sheets[n] = new FakeSheet(n); return this.sheets[n]; }
+  insertSheet(n) { this.sheets[n] = new FakeSheet(n, this); return this.sheets[n]; }
 }
 
 function makeContext(props) {
@@ -200,10 +230,15 @@ function makeContext(props) {
     },
     Utilities: {
       formatDate: (d, tz, fmt) => {
-        // 使っているのは "yyyy-MM-dd" と "yyyy-MM-dd HH:mm:ss" の2つだけ。
+        // 使っているのは "yyyy-MM-dd" / "yyyy-MM-dd HH:mm:ss" / "yyyyMMdd_HHmm" の3つ。
         // タイムゾーンは Asia/Tokyo 固定で呼ばれる前提で +09:00 として整える。
         const t = new Date(new Date(d).getTime() + 9 * 3600 * 1000).toISOString();
-        return fmt === "yyyy-MM-dd" ? t.slice(0, 10) : t.slice(0, 19).replace("T", " ");
+        if (fmt === "yyyy-MM-dd") return t.slice(0, 10);
+        // 退避シートの名前(v9.27)。日付と時刻から記号を落とした形
+        if (fmt === "yyyyMMdd_HHmm") {
+          return t.slice(0, 10).split("-").join("") + "_" + t.slice(11, 16).replace(":", "");
+        }
+        return t.slice(0, 19).replace("T", " ");
       },
     },
     DriveApp: {

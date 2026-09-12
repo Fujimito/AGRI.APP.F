@@ -1517,7 +1517,9 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("列ごとの件数を見る", src.includes('tally("食い違った列", j.byCol)'), true);
   // ── 台帳の作り直し(v9.07) ──
   // 元帳を書き換えるので、先に下見を出してから実行する
-  eq("下見を先に呼べる", src.includes("p.ledgerRebuild(true)"), true);
+  // 下見は常に purge 付き(v9.27)。消せる件数を先に知らないと、
+  // 「余分な行も消す」ボタンを出すかどうかが決められない
+  eq("下見を先に呼べる", src.includes("p.ledgerRebuild(true, true)"), true);
   eq("実行も呼べる", src.includes("p.ledgerRebuild(false)"), true);
   // 下見を取っていなければ実行させない。
   // ただし .ok だけを見るのでは足りない(v9.09)。
@@ -1531,9 +1533,38 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.includes("localStorage.removeItem(LEDGER_PLAN_KEY);"), true);
   // 実行前に件数を見せて確認を取る
   eq("実行前に確認を取る", src.includes("window.confirm("), true);
-  eq("行を消さないと書いてある",
-    src.includes("行は消しません。受信日時も書き換えません。"), true);
+  eq("purge を付けなければ行を消さないと書いてある",
+    src.includes('"\\n行は消しません。"'), true);
   eq("下見の結果を出す", src.includes("ledgerPlanBlock(p.ledgerPlan)"), true);
+
+  // ── 余分な行を消す道(v9.27) ──
+  // 台帳は転記元にする1枚なので、作業シートにもう無い行が残ると読み違える。
+  // 消すのは専用のボタンからだけ。足す・直すのボタンに相乗りさせない
+  eq("消すのは別のボタン", src.includes("p.ledgerRebuild(false, true)"), true);
+  eq("消せる行が無ければボタンを出さない",
+    src.includes("p.ledgerPlan.purgeable > 0"), true);
+  eq("ボタンに消す件数を出す",
+    src.includes('"🧹 余分な行も消して作り直す(消す " + p.ledgerPlan.purgeable'), true);
+  eq("消すボタンは危険色", /purgeable > 0[\s\S]{0,400}S\.smallDanger/.test(src), true);
+  // 確認の画面に、退避先のシート名と「消さないもの」を出す
+  eq("確認に消す件数を出す",
+    src.includes('"・消す行 " + (d.purgeable || 0)'), true);
+  eq("確認に退避先を出す", src.includes("へ退避します。"), true);
+  eq("確認に消さない行を書く",
+    src.includes("他のチームの行と、チーム欄が空の古い行は消しません。"), true);
+  // 退避に失敗したときは1行も触っていない。そう読めるように知らせる
+  eq("退避に失敗したら台帳は無傷だと伝える",
+    src.includes('j.error === "backup"') &&
+    src.includes("台帳は1行も変わっていません"), true);
+  // GAS へ purge を渡していなければ、ボタンを押しても何も消えない
+  eq("purge を送信に載せる", src.includes("purge: !!purge"), true);
+  // 下見は実行すると捨てるので、そのままでは退避先のシート名が画面から消える。
+  // 名前は元に戻したいときの唯一の手がかりなので、実行の結果を別に残す
+  eq("実行の結果を残す", src.includes("setLedgerDone(j);"), true);
+  eq("実行の結果も画面に出す", src.includes("ledgerPlanBlock(p.ledgerDone)"), true);
+  eq("下見を取り直したら前回の実行結果は消す",
+    src.includes("setLedgerDone(null);"), true);
+  eq("実行の結果に退避先を出す", src.includes('"消した " + j.purged + " 件 ／ 退避先 " + j.backupName'), true);
   // 「足す 258 件」だけでは、その中身が判断できない。
   // 実施済なのか予定のままなのかを確認の画面にも出す(v9.09)
   eq("足す行の内訳を確認に出す", src.includes("d.addedBy[k]"), true);

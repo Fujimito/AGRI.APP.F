@@ -934,6 +934,93 @@ const F2 = {
      (JSON.parse(ctx.doGet().getContent()).features || []).indexOf("ledgerRebuild") >= 0, true);
 }
 
+// ── 22b. 作り直しで余分な行を退避してから消す(v9.27) ──────────────
+//
+// 台帳は転記元にする1枚なので、作業シートにもう無い行(予定だけのまま
+// 凍った行・統合で消えた圃場の行)が残っていると読み違える。実データでは
+// 「台帳にしか無い」が657件あった。
+// 自動では1行も消さない(S1)。消すのは purge を付けて手で押したときだけで、
+// そのときは必ず先に丸ごと退避する(S2)。
+{
+  const ctx = makeContext({});
+  const lg = () => ctx.SHEET_STATE.getSheetByName("防除記録");
+  const mk = (fieldId, date, done, by, name) => ({
+    id: date + "-" + fieldId, fieldId: fieldId, workDate: date,
+    fieldName: name, status: done ? "done" : "mixed",
+    plannedL: 10, sprayedL: done ? 9 : 0, reportAreaA: done ? 12 : "",
+    chemCount: 1, chemText: "薬A(1000倍)", chems: [{ name: "薬A", ratio: 1000 }],
+    totalL: 10, waterMl: 9000, by: by, deviceId: "dev-1",
+    reportedAt: done ? date + "T02:00:00.000Z" : "",
+    updatedAt: date + "T03:00:00.000Z", crop: "水稲", areaA: 12,
+  });
+  post(ctx, { type: "pushWorks", team: TEAM, items: [
+    mk(301, "2026-09-07", true, "藤本", "北の田"),
+    mk(302, "2026-09-07", true, "藤本", "南の田"),
+  ] });
+  const baseRows = lg().getLastRow();
+  eq("前提: 実績2件が台帳にある", baseRows, 3);
+
+  // 台帳にしか無い行を3種類足す。消してよいのはチーム一致の1件だけ
+  lg().appendRow(["", "9999", "2026-09-06", "藤本", "凍った田", "", 12, 0, "", 0, 0, "", "調合済", "", "", TEAM]);
+  lg().appendRow(["", "8888", "2026-09-06", "前川", "他所の田", "", 12, 0, "", 0, 0, "", "調合済", "", "", "NCT"]);
+  lg().appendRow(["", "7777", "2026-09-06", "誰か", "古い田", "", 12, 0, "", 0, 0, "", "調合済", "", "", ""]);
+  eq("前提: 余分な行を3件足した", lg().getLastRow(), baseRows + 3);
+
+  // ── 下見は1行も消さない ──
+  const dry = post(ctx, { type: "ledgerRebuild", team: TEAM, dryRun: true, purge: true });
+  eq("下見で消せる件数が出る", dry.purgeable, 1);
+  eq("下見は退避先の名前を教える", /^防除記録_旧_\d{8}_\d{4}/.test(String(dry.backupName || "")), true);
+  eq("下見では消さない", lg().getLastRow(), baseRows + 3);
+  eq("下見では退避シートも作らない",
+     Object.keys(ctx.SHEET_STATE.sheets).filter(n => n.indexOf("防除記録_旧_") === 0).length, 0);
+
+  // ── purge を付けなければ今までどおり触らない ──
+  const noPurge = post(ctx, { type: "ledgerRebuild", team: TEAM });
+  eq("purge 無しでは消さない(既定の振る舞いを変えない)", lg().getLastRow(), baseRows + 3);
+  eq("purge 無しでも数は見せる", noPurge.kept, 3);
+
+  // ── 退避に失敗したら1行も触らない ──
+  ctx.SHEET_STATE.COPY_FAIL = true;
+  const failed = post(ctx, { type: "ledgerRebuild", team: TEAM, purge: true });
+  eq("退避に失敗したら中止する", [failed.ok, failed.error], [false, "backup"]);
+  eq("失敗しても行は減らない", lg().getLastRow(), baseRows + 3);
+  ctx.SHEET_STATE.COPY_FAIL = false;
+
+  // ── 本番 ──
+  const run = post(ctx, { type: "ledgerRebuild", team: TEAM, purge: true });
+  eq("消した件数を返す", run.purged, 1);
+  eq("チーム一致の余分な行だけ消えた", lg().getLastRow(), baseRows + 2);
+  const names = lg().getRange(2, 5, lg().getLastRow() - 1, 1).getValues().map(r => r[0]);
+  eq("凍った田は消えた", names.indexOf("凍った田"), -1);
+  eq("他チームの行は残る", names.indexOf("他所の田") >= 0, true);
+  eq("チーム欄が空の古い行は残る", names.indexOf("古い田") >= 0, true);
+  eq("実績の行は残る", [names.indexOf("北の田") >= 0, names.indexOf("南の田") >= 0], [true, true]);
+
+  // ── 退避シートが残っている ──
+  {
+    const backups = Object.keys(ctx.SHEET_STATE.sheets).filter(n => n.indexOf("防除記録_旧_") === 0);
+    eq("退避シートが1枚できる", backups.length, 1);
+    const b = backups.length ? ctx.SHEET_STATE.getSheetByName(backups[0]) : null;
+    eq("退避シートは消す前の行数を持つ", b ? b.getLastRow() : null, baseRows + 3);
+    const bn = b ? b.getRange(2, 5, Math.max(1, b.getLastRow() - 1), 1).getValues().map(r => r[0]) : [];
+    eq("退避シートには消した行が残っている", bn.indexOf("凍った田") >= 0, true);
+  }
+
+  // ── 消したあとは照合が揃う ──
+  // チーム一致の余分な行は消えたが、チーム欄が空の古い行は残す(S3)ので
+  // 照合では1件として見え続ける。ここを0にするには、その行がどのチームの
+  // ものかを人が決めて埋めるしかない
+  const c = post(ctx, { type: "ledgerCheck", team: TEAM });
+  eq("チーム一致の余分な行は照合から消える", c.onlyLedger, 1);
+  eq("食い違いも無い", [c.same, c.differ, c.onlyWork], [2, 0, 0]);
+
+  // ── 消すものが無ければ退避もしない ──
+  const again = post(ctx, { type: "ledgerRebuild", team: TEAM, purge: true });
+  eq("2回目は消すものが無い", again.purged, 0);
+  eq("空振りでは退避シートを増やさない",
+     Object.keys(ctx.SHEET_STATE.sheets).filter(n => n.indexOf("防除記録_旧_") === 0).length, 1);
+}
+
 // ── 23. 押し込み(upsertRows_)も、読んで書き戻している(v9.12) ──────
 //
 // upsertRows_ はシートを丸ごと読み、一部を差し替えて丸ごと書き戻す。

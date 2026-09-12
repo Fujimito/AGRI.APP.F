@@ -1293,7 +1293,37 @@ function ledgerCheck_(team) {
 //
 // 書き込むので doPost のロックの中から呼ぶこと。
 // dryRun のときは1セルも書かず、何が起きるかだけ返す。
-function ledgerRebuild_(team, dryRun) {
+// 台帳を消す前の退避先の名前。JSTの分まで。
+// 同じ分に2回押されたら連番を足す(実物は同名のシートを作れず例外になる)。
+function ledgerBackupName_(ss) {
+  const base = SHEET_NAME + "_旧_" +
+    Utilities.formatDate(new Date(), "Asia/Tokyo", "yyyyMMdd_HHmm");
+  if (!ss.getSheetByName(base)) return base;
+  for (var i = 2; i < 100; i++) {
+    if (!ss.getSheetByName(base + "_" + i)) return base + "_" + i;
+  }
+  return base + "_" + Date.now();
+}
+
+// 台帳を丸ごと複製する。**行を1つでも消す前に必ずこれを通すこと(S2)。**
+// 失敗したら呼び側が中止する。消してから失敗に気づいても戻せない。
+function ledgerBackup_(lg, ss) {
+  const name = ledgerBackupName_(ss);
+  const copy = lg.copyTo(ss);
+  copy.setName(name);
+  return name;
+}
+
+// 作り直し。purge を付けたときだけ、作業シートに無い行を消す。
+//
+// 消す条件は3つとも満たすものだけ(S3)。
+//   ・作り直した行に対応が無い(作業シートにもう無い)
+//   ・チームコードがこの team と一致する
+//   ・記録IDが空でない
+// チーム欄が空の古い行は消さない。どのチームのものか分からないため。
+// ledgerSyncWorks_ は同じ行を「拾う」側に倒しているが、拾うのは安全側で、
+// 消すのは安全側ではない。扱いを変えているのは意図的。
+function ledgerRebuild_(team, dryRun, purge) {
   const wk = getWorkSheet_();
   const lg = getSheet_();
   const W = HEADERS.length;
@@ -1379,8 +1409,48 @@ function ledgerRebuild_(team, dryRun) {
     if (hit) updated++; else untouched++;
   }
 
+  // ── 消す対象を決める(purge のときだけ実際に消す) ──
+  // seen が付かなかった行 = 作り直した行に対応が無い行。その中から
+  // 「チーム一致・記録IDあり」だけを選ぶ。他チームとチーム欄が空の行は残す(S3)
+  const purgeIdx = [];
+  for (let i = 0; i < cur.length; i++) {
+    if (seen[i]) continue;
+    const id = cur[i][COL.ID - 1];
+    if (id === "" || id === null || id === undefined) continue;
+    const rt = String(cur[i][COL.TEAM - 1] == null ? "" : cur[i][COL.TEAM - 1]);
+    if (!team || !rt || rt !== String(team)) continue;
+    purgeIdx.push(i);
+  }
+  const doPurge = !!purge && purgeIdx.length > 0;
+  let purged = 0;
+  let backupName = "";
+  if (dryRun) {
+    // 下見では1枚も作らない。押したときに付く名前だけ見せる
+    backupName = purge ? ledgerBackupName_(SpreadsheetApp.getActiveSpreadsheet()) : "";
+  }
+
   // 書くのはここだけ。下見は1セルも書かない(gastest で数えて確かめている)
-  if (!dryRun && (updated || added)) {
+  if (!dryRun && (updated || added || doPurge)) {
+    // ★ 消す前に必ず退避する(S2)。失敗したら1行も触らずに戻る。
+    //   消してから失敗に気づいても元には戻せない
+    if (doPurge) {
+      const ss = SpreadsheetApp.getActiveSpreadsheet();
+      try {
+        backupName = ledgerBackup_(lg, ss);
+      } catch (e) {
+        return { ok: false, error: "backup", detail: String(e) };
+      }
+    }
+    // 消す行を抜いてから書き戻す。抜いたぶんは最後に行ごと削る
+    if (doPurge) {
+      const drop = {};
+      for (let i = 0; i < purgeIdx.length; i++) drop[purgeIdx[i]] = true;
+      const left = [];
+      for (let i = 0; i < cur.length; i++) if (!drop[i]) left.push(cur[i]);
+      purged = cur.length - left.length;
+      cur.length = 0;
+      Array.prototype.push.apply(cur, left);
+    }
     // 足す分の行を先に確保する。シートの行数を超えて書くと
     // 例外になり、作り直しが途中で止まる(実データで 254 行足す見込み)
     ensureRows_(lg, 1 + cur.length + append.length);
@@ -1396,6 +1466,9 @@ function ledgerRebuild_(team, dryRun) {
     if (cur.length) lg.getRange(2, 1, cur.length, W).setValues(
       cur.map(function (row) { return row.map(safeCell_); }));
     if (append.length) lg.getRange(2 + cur.length, 1, append.length, W).setValues(append);
+    // 消したぶん、下に古い行が残る。行ごと消す(upsertRows_ と同じ後始末)
+    const extra = (last - 1) - (cur.length + append.length);
+    if (extra > 0) lg.deleteRows(2 + cur.length + append.length, extra);
     // 日付ごとの色分けは行が増えたときだけ。作り直しは行数が大きく動く
     if (append.length) colorByDate_(lg);
   }
@@ -1403,6 +1476,7 @@ function ledgerRebuild_(team, dryRun) {
   return {
     dryRun: !!dryRun,
     added: added, updated: updated, untouched: untouched,
+    purgeable: purgeIdx.length, purged: purged, backupName: backupName,
     // 台帳にしか無い行。数えるだけで、触らない。
     // cur.length から引くやり方だと、記録IDが空の行や別チームの行まで
     // 混ざって過大になる(確認の画面に出す数字なのでずれると困る・v9.09)
@@ -1599,8 +1673,9 @@ function doPost(e) {
     // 手で押したときだけ走る。dryRun なら1セルも書かない。
     if (type === "ledgerRebuild") {
       if (!data.team) return json_({ ok: false, error: "team required" });
-      const r = ledgerRebuild_(String(data.team), !!data.dryRun);
-      r.ok = true;
+      const r = ledgerRebuild_(String(data.team), !!data.dryRun, !!data.purge);
+      // 退避に失敗したときは r.ok が false で返る。ここで上書きしない
+      if (r.ok !== false) r.ok = true;
       return json_(r);
     }
 
