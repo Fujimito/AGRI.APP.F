@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.32";
+const APP_VERSION = "v9.33";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2084,41 +2084,6 @@ function App() {
     setLastMix(snap);
     save("tankmix:lastmix", snap);
   };
-  // 薬剤(プリセット/前回薬液)を指定した圃場すべてに適用。各圃場の薬液量で薬量を自動計算
-  const applyChemsToWorks = (workIds, chemList) => {
-    if (!chemList || chemList.length === 0) {
-      flash("薬剤が選ばれていません");
-      return;
-    }
-    const ids = (workIds || []).filter(id => id != null);
-    if (ids.length === 0) {
-      flash("圃場が選ばれていません");
-      return;
-    }
-    setWorksSave(works.map(w => {
-      if (!ids.includes(w.id)) return w;
-      // 実績入力済みの圃場は、実際に散布した量を基準に薬量を計算する
-      const base = w.reported && parseFloat(w.sprayedL) > 0 ? parseFloat(w.sprayedL) : parseFloat(w.plannedL);
-      const per = base > 0 ? base : 0;
-      const perMl = per * 1000;
-      const scaled = chemList.map(c => scaleChem(c, perMl));
-      const chemMlSum = scaled.reduce((s, c) => s + c.ml, 0);
-      return {
-        ...w,
-        chems: scaled,
-        totalL: per,
-        waterMl: perMl - chemMlSum,
-        synced: false
-      };
-    }));
-    upsertChemMaster(chemList.map(c => ({
-      name: c.name || "(無名)",
-      form: c.form,
-      use: c.use || "other"
-    })));
-    rememberMix(chemList);
-    flash(ids.length === 1 ? "薬剤を適用しました" : ids.length + "圃場に薬剤を適用しました");
-  };
   // 本日の散布投下量(10aあたりL)から、その日の全圃場の予定薬液量を面積に応じて一括計算
   const applyRatePerDay = ratePer10a => {
     const rate = parseFloat(ratePer10a);
@@ -2169,6 +2134,12 @@ function App() {
           ...x,
           reported: false,
           sprayedL: 0,
+          // 薬液は実績を入れたときに焼き付けている(v9.33)ので、
+          // 取り消すならそれも戻す。残すと「撒いていないのに薬剤がある」
+          // 記録になり、台帳の行も調合済のまま薬剤だけ残る
+          chems: [],
+          totalL: 0,
+          waterMl: 0,
           flights: [],
           reportAreaA: "",
           reportMemo: "",
@@ -2227,9 +2198,14 @@ function App() {
         return w;
       }
       updated++;
+      const sprayed = plannedLFromArea(area, rate);
       return {
         ...w,
-        sprayedL: plannedLFromArea(area, rate),
+        // 実績が入った時点でその日の薬液を焼き付ける(v9.33)。
+        // 個別入力(submitReport)と同じ扱いにしないと、一括で入れた圃場だけ
+        // 薬剤の無い記録になる
+        ...stampDayChems(w, sprayed),
+        sprayedL: sprayed,
         reportAreaA: area,
         reportDate: w.reportDate || today(),
         reportSynced: false
@@ -2334,10 +2310,32 @@ function App() {
     form: m.form,
     use: m.use || "other"
   }]);
+  // 実績を入れた時点で、その日の薬液をその作業へ焼き付ける(v9.33)。
+  //
+  // v9.32 までは「②どこに撒くか」で圃場を選んで薬剤を当てていた。撒く前に
+  // 薬剤が決まるので、その時点で調合済の行が共有され、あとで薬剤を変えたり
+  // その日をやめたりすると食い違いが残っていた。その日は全圃場で同じ薬液を
+  // 使う運用なので、薬剤は日に1セット入力するだけにして、圃場ごとの適用を
+  // やめた。薬量は実際に撒いた量から出すので、予定を基準にするより実態に合う。
+  const stampDayChems = (w, sprayedL) => {
+    const list = validDayChems;
+    if (!list.length) return {};
+    const per = parseFloat(sprayedL) || 0;
+    if (!(per > 0)) return {};
+    const perMl = per * 1000;
+    const scaled = list.map(c => scaleChem(c, perMl));
+    const chemMlSum = scaled.reduce((sum, c) => sum + c.ml, 0);
+    return {
+      chems: scaled,
+      totalL: per,
+      waterMl: perMl - chemMlSum
+    };
+  };
   const submitReport = (id, rep) => {
     const flights = Array.isArray(rep.flights) ? rep.flights.filter(f => f > 0) : [];
     const next = works.map(w => w.id === id ? {
       ...w,
+      ...stampDayChems(w, rep.sprayedL),
       reported: true,
       reportSynced: false,
       sprayedL: parseFloat(rep.sprayedL) || 0,
@@ -2352,7 +2350,19 @@ function App() {
       by: w.by || recorder
     } : w);
     setWorksSave(next);
-    flash("実績を保存しました。作業終了後に一括送信してください");
+    // 使った薬剤は薬剤マスタと「↩前回と同じ薬液」に残す。
+    // v9.32 までは圃場への適用のときにやっていた
+    if (validDayChems.length) {
+      upsertChemMaster(validDayChems.map(c => ({
+        name: c.name || "(無名)",
+        form: c.form,
+        use: c.use || "other"
+      })));
+      rememberMix(validDayChems);
+    }
+    flash(validDayChems.length
+      ? "実績を保存しました(この日の薬剤を記録しました)。作業終了後に一括送信してください"
+      : "実績を保存しました。作業終了後に一括送信してください");
     // 進捗マップ用の送信だけは、その場で自動で試みる。圏外なら失敗するが
     // 未送信のまま残るので、電波が戻ってから手動または次の保存時に送られる
     pushProgress({
@@ -3675,7 +3685,6 @@ function App() {
     removeDayChem,
     clearDayChems,
     fillDayChems,
-    applyChemsToWorks,
     crops,
     addCrop,
     areaUnitKey,
@@ -4141,7 +4150,7 @@ function CalcTab(p) {
     }
   }, "⭐ プリセットに保存"), /*#__PURE__*/React.createElement("p", {
     style: S.note
-  }, "ここはタンク1杯分を計算するための電卓です。圃場への適用は「🚁作業予定・進捗確認」タブの「この日に使用した薬剤」で行います。何度も使う組み合わせは「⭐ プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。"))));
+  }, "ここはタンク1杯分を計算するための電卓です。その日に使う薬剤は「🚁作業予定・進捗確認」タブの「この日に使用した薬剤」に入力します(圃場ごとに当てる操作はありません。実績を入れた時点で、その日の薬液がその圃場の記録になります)。何度も使う組み合わせは「⭐ プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。"))));
 }
 function TankViz({
   calc,
@@ -4209,7 +4218,6 @@ function WorkTab(p) {
   // 「今日の準備」は既定で畳む。まだ圃場が入っていない日は開いた状態で始める
   const [prepOpen, setPrepOpen] = useState(() => p.works.filter(w => w.workDate === p.workDate).length === 0);
   const [pickForDay, setPickForDay] = useState(false);
-  const [chemTargetIds, setChemTargetIds] = useState([]); // 薬剤の適用先としてチェックした圃場ID
   // 実績入力済みでも当日リストからは消さず、そのまま表示・編集できるようにする
   const dayList = p.works.filter(w => w.workDate === p.workDate);
   // 薬剤の一括適用・投下量計算など「未実施の圃場」だけを対象にすべき操作用
@@ -4559,7 +4567,7 @@ function WorkTab(p) {
     style: S.cardLabel
   }, "この日に使用した薬剤(", p.dayChems.length, "件)"), dayChemsOpen && p.dayChems.length > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => {
-      if (confirm("この日の薬剤欄をすべて消しますか？\n(圃場に適用済みの内容は消えません)")) p.clearDayChems();
+      if (confirm("この日の薬剤欄をすべて消しますか？\n(実績を入れて記録済みの薬剤は消えません)")) p.clearDayChems();
     },
     style: S.linkBtn
   }, "すべて消す")), !dayChemsOpen && /*#__PURE__*/React.createElement(React.Fragment, null, p.dayChems.length === 0 ? /*#__PURE__*/React.createElement("p", {
@@ -4567,22 +4575,18 @@ function WorkTab(p) {
       ...S.note,
       marginTop: 4
     }
-  }, "この日に使う薬剤(薬剤名と希釈倍率)を入力して、圃場に適用します。") : /*#__PURE__*/React.createElement("div", {
+  }, "この日に使う薬剤(薬剤名と希釈倍率)を入力します。実績を入れた圃場に、その日の薬液がそのまま記録されます。") : /*#__PURE__*/React.createElement("div", {
     style: S.dayChemSummary,
     className: "num"
   }, p.dayChems.map(c => (c.name || "(無名)") + (c.ratio ? " " + c.ratio + "倍" : "")).join(" ／ ")), /*#__PURE__*/React.createElement("button", {
-    onClick: () => {
-      // 開くたびに未実施の圃場を初期選択しておく(全圃場に使うケースが一番多いため)
-      setChemTargetIds(pendingDayList.map(w => w.id));
-      setDayChemsOpen(true);
-    },
+    onClick: () => setDayChemsOpen(true),
     style: {
       ...S.smallPrimary,
       width: "100%",
       marginTop: 10,
       padding: "13px 0"
     }
-  }, p.dayChems.length === 0 ? "＋ この日の薬剤を入力" : "✎ 薬剤を編集・圃場に適用")), dayChemsOpen && /*#__PURE__*/React.createElement("div", {
+  }, p.dayChems.length === 0 ? "＋ この日の薬剤を入力" : "✎ この日の薬剤を編集")), dayChemsOpen && /*#__PURE__*/React.createElement("div", {
     style: {
       marginTop: 6
     }
@@ -4590,7 +4594,7 @@ function WorkTab(p) {
     style: S.zoneChem
   }, /*#__PURE__*/React.createElement("div", {
     style: S.zoneChemHead
-  }, "① 何を撒くか（この日に使う薬剤）"), p.dayChems.length === 0 && /*#__PURE__*/React.createElement("p", {
+  }, "この日に使う薬剤"), p.dayChems.length === 0 && /*#__PURE__*/React.createElement("p", {
     style: S.empty
   }, "「＋ 薬剤を追加」で、この日に使う薬剤を入れてください。"), p.dayChems.map(c => /*#__PURE__*/React.createElement("div", {
     key: c.id,
@@ -4705,100 +4709,16 @@ function WorkTab(p) {
       ...S.applyChemBtn,
       marginTop: 6
     }
-  }, "⭐ ", pr.name, "（", pr.chems.map(c => (c.name || "無名") + " " + c.ratio + "倍").join("・"), "）")))), /*#__PURE__*/React.createElement("div", {
-    style: S.zoneField
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.zoneFieldHead
-  }, "② どこに撒くか（適用先の圃場）"), /*#__PURE__*/React.createElement("div", {
-    style: S.smallLabel
-  }, "チェックした圃場に適用します"),
-  // 日によって圃場ごとに使う薬剤が変わるため、複数の圃場をチェックでまとめて選べるようにする
-  /*#__PURE__*/React.createElement("div", {
+  }, "⭐ ", pr.name, "（", pr.chems.map(c => (c.name || "無名") + " " + c.ratio + "倍").join("・"), "）"))))), /*#__PURE__*/React.createElement("button", {
+    // 「閉じる」は ② の節と一緒に置いていたので、節ごと消したときに
+    // 巻き添えで無くなっていた(v9.33)。パネルを閉じる手段が要る
+    onClick: () => setDayChemsOpen(false),
     style: {
-      display: "flex",
-      gap: 8,
-      flexWrap: "wrap",
-      marginTop: 6,
-      marginBottom: 8
-    }
-  }, [{
-    label: "未実施すべて(" + pendingDayList.length + ")",
-    ids: pendingDayList.map(w => w.id)
-  }, {
-    label: "この日すべて(" + dayList.length + ")",
-    ids: dayList.map(w => w.id)
-  }, {
-    label: "選択解除",
-    ids: []
-  }].map(b => /*#__PURE__*/React.createElement("button", {
-    key: b.label,
-    onClick: () => setChemTargetIds(b.ids),
-    style: S.chemPickQuick
-  }, b.label))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      maxHeight: 280,
-      overflowY: "auto",
-      marginBottom: 10
-    }
-  }, dayList.length === 0 ? /*#__PURE__*/React.createElement("p", {
-    style: S.note
-  }, "この日の作業リストが空です。先に圃場を追加してください。") : dayList.map(w => {
-    const f = p.resolveWork(w);
-    const on = chemTargetIds.includes(w.id);
-    return /*#__PURE__*/React.createElement("div", {
-      key: w.id,
-      onClick: () => setChemTargetIds(on ? chemTargetIds.filter(id => id !== w.id) : chemTargetIds.concat(w.id)),
-      style: {
-        ...S.pickRow,
-        marginBottom: 6,
-        ...(on ? S.pickRowOn : {})
-      }
-    }, /*#__PURE__*/React.createElement("span", {
-      style: {
-        ...S.pickNum,
-        ...(on ? S.pickNumOn : {})
-      }
-    }, on ? "✓" : ""), /*#__PURE__*/React.createElement("span", {
-      style: {
-        flex: 1,
-        minWidth: 0
-      }
-    }, w.reported ? "✅ " : "", f.name, w.chems && w.chems.length > 0 && /*#__PURE__*/React.createElement("div", {
-      style: S.tdSub
-    }, "現在: ", w.chems.map(c => c.name || "無名").join("・"))), /*#__PURE__*/React.createElement("span", {
-      style: S.tdSub,
-      className: "num"
-    }, w.reported ? "実績" + fmt(parseFloat(w.sprayedL) || 0, 1) + "L" : w.plannedL ? "予定" + fmt(parseFloat(w.plannedL), 1) + "L" : "予定なし"));
-  }))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      ...S.btnRow,
+      ...S.secondaryBtn,
+      width: "100%",
       marginTop: 12
     }
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setDayChemsOpen(false),
-    style: S.secondaryBtn
-  }, "閉じる"), (() => {
-    // この日のリストに残っている圃場だけを適用対象にする(日付を変えたときの選択残りを除く)
-    const targets = chemTargetIds.filter(id => dayList.some(w => w.id === id));
-    const ready = p.validDayChems.length > 0 && targets.length > 0;
-    return /*#__PURE__*/React.createElement("button", {
-      onClick: () => {
-        if (!ready) return;
-        p.applyChemsToWorks(targets, p.validDayChems);
-        setDayChemsOpen(false);
-      },
-      disabled: !ready,
-      style: {
-        ...S.primaryBtn,
-        opacity: ready ? 1 : 0.4
-      }
-    }, "🚁 選択した", targets.length, "圃場に適用");
-  })()), /*#__PURE__*/React.createElement("p", {
-    style: {
-      ...S.note,
-      marginTop: 8
-    }
-  }, "圃場ごとに使う薬剤が違う日は、チェックを付け替えて何度でも適用できます(適用のたびに、その圃場の薬剤は選んだ内容で置き換わります)。薬量は各圃場の予定薬液量 ÷ 希釈倍率で自動計算されます。予定薬液量が未設定の圃場は、先に上の「本日の散布投下量」で計算してください。✅付き(実績入力済み)の圃場は実散布量を基準に計算し、次回の送信でスプレッドシートの薬剤欄が更新されます。"))),/*#__PURE__*/React.createElement("div", {
+  }, "閉じる")),/*#__PURE__*/React.createElement("div", {
     style: S.prepBlock
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -9458,7 +9378,7 @@ function SettingsTab(p) {
     style: S.card
   }, collapsibleHead("使い方ガイド", openSec.guide, () => toggleSec("guide")), openSec.guide && [{
     title: "🧮 薬剤登録・希釈計算タブ(起動画面。以下「調合タブ」)",
-    desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、「🧪 薬剤・プリセット」に登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。このタブはタンク1杯分を計算するための電卓です。圃場への薬剤の適用は作業タブの「この日に使用した薬剤」で行います。何度も使う組み合わせは「⭐プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます。上限は薬剤ごとに調合タブの「🧪 薬剤・プリセット」で登録でき、未登録の薬剤は既定3回です。設定タブの「農薬の使用回数」で作期の開始日を設定すると、その日以降の実績だけを数えます(作期が変わったら日付を更新するとカウントがやり直しになります)。"
+    desc: "アプリを開いたときの最初の画面です。希釈倍率と総量(または面積×10a散布量)から各薬剤の必要量・水量を自動計算します。薬剤欄の📋ボタン、または「📋 登録薬剤から追加」で、「🧪 薬剤・プリセット」に登録した薬剤を名前・種類・剤型・希釈倍率ごと呼び出せます(呼び出した後で倍率だけ変えることもできます)。このタブはタンク1杯分を計算するための電卓です。その日に使う薬剤は作業タブの「この日に使用した薬剤」に入力します(圃場ごとに当てる操作はありません)。何度も使う組み合わせは「⭐プリセットに保存」で名前を付けて残すと、作業タブから読み込めます。農薬の使用回数が上限に近づくと、画面上部のタイトル直下に警告帯が常時表示されます。上限は薬剤ごとに調合タブの「🧪 薬剤・プリセット」で登録でき、未登録の薬剤は既定3回です。設定タブの「農薬の使用回数」で作期の開始日を設定すると、その日以降の実績だけを数えます(作期が変わったら日付を更新するとカウントがやり直しになります)。"
   }, {
     title: "🚁 作業予定・進捗確認タブ(以下「作業タブ」)",
     desc: "その日に回る圃場を登録し、地図を見ながら実績を入力して送信します。圃場の追加は「🌾 本日の作業圃場登録」にまとまっています。登録済みの圃場が出るので、タップした順に1つずつ追加できます(圃場が多いときは検索欄で絞り込めます)。上の地区のボタンで絞り込むと「＋ 「〇〇地区」の◯圃場をまとめて追加」が出て、その地区を一括で投入できます。予定薬液量は圃場マスタには保存されず、その日「本日の散布投下量(L/10a)」を入力して「面積から一括計算」を押したときだけ計算されます(投下量が未入力の圃場があると注意バナーが出ます)。計算式は圃場ごとに「面積÷10×投下量」で、調合タブの「面積から計算」とまったく同じ式・同じ端数処理(0.01L単位)です。「この日に使用した薬剤」に、その日使う薬剤名と希釈倍率を入力します。希釈倍率は散布水量(L/10a)によって変わるため、その日の値をここで入力する形にしています。薬剤名は登録済みマスタから「📋 登録薬剤から追加」で選べ、よく使う組み合わせは「⭐プリセット」「↩前回と同じ薬液」から読み込めます。現場の操作は進捗地図で行います。圃場をタップすると吹き出しが開き、そこから「🚗 この圃場へナビ」「✓ 散布済にする」「🚁 実績入力」「本日の作業から外す」ができます。まだ撒いていない圃場には「予定散布量 ◯L」が出るので、積んで行く量が地図だけで分かります(v9.26)。実績を入れた圃場は「実散布量 ◯L(予定 ◯L)」に変わります。実績入力では散布量だけを入れます。散布面積は圃場に登録された面積が自動で記録されるので、面積を直したいときは圃場一覧の「編集」から直してください。進捗地図の「🏷 札あり／🏷 札なし」で、圃場名と面積の札を消せます(全画面でも地図の右わきの🏷で切り替えられます)。札は45秒ごとの描き直しのたびに作り直され、圃場が多いとそこで画面が止まります。動きが重いと感じたら消してください。進捗地図は直近3日を見ます。今日の作業に入っていない圃場でも、直近3日のうちに散布し終えていれば「前日までに済」(青)で出るので、済んだ場所へまた向かわずに済みます。まだ済んでいない圃場は「↩ 直近3日のやり残し ◯圃場を引き継ぐ」でその日のリストに入れられます(圃場だけが入り、薬剤と投下量はその日の値を入れ直してください)。前の日の記録はそのまま残ります。現在地は常に青い丸で出ます(まわりの薄い円は測位の精度です)。出ていないときは「📍 位置情報を使う」を押してください。地図が現在地を追いかけて動くことはなく、「📍 現在地」を押したときだけ寄ります。位置情報は地図に出すためだけに使い、スプレッドシートにも他の端末にも送信しません。進捗地図を閉じると測位も止まります。「☁ 進捗を送信」で送信します。防除記録(台帳)に載るのは実績を入れた圃場だけで、予定と調合は共有されますが台帳には書きません(v9.28)。下部の「記録」欄は一覧表示をせず、アグリノート転記・CSV出力・印刷に使います。※ v9.30 で作業リストの一覧表示をやめました。並べ替え・タンク補給の区切り・順送りナビ・まとめ散布も一緒に外しています。圃場の登録と実績の入力は、上の「本日の作業圃場登録」と進捗地図で行ってください。"

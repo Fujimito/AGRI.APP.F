@@ -2618,6 +2618,39 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
   }
 }
 
+// ── 薬剤は日に1セット。実績を入れたときに焼き付ける(v9.33) ──
+//
+// v9.32 までは「②どこに撒くか」で圃場を選んで薬剤を当てていた。撒く前に
+// 薬剤が決まるので、あとで薬剤を変えたり その日をやめたりすると食い違いが
+// 残った。その日は全圃場で同じ薬液を使う運用なので、圃場ごとの適用をやめた。
+{
+  eq("圃場ごとの適用は無くなった", src.includes("applyChemsToWorks"), false);
+  eq("適用先の選択も無くなった", src.includes("chemTargetIds"), false);
+  eq("「どこに撒くか」の見出しも無い",
+    src.includes("② どこに撒くか（適用先の圃場）"), false);
+  // 「🚁 選択した◯圃場に適用」のボタン。過去の版の説明文にも「圃場に適用」は
+  // 出てくるので、ボタンの形そのもので見る
+  eq("適用ボタンも無い", src.includes('targets.length, "圃場に適用"'), false);
+  // 実績を入れたときに焼き付ける
+  eq("焼き付けの関数がある", src.includes("const stampDayChems = (w, sprayedL) =>"), true);
+  eq("個別の実績入力で焼き付ける",
+    /const submitReport[\s\S]{0,400}\.\.\.stampDayChems\(w, rep\.sprayedL\)/.test(src), true);
+  eq("一括入力でも焼き付ける", src.includes("...stampDayChems(w, sprayed),"), true);
+  // 薬量は実際に撒いた量から出す(予定ではなく)
+  eq("薬量は実散布量を基準にする",
+    /const stampDayChems[\s\S]{0,400}const per = parseFloat\(sprayedL\)/.test(src), true);
+  eq("撒いた量が0なら焼き付けない",
+    /const stampDayChems[\s\S]{0,400}if \(!\(per > 0\)\) return \{\};/.test(src), true);
+  // 取り消したら焼き付けた薬液も戻す
+  eq("実績を取り消したら薬液も消す",
+    /reported: false,[\s\S]{0,300}chems: \[\],[\s\S]{0,80}totalL: 0,/.test(src), true);
+  // 使った薬剤はマスタと「前回と同じ薬液」に残す(適用のときにやっていた仕事)
+  eq("実績の保存で薬剤マスタに残す",
+    /const submitReport[\s\S]{0,1200}upsertChemMaster\(validDayChems/.test(src), true);
+  eq("実績の保存で前回の薬液に残す",
+    /const submitReport[\s\S]{0,1400}rememberMix\(validDayChems\)/.test(src), true);
+}
+
 // ── 結果 ─────────────────────────────────────────────
 console.log("");
 if (fails.length === 0) {
