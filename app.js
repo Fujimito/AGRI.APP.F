@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.25";
+const APP_VERSION = "v9.26";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -960,6 +960,10 @@ const foldProgress = (entries, day) => {
         by: "",
         at: "",
         sprayedL: 0,
+        // 予定薬液量。実績が入る前の圃場でも「どれだけ積んで行くか」が
+        // 吹き出しで分かるように持つ(v9.26)。実績(sprayedL)とは別の値で、
+        // 撒いたあとも予定との差を見たいので上書きせず並べて持つ
+        plannedL: 0,
         areaA: "",
         pending: false,
         total: 0,        // その日の作業の件数
@@ -996,6 +1000,7 @@ const foldProgress = (entries, day) => {
         cur.by = e.by || "";
         cur.at = e.at || "";
         cur.sprayedL = e.sprayedL || 0;
+        cur.plannedL = e.plannedL || 0;
         cur.areaA = e.areaA || "";
       }
       return;
@@ -10844,6 +10849,7 @@ const progressEntries = (items, works, from, to, recorder) => {
     // 最後に済ませた人を選ぶための刻。古い Code.gs は返さない(空になる)
     atTime: it.atTime || "",
     sprayedL: it.sprayedL || 0,
+    plannedL: it.plannedL || 0,
     areaA: it.areaA || "",
     pending: false
     });
@@ -10858,6 +10864,7 @@ const progressEntries = (items, works, from, to, recorder) => {
       at: w.reportDate || "",
       atTime: w.reportAt || "",
       sprayedL: parseFloat(w.sprayedL) || 0,
+      plannedL: parseFloat(w.plannedL) || 0,
       areaA: w.reportAreaA || "",
       // この端末で入れたが、まだ送れていない実績。色は変えず件数だけ出す
       pending: !!(w.reported && w.updatedAt && w.updatedAt !== w.pushedAt)
@@ -10903,7 +10910,7 @@ const LEDGER_PLAN_KEY = "tankmix:ledgerplan";
 // 下見の有効期限。長くすると、その間に他の端末が送った作業のぶんだけ
 // 確認に出す件数が実物とずれる。10分は未計測の暫定値
 const LEDGER_PLAN_MAX_AGE_MS = 10 * 60 * 1000;
-const PROGRESS_DIFF_KEYS = ["status", "by", "at", "sprayedL", "areaA", "prevDate"];
+const PROGRESS_DIFF_KEYS = ["status", "by", "at", "sprayedL", "plannedL", "areaA", "prevDate"];
 const progressMapDiff = (a, b) => {
   const out = [];
   const keys = new Set();
@@ -11127,6 +11134,9 @@ const fieldDrawSig = (f, st, showLabel, areaUnitKey) => {
     st ? st.by || "" : "",
     st ? st.at || "" : "",
     st ? st.sprayedL || 0 : "",
+    // 予定薬液量も吹き出しに出る(v9.26)。色は変わらないが、
+    // 入れ忘れると「一括計算したのに吹き出しの予定量だけ古い」になる
+    st ? st.plannedL || 0 : "",
     st ? st.areaA || "" : "",
     st && st.pending ? "1" : "",
     // 前の日に済ませた日付。色は donePrev のまま変わらないが、吹き出しに
@@ -12520,13 +12530,24 @@ function ProgressMapTab(p) {
       fontWeight: 700
     },
     className: "num"
-  }, sel.st.prevDate, " に散布済（この日の作業には入っていません）"), sel.st && sel.st.status === "done" && /*#__PURE__*/React.createElement("div", {
+  }, sel.st.prevDate, " に散布済（この日の作業には入っていません）"), sel.st && sel.st.status === "planned" && sel.st.plannedL > 0 && /*#__PURE__*/React.createElement("div", {
+    // まだ撒いていない圃場。積んで行く量が要るので予定薬液量を出す(v9.26)。
+    // 予定が入っていない(0)ときは行ごと出さない。「予定 0L」と書くと
+    // 「0Lで撒く」と読めてしまい、未入力と区別が付かない
+    style: {
+      ...S.smallLabel,
+      marginTop: 6,
+      fontWeight: 700,
+      color: "#9A3B26"
+    },
+    className: "num"
+  }, "予定散布量 ", fmt(sel.st.plannedL, 1), " L"), sel.st && sel.st.status === "done" && /*#__PURE__*/React.createElement("div", {
     style: {
       ...S.smallLabel,
       marginTop: 6
     },
     className: "num"
-  }, sel.st.sprayedL > 0 ? "実散布量 " + fmt(sel.st.sprayedL, 1) + " L／" : "", "入力者 ", sel.st.by || "(不明)", sel.st.at ? " ／ " + sel.st.at : ""), naviLink(fieldCenter(sel.field), {
+  }, sel.st.sprayedL > 0 ? "実散布量 " + fmt(sel.st.sprayedL, 1) + " L" + (sel.st.plannedL > 0 ? "(予定 " + fmt(sel.st.plannedL, 1) + " L)" : "") + "／" : "", "入力者 ", sel.st.by || "(不明)", sel.st.at ? " ／ " + sel.st.at : ""), naviLink(fieldCenter(sel.field), {
     // 現場は「向かう → 撮く → 記録」の順なので、ナビを先頭に置く。
     // a タグなので block と textAlign がいる(button と見た目を揃えるため)。
     // 座標の無い圃場では naviLink が button に差し替え、登録方法を案内する(v8.79)

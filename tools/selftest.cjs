@@ -594,6 +594,58 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     E([item({ workDate: "2026-08-30", status: "done" })], [], "2026-08-30", "2026-08-31", "私").length, 1);
   eq("日付が無いサーバー由来は入れない",
     E([item({ workDate: "" })], [], "2026-08-30", "2026-08-31", "私"), []);
+
+  // ── 予定散布量を地図まで運ぶ(v9.26) ──────────────────
+  // 実績(sprayedL)しか運んでいなかったので、まだ撒いていない圃場は
+  // 吹き出しに数量が1つも出なかった。積んで行く量が地図で分からない
+  {
+    const f = t.foldProgress;
+    // サーバー由来・手元由来のどちらからも拾う
+    eq("サーバー由来の予定量を拾う",
+      E([item({ plannedL: 12.5 })], [], "2026-08-30", "2026-08-31", "私")[0].plannedL, 12.5);
+    eq("手元の作業の予定量を拾う",
+      E([], [work({ plannedL: 8.25 })], "2026-08-30", "2026-08-31", "私")[0].plannedL, 8.25);
+    eq("予定量が入っていなければ0",
+      E([], [work({})], "2026-08-30", "2026-08-31", "私")[0].plannedL, 0);
+    // 畳んだあとも残る。ここを落とすと吹き出しに出せない
+    {
+      const r = f(E([], [work({ plannedL: 8.25 })], "2026-08-30", "2026-08-31", "私"), "2026-08-31");
+      eq("畳んだあとも予定量が残る", r.get("7").plannedL, 8.25);
+    }
+    // 実績のある作業が採られたときは、その作業の予定量が出る。
+    // 実績の無いほうの予定量が残ると、実散布量と予定が別の作業の値になる
+    {
+      const r = f(E([], [
+        work({ id: 1, plannedL: 10, reported: false }),
+        work({ id: 2, plannedL: 20, reported: true, sprayedL: 19 })
+      ], "2026-08-30", "2026-08-31", "私"), "2026-08-31");
+      eq("採った作業と同じ作業の予定量が出る",
+        [r.get("7").sprayedL, r.get("7").plannedL], [19, 20]);
+    }
+    // 前の日ぶん(青)は今日の予定ではないので入れない
+    {
+      const r = f(E([], [work({ workDate: "2026-08-30", reported: true, plannedL: 30 })],
+        "2026-08-30", "2026-08-31", "私"), "2026-08-31");
+      eq("前の日の予定量は今日の予定に混ぜない", r.get("7").plannedL, 0);
+    }
+  }
+  // 描き直しの材料に入っていないと、一括計算しても吹き出しの予定量が古いまま残る
+  {
+    const base = { id: 1, name: "北", areaA: 1, updatedAt: "x", polygon: [] };
+    eq("予定量が変われば描き直す",
+      t.fieldDrawSig(base, { status: "planned", plannedL: 10 }, true, "a") !==
+      t.fieldDrawSig(base, { status: "planned", plannedL: 20 }, true, "a"), true);
+  }
+  // 吹き出しの出し分け。未実施は「予定散布量」、実施済みは実散布量に併記
+  eq("未実施の吹き出しに予定散布量を出す",
+    src.includes('sel.st.status === "planned" && sel.st.plannedL > 0'), true);
+  eq("予定が0のときは行ごと出さない",
+    src.includes('"予定散布量 ", fmt(sel.st.plannedL, 1), " L"'), true);
+  eq("実施済みは実散布量に予定を併記する",
+    src.includes('"(予定 " + fmt(sel.st.plannedL, 1) + " L)"'), true);
+  // 照合(開発用)の見比べ対象にも入れる。落とすと食い違いを拾えない
+  eq("照合の対象に予定量が入っている",
+    src.includes('"sprayedL", "plannedL"'), true);
   // 青(前の日に済)は範囲の内側だけで決まること
   {
     const f = t.foldProgress;
