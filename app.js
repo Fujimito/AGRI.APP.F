@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.36";
+const APP_VERSION = "v9.37";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -4756,16 +4756,18 @@ function WorkTab(p) {
       ...S.applyChemBtn,
       marginTop: 6
     }
-  }, "⭐ ", pr.name, "（", pr.chems.map(c => (c.name || "無名") + " " + c.ratio + "倍").join("・"), "）"))))), /*#__PURE__*/React.createElement("button", {
+  }, "⭐ ", pr.name, "（", pr.chems.map(c => (c.name || "無名") + " " + c.ratio + "倍").join("・"), "）")))), /*#__PURE__*/React.createElement("button", {
     // 「閉じる」は ② の節と一緒に置いていたので、節ごと消したときに
-    // 巻き添えで無くなっていた(v9.33)。パネルを閉じる手段が要る
+    // 巻き添えで無くなっていた(v9.33)。v9.33 で戻したときに
+    // dayChemsOpen の外へ出てしまい、常に出るのに押しても何も起きない
+    // ボタンになっていた(v9.37)。開いているときだけ出す
     onClick: () => setDayChemsOpen(false),
     style: {
       ...S.secondaryBtn,
       width: "100%",
       marginTop: 12
     }
-  }, "閉じる")),/*#__PURE__*/React.createElement("div", {
+  }, "閉じる"))),/*#__PURE__*/React.createElement("div", {
     style: S.prepBlock
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
@@ -6053,7 +6055,10 @@ function FieldMasterPanel(p) {
     area: "",
     areaA: ""
   });
-  const [closed, setClosed] = useState([]); // 閉じている地区名
+  // 閉じている地区名。null は「まだ一度も触っていない」で、既定は全部畳む(v9.37)。
+  // 圃場が増えると一覧が縦に伸びて、探している地区までたどり着けない。
+  // 空配列を初期値にすると「全部開いている」と区別が付かないので null を使う
+  const [closed, setClosed] = useState(null);
   // 重複の疑い(v9.29)。既定は畳んでおく。圃場が多いと縦に伸びるため
   const [dupOpen, setDupOpen] = useState(false);
   // 判定は生の一覧で行う。除外中(この端末で外した)圃場を落とすと、
@@ -6073,9 +6078,14 @@ function FieldMasterPanel(p) {
     const ids = items.map(f => f.id);
     p.setHidden(visible ? hidden.filter(id => ids.indexOf(id) < 0) : Array.from(new Set([...hidden, ...ids])));
   };
-  // 検索中は畳まない(探しているものが隠れると意味がないため)
-  const isOpen = name => !!fq.trim() || closed.indexOf(name) < 0;
-  const toggleZone = name => setClosed(closed.indexOf(name) < 0 ? [...closed, name] : closed.filter(x => x !== name));
+  // 検索中は畳まない(探しているものが隠れると意味がないため)。
+  // まだ触っていない(null)ときは全部閉じている扱い
+  const isOpen = name => !!fq.trim() || (closed !== null && closed.indexOf(name) < 0);
+  const toggleZone = name => setClosed(prev => {
+    // 最初の1回は「全部閉じている」状態から始める。押した地区だけを開ける
+    if (prev === null) return fieldGroups.map(g => g.name).filter(z => z !== name);
+    return prev.indexOf(name) < 0 ? [...prev, name] : prev.filter(x => x !== name);
+  });
   const fieldList = fq.trim() ? p.fields.filter(f => f.name.includes(fq.trim()) || (f.crop || "").includes(fq.trim()) || (f.area || "").includes(fq.trim())) : p.fields;
   // 地区ごとにまとめて見出しを付ける。地区なしは末尾の「未分類」へ
   const fieldGroups = React.useMemo(() => {

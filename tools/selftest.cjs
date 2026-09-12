@@ -2654,6 +2654,20 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
   // 使った薬剤はマスタと「前回と同じ薬液」に残す(適用のときにやっていた仕事)
   eq("実績の保存で薬剤マスタに残す",
     /const submitReport[\s\S]{0,1200}upsertChemMaster\(validDayChems/.test(src), true);
+  // 圃場一覧の地区は既定で畳む(v9.37)。圃場が増えると縦に伸びて探せない
+  eq("地区の畳み状態は null から始める",
+    src.includes("const [closed, setClosed] = useState(null);"), true);
+  eq("触っていなければ全部閉じている扱い",
+    src.includes("(closed !== null && closed.indexOf(name) < 0)"), true);
+  eq("最初に押した地区だけを開く",
+    src.includes("if (prev === null) return fieldGroups.map(g => g.name).filter(z => z !== name);"), true);
+  // 検索中は畳まない(探しているものが隠れると意味がない)。既定を変えても同じ
+  eq("検索中は畳まない", src.includes("!!fq.trim() ||"), true);
+
+  // 薬剤パネルの「閉じる」は、開いているときだけ出す(v9.37)
+  eq("閉じるはパネルを開いたときだけ",
+    /dayChemsOpen && [\s\S]{0,6000}setDayChemsOpen\(false\)[\s\S]{0,200}"閉じる"/.test(src), true);
+
   // その日の投下量を覚えて、圃場を入れた時点で予定薬液量を計算する(v9.36)。
   // 覚えていないと、圃場を外して入れ直したとき予定が0に戻り、
   // 地図の吹き出しから「予定散布量」が消える
