@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.39";
+const APP_VERSION = "v9.40";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -2348,17 +2348,20 @@ function App() {
     return true;
   };
   // 登録済み薬剤を調合タブの薬剤欄に呼び出す(倍率は登録値が入り、その場で変更できる)
+  // 既に「水和剤」で登録してある薬剤も、名前がフロアブルなら液体として
+  // 行へ入れる(v9.40)。マスタの値は書き換えない(人が直せる場所なので、
+  // 黙って変えると次に開いたときに違う値が入っていて驚く)
   const applyChemMaster = (id, m) => setChems(chems.map(c => c.id === id ? {
     ...c,
     name: m.name,
-    form: m.form,
+    form: refineFormByName(m.name, m.form),
     use: m.use || c.use
   } : c));
   // 登録済み薬剤を新しい行として追加する
   const addChemFromMaster = m => setChems([...chems, {
     ...newChem(),
     name: m.name,
-    form: m.form,
+    form: refineFormByName(m.name, m.form),
     use: m.use || "other"
   }]);
   // 実績を入れた時点で、その日の薬液をその作業へ焼き付ける(v9.33)。
@@ -5352,6 +5355,25 @@ function ReportModal(p) {
 const SOLID_FORM_KEYS = ["wp", "wg", "sp", "sg", "gr", "dl", "jumbo", "paste"];
 const agriAmountUnit = formKey => SOLID_FORM_KEYS.indexOf(formKey) >= 0 ? "kg" : "mL";
 
+// 農薬データの剤型を、商品名で見直す(v9.40)。
+//
+// 農薬登録の上では、フロアブル製剤の剤型は「水和剤」と書かれていることが多い。
+// 取り込み側(tools/update_chemdb.py の form_key)は剤型欄の「水和」を先に見るので
+// wp(水和剤=固体)になり、量が g で出る。だがフロアブルは液体なので mL で量る。
+// 実データで数えると、名前に「フロアブル」「ゾル」を含むのに固体扱いの薬剤が
+// 6,275件中 908件あった(例: パレード20フロアブル / プレバソンフロアブル5)。
+//
+// ドライフロアブル(DF)は名前にフロアブルと付くが本当に固体なので、外す。
+// 実データでは 908件のうち 12件がこれにあたる。
+const DRY_FLOWABLE_RE = /ドライフロアブル|ＤＦ|DF/;
+const FLOWABLE_RE = /フロアブル|ゾル/;
+const refineFormByName = (name, formKey) => {
+  const n = String(name || "");
+  if (formKey !== "wp" && formKey !== "sp") return formKey;
+  if (DRY_FLOWABLE_RE.test(n)) return formKey;
+  return FLOWABLE_RE.test(n) ? "sc" : formKey;
+};
+
 // 末尾の余分なゼロだけを落とす。小数点を含まない文字列には手を触れない
 // ("100" から "00" を削って "1" になるような誤削除を防ぐ)。
 const stripTrailingZeros = s => s.indexOf(".") < 0 || s.indexOf("e") >= 0 ? s : s.replace(/0+$/, "").replace(/\.$/, "");
@@ -5805,7 +5827,7 @@ function ChemSearchModal(p) {
     p.onPick({
       name: chem.nm,
       use: chem.u,
-      form: chem.f
+      form: refineFormByName(chem.nm, chem.f)
     });
     setJustAdded(prev => {
       const next = {
@@ -6512,7 +6534,8 @@ function ChemMasterPanel(p) {
     onPick: c => p.addChemMaster({
       name: c.name,
       use: c.use,
-      form: c.form
+      // 登録上の剤型が「水和剤」でも、名前がフロアブルなら液体として扱う(v9.40)
+      form: refineFormByName(c.name, c.form)
     }),
     onCancel: () => setChemSearchOpen(false)
   }), /*#__PURE__*/React.createElement("input", {

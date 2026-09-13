@@ -30,7 +30,7 @@ const EXPORTS = [
   "DRAW_HISTORY_MAX", "naviUrl", "fieldCenter",
   "shiftDate", "dateLabel", "newChem", "agriAmountUnit", "stripTrailingZeros",
   "agriNum", "normalizeChemName", "plannedLFromArea", "sprayVolumeL",
-  "doseFromRatio", "ratioFromDose",
+  "doseFromRatio", "ratioFromDose", "refineFormByName",
   "buildAgriGroups", "searchChemDb", "CHEM_SEARCH_LIMIT", "FIELD_COLOR",
   "syncFingerprint", "stampUpdated", "pendingOf", "isPending", "progressTargets", "PROGRESS_STATES", "PROGRESS_RANK",
   "PROGRESS_ORDER", "PROGRESS_CARRY_DAYS", "toMapStatus", "workIdFor", "foldProgress", "progressEntries", "serverOrphans", "progressMapDiff", "PROGRESS_DIFF_KEY", "daysBefore", "carryOverFieldIds", "pickWorkOfDay", "workBy", "outgoingBy", "labelByText", "labelSizeOf", "fieldLabelVisible", "LABEL_SIZE_BREAKS", "LABEL_FONT", "textEmWidth", "labelBoxOf", "fieldLabelBox", "thinLabels", "labelPriOf", "summarizeByRecorder", "keepLocalEdit", "geoWatch", "labelsVisible", "PROGRESS_LABEL_MIN_ZOOM", "FIELD_LABEL_MIN_ZOOM", "fieldDrawSig", "diffDraw", "geoHintFor",
@@ -2741,6 +2741,49 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
   // 作業タブには持ち込まない(調合タブだけで完結させる)
   eq("この日の薬剤には足していない",
     /const addDayChem[\s\S]{0,400}mlPer10a/.test(src), false);
+}
+
+// ── フロアブルが g で出ていた(v9.40) ──────────────────────
+//
+// 農薬登録の上では、フロアブル製剤の剤型は「水和剤」と書かれていることが多い。
+// 取り込み(tools/update_chemdb.py の form_key)は剤型欄の「水和」を先に見るので
+// wp(固体)になり、量が g で出ていた。実データで数えると、名前に「フロアブル」
+// 「ゾル」を含むのに固体扱いの薬剤が 6,275件中 908件あった。
+{
+  const F = t.refineFormByName;
+  eq("パレード20フロアブルは液体にする", F("パレード20フロアブル", "wp"), "sc");
+  eq("プレバソンフロアブル5も液体にする", F("プレバソンフロアブル5", "wp"), "sc");
+  eq("ゾルも液体にする", F("ダコニール1000ゾル", "wp"), "sc");
+  eq("水溶剤で名前がフロアブルでも液体にする", F("なんとかフロアブル", "sp"), "sc");
+  // ドライフロアブル(DF)は本当に固体。実データで908件中12件あった
+  eq("ドライフロアブルは固体のまま", F("カンタスドライフロアブル", "wp"), "wp");
+  eq("DF表記も固体のまま", F("なんとかDF", "wp"), "wp");
+  eq("ＤＦ(全角)も固体のまま", F("なんとかＤＦ", "wp"), "wp");
+  // 名前にフロアブルが無ければ触らない
+  eq("ただの水和剤は触らない", F("なんとか水和剤", "wp"), "wp");
+  // もともと液体・粒剤のものは触らない(粒剤をフロアブルと名乗る製品はない)
+  eq("フロアブル剤型はそのまま", F("なんとかフロアブル", "sc"), "sc");
+  eq("粒剤は触らない", F("なんとか粒剤", "gr"), "gr");
+  eq("顆粒水和剤は触らない(DFのことが多い)", F("なんとかフロアブル", "wg"), "wg");
+  eq("名前が空でも落ちない", F("", "wp"), "wp");
+  eq("nameがnullでも落ちない", F(null, "wp"), "wp");
+
+  // 単位はこれで mL 側になる
+  eq("液体にすればmLで出る", t.agriAmountUnit(F("パレード20フロアブル", "wp")), "mL");
+  eq("ドライフロアブルはkg(=g表示)のまま",
+    t.agriAmountUnit(F("カンタスドライフロアブル", "wp")), "kg");
+}
+
+// ── 取り込み口への配線 ──
+// マスタの保存値は書き換えない(人が直せる場所を黙って変えない)。
+// 取り込むとき・行へ入れるときに直す
+{
+  eq("登録番号検索からマスタへ入れるとき直す",
+    src.includes("form: refineFormByName(c.name, c.form)"), true);
+  eq("検索結果の行から渡すときも直す",
+    src.includes("form: refineFormByName(chem.nm, chem.f)"), true);
+  eq("マスタから調合の行へ入れるときも直す",
+    (src.match(/form: refineFormByName\(m\.name, m\.form\)/g) || []).length, 2);
 }
 
 // ── 結果 ─────────────────────────────────────────────
