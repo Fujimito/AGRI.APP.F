@@ -1133,23 +1133,32 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     src.includes('feats.indexOf("pushChems") < 0'), false);
 }
 
-// ── 送信ボタンの文言・配線(v9.15・Task2) ────────────────
-// 「台帳へ送信」ではなく「進捗を送信」。押した先も pushProgress 一本にする
+// ── 送信ボタンの文言・配線(v9.41で予定共有/実績送信に分けた) ────────────────
+// v9.41: 送信を「☁ 作業予定を共有」(pushPlan)と「☁ 実績を送信」(pushResults)に分けた。
+// 作業前は予定共有、散布後は実績送信。押す場所で名前が変わる。
 {
-  eq("作業タブの送信ボタン(地図側)は pushProgress を呼ぶ",
-    src.includes("onClick: () => p.pushProgress(),"), true);
-  eq("見出しの未送信バッジも pushProgress を呼ぶ",
-    src.includes("setTab(\"work\");\n      pushProgress();"), true);
-  eq("送信ボタンの文言が「進捗を送信」になっている",
-    (src.match(/"☁ 進捗を送信\(未送信 " \+ pending \+ "件\)"/g) || []).length, 2);
-  // レビュー指摘(round1・Important2): 作業タブの2つのボタンだけ直して、
-  // 見出しのバッジが「☁ 8月30日(土) 未送信 3件」のまま日付を名乗っていた。
-  // クリック先の pushProgress は日をまたいで全部送るので、バッジの文言だけ
-  // 実態と食い違っていた。ボタン2つと表現を揃える
-  eq("見出しのバッジの文言も「進捗を送信」になっている",
-    src.includes('"☁ 進捗を送信(未送信 " + pendingCount + "件)"'), true);
-  // v9.38: 電波が戻ったときの自動送信はやめた。進捗を送るのは
-  // 「☁ 進捗を送信」を押したときだけ
+  // 予定共有ボタン: 「本日の作業圃場登録」の中と、設定タブの送り直しの計2か所
+  eq("作業予定の共有ボタンは pushPlan を呼ぶ(作業タブ+設定タブ=2か所)",
+    (src.match(/onClick: \(\) => p\.pushPlan\(\),/g) || []).length, 2);
+  // 実績送信ボタン: 地図側・一覧側・設定タブの送り直しの計3か所
+  eq("実績送信ボタンは pushResults を呼ぶ(地図+一覧+設定タブ=3か所)",
+    (src.match(/onClick: \(\) => p\.pushResults\(\),/g) || []).length, 3);
+  // 見出しの未送信バッジは実績専用(本人の指定)。押すと実績送信
+  eq("見出しの未送信バッジは pushResults を呼ぶ",
+    src.includes("setTab(\"work\");\n      pushResults();"), true);
+  // 予定共有ボタンの文言
+  eq("予定共有ボタンの文言が「作業予定を共有」になっている",
+    src.includes('"☁ 作業予定を共有(未共有 " + planPending + "件)"'), true);
+  // 実績送信ボタンの文言(地図側・一覧側の2か所)
+  eq("実績送信ボタンの文言が「実績を送信」になっている(2か所)",
+    (src.match(/"☁ 実績を送信\(未送信 " \+ resultPending \+ "件\)"/g) || []).length, 2);
+  // 見出しのバッジも実績送信の文言・件数(resultPendingCount)で揃える
+  eq("見出しのバッジの文言も「実績を送信」になっている",
+    src.includes('"☁ 実績を送信(未送信 " + resultPendingCount + "件)"'), true);
+  // 見出しのバッジは実績が未送信のときだけ出す(予定は本日の作業圃場登録の中で共有する)
+  eq("見出しのバッジは resultPendingCount で出し分ける",
+    src.includes("resultPendingCount > 0 && "), true);
+  // v9.38: 電波が戻ったときの自動送信はやめた。送るのはボタンを押したときだけ
   // (7000行台に残る online の購読は農薬データの読み直しで、送信ではない)
   eq("電波復帰では進捗を送らない",
     src.includes("if (shareOn && url && pend) pushProgress();"), false);
@@ -1227,10 +1236,15 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("pushedAt未設定(一度も送っていない)は当然pendingOf側からも拾える",
     T([{ id: 4, updatedAt: "t", synced: true, reported: false, reportSynced: false, unreportPending: false }]).map(w => w.id), [4]);
 
-  // pushProgress本体が実際にこの合流関数を使っていることをソースでも確認する
-  // (ここだけ pendingOf に先祖返りしても、上のロジックのテストだけでは検出できない)
-  eq("pushProgress は progressTargets を使っている",
-    src.includes("const pend = progressTargets(cur);"), true);
+  // 予定共有・実績送信の両方が実際にこの合流関数を使っていることをソースでも確認する
+  // (ここだけ pendingOf に先祖返りしても、上のロジックのテストだけでは検出できない)。
+  // v9.41: それぞれ reported で絞るので progressTargets(cur).filter が2か所に出る
+  eq("予定共有・実績送信はどちらも progressTargets を使っている(2か所)",
+    (src.match(/const pend = progressTargets\(cur\)\.filter\(/g) || []).length, 2);
+  eq("予定共有は未実施(!reported)だけを送る",
+    src.includes("progressTargets(cur).filter(w => !w.reported)"), true);
+  eq("実績送信は実施済(reported)だけを送る",
+    src.includes("progressTargets(cur).filter(w => w.reported)"), true);
   eq("pendingOf は圃場・薬剤の送信では引き続きそのまま使われている(触っていない)",
     (src.match(/const pend = pendingOf\(cur\);/g) || []).length, 2);
 }
