@@ -886,8 +886,9 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("全画面のボタンは fullMap のときだけ",
     /fullMap && [\s\S]{0,1600}S\.mapSideBtns/.test(tab), true);
   eq("全画面に札の切替もある", seg.includes("setShowLabels"), true);
-  // v9.43: ⊙「今日の圃場へ寄せ直す」を削除。残るは ✕ / 📍 / 🏷 の3つ
-  eq("全画面のボタンは3つ", (seg.match(/S\.mapSideBtn(?!s|Off|Warn)/g) || []).length, 3);
+  // v9.43で⊙「今日の圃場へ寄せ直す」を削除、v9.44で地名/回転の切替を追加。
+  // 残るは ✕ / 📍 / 🏷 / 🗺(地名回転) の4つ
+  eq("全画面のボタンは4つ", (seg.match(/S\.mapSideBtn(?!s|Off|Warn)/g) || []).length, 4);
 
   // ── 画面の上下を使わない(v8.93) ──
   eq("上端にも下端にも貼り付けていない",
@@ -908,10 +909,10 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("指で押す的は44px角",
     /mapSideBtn: \{[\s\S]{0,300}width: 44,[\s\S]{0,40}height: 44/.test(src), true);
   // 絵文字だけなので、何のボタンかは title と読み上げ用の名前で補う
-  eq("3つとも読み上げ用の名前がある",
-    (seg.match(/"aria-label":/g) || []).length, 3);
-  eq("3つとも title がある(seg には次の全画面ボタンの title も1つ入る)",
-    (seg.match(/title:/g) || []).length >= 3, true);
+  eq("4つとも読み上げ用の名前がある",
+    (seg.match(/"aria-label":/g) || []).length, 4);
+  eq("4つとも title がある(seg には次の全画面ボタンの title も1つ入る)",
+    (seg.match(/title:/g) || []).length >= 4, true);
   eq("札OFFのときの見た目がある", src.includes("mapSideBtnOff: {"), true);
   eq("使わなくなった帯の定義が残っていない", src.includes("mapFullBar"), false);
 }

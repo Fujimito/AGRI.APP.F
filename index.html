@@ -47,6 +47,10 @@
   :root { --shell-w: 640px; }
   html, body { height: 100%; }
   body { background: #F0F3EC; overflow-x: hidden; }
+  /* 地図を全画面にしている間は下部タブバーを隠す(v9.44)。特にタブレット・スマホで
+     タブバーが全画面の覆いより手前に描かれて地図に重なるのを防ぐ。
+     app.js が body に map-full クラスを付け外しする。 */
+  body.map-full .app-tabbar { display: none !important; }
   /* 画面の高さぴったりの器を作り、中身(main)だけをスクロールさせる。
      タブバーを position:fixed で下に貼ると、アドレスバーの出入りや
      キーボードで位置が動く(特にタブレット)。器の中の一番下に置けば動かない。

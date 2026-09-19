@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.43";
+const APP_VERSION = "v9.44";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -610,7 +610,11 @@ const newChem = () => ({
   // 10aあたりの薬量(mL)。調合タブで倍率と相互に変換するためだけに持つ(v9.39)。
   // ラベルは「8倍・10aあたり0.8L」のように、倍率と散布量の組で書かれている。
   // 散布量を別の値に寄せると倍率も変わるので、その引き直しを手計算させない
-  mlPer10a: ""
+  mlPer10a: "",
+  // 使用液量(散布液量)の範囲(L/10a)。混用のとき、全剤の範囲の共通部分が
+  // 「使える面積あたりの投下量(V)」になる(v9.44)。任意入力。
+  vMin: "",
+  vMax: ""
 });
 // 倍率 ⇄ 10aあたりの薬量。どちらも「10aあたり何mLの薬剤を撒くか」を
 // 別の書き方で表しているだけ。散布量(L/10a)が決まって初めて相互に変換できる。
@@ -1485,6 +1489,18 @@ function App() {
   // 空なら今までどおりのラスター地図(回転なし)。
   const [gmapId, setGmapIdState] = useState(() => localStorage.getItem("tankmix:gmapid") || "");
   const [gmapIdInput, setGmapIdInput] = useState(() => localStorage.getItem("tankmix:gmapid") || "");
+  // 地名(ラスター)⇔回転(ベクター)の切替(v9.44)。進捗地図・圃場登録の両方で共有する。
+  // false=地名優先(マップIDを使わずラスターのハイブリッド。Googleの地名が必ず出る/回転不可)。
+  // true=回転優先(マップIDを使うベクター。指で回せる/地名はCloud Console設定次第)。
+  const [mapVector, setMapVectorState] = useState(() => localStorage.getItem("tankmix:mapvector") === "1");
+  const setMapVector = v => {
+    setMapVectorState(v);
+    try {
+      localStorage.setItem("tankmix:mapvector", v ? "1" : "0");
+    } catch (e) {
+      // 保存できなくても切り替わる。次に開いたとき既定(地名優先)に戻るだけ
+    }
+  };
   const saveGmapId = v => {
     const trimmed = (v || "").trim();
     setGmapIdState(trimmed);
@@ -3796,15 +3812,19 @@ function App() {
     mapEngine,
     gmapKey,
     gmapId,
+    // 地名(ラスター)⇔回転(ベクター)の共有切替(v9.44)
+    mapVector,
+    setMapVector,
     pullSec
   }), mapMounted && /*#__PURE__*/React.createElement("div", {
     style: tab === "map" ? undefined : {
       display: "none"
     }
   }, /*#__PURE__*/React.createElement(MapTabRouter, {
-    // マップIDを入れ替えたら地図を作り直す。
-    // ラスターかベクターかは地図を作るときに決まり、あとから変えられない。
-    key: gmapId || "raster",
+    // マップIDを入れ替えたら地図を作り直す。ラスターかベクターかは作るときに決まる。
+    // 地名優先(mapVector=false)のときはマップIDを使わない=ラスターになるので、
+    // key も実効ID("raster")にして切替のたびに作り直させる(v9.44)。
+    key: mapVector && gmapId ? gmapId : "raster",
     fields: fieldsShown,
     // 表示は除外後(fieldsShown)、書き込みは生(fields)。地図タブの中には
     // 「編集対象を生の一覧から引き直してから書き込む」処理があるため、
@@ -3824,6 +3844,9 @@ function App() {
     mapEngine,
     gmapKey,
     gmapId,
+    // 地名(ラスター)⇔回転(ベクター)の共有切替(v9.44)
+    mapVector,
+    setMapVector,
     setTab,
     // 端末ごとの圃場除外(v9.19)。FieldMasterPanel の一覧に渡す
     excluded,
@@ -3892,7 +3915,8 @@ function App() {
     setExcluded
   })), /*#__PURE__*/React.createElement("nav", {
     style: S.tabbar,
-    className: "no-print"
+    // app-tabbar: 全画面地図のとき CSS(body.map-full)で隠すための目印(v9.44)
+    className: "no-print app-tabbar"
   }, [["calc", "🧮", "薬剤登録・希釈計算"], ["work", "🚁", "作業予定・進捗確認"], ["map", "🗺", "圃場登録・圃場一覧"], ["settings", "⚙", "設定"]].map(t =>/*#__PURE__*/React.createElement("button", {
     key: t[0],
     onClick: () => setTab(t[0]),
@@ -3932,10 +3956,10 @@ function CalcTab(p) {
   // v8.57 でデータベースタブを畳んだ。薬剤マスタはここの「🧪 薬剤」側。
   // 選んだ側を覚えておく。登録作業を続けている途中で他のタブへ
   // 行って戻ると、毎回電卓に戻されるのを防ぐため。
-  const [calcView, setCalcView] = useState(() => {
-    const v = load("tankmix:calcview", "calc");
-    return v === "chem" || v === "mix" ? v : "calc";
-  });
+  const [calcView, setCalcView] = useState(() => load("tankmix:calcview", "calc") === "chem" ? "chem" : "calc");
+  // 混用の投下量(V)計算は通常電卓の中に統合したので、各剤の使用液量範囲から
+  // 「この混用で使える投下量」を出す。別タブは重複していたため v9.44 で廃止。
+  const mix = computeMixDose(p.calc);
   const chooseView = v => {
     setCalcView(v);
     save("tankmix:calcview", v);
@@ -3947,17 +3971,14 @@ function CalcTab(p) {
   return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
     style: S.segWrap,
     className: "no-print"
-  }, [["calc", "🧮 調合電卓"], ["mix", "💧 混用投下量"], ["chem", "🧪 薬剤・プリセット"]].map(v => /*#__PURE__*/React.createElement("button", {
+  }, [["calc", "🧮 調合電卓"], ["chem", "🧪 薬剤・プリセット"]].map(v => /*#__PURE__*/React.createElement("button", {
     key: v[0],
     onClick: () => chooseView(v[0]),
     style: {
       ...S.seg,
       ...(calcView === v[0] ? S.segOn : {})
     }
-  }, v[1]))), calcView === "mix" ? /*#__PURE__*/React.createElement(MixDoseCalc, {
-    volUnitKey: p.volUnitKey,
-    areaUnitKey: p.areaUnitKey
-  }) : calcView === "chem" ? /*#__PURE__*/React.createElement(ChemMasterPanel, {
+  }, v[1]))), calcView === "chem" ? /*#__PURE__*/React.createElement(ChemMasterPanel, {
     chemMaster: p.chemMaster,
     addChemMaster: p.addChemMaster,
     deleteChemMaster: p.deleteChemMaster,
@@ -4160,7 +4181,55 @@ function CalcTab(p) {
     className: "num"
   }), p.mode === "area" && /*#__PURE__*/React.createElement("span", {
     style: S.midUnit
-  }, "mL/10a")), /*#__PURE__*/React.createElement("div", {
+  }, "mL/10a")),
+  // 使用液量(散布液量)の範囲(L/10a)。混用のとき全剤の共通部分が「使える投下量」になる(v9.44)。
+  // 単剤で使うぶんには空のままでよい。空欄は判定に含めない。
+  /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      alignItems: "center",
+      gap: 6,
+      marginTop: 6,
+      flexWrap: "wrap"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    style: {
+      ...S.midUnit,
+      marginRight: 2
+    }
+  }, "使用液量"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    step: "0.1",
+    placeholder: "下限",
+    value: c.vMin || "",
+    onChange: e => p.update(c.id, "vMin", e.target.value),
+    style: {
+      ...S.ratioInput,
+      width: 64
+    },
+    className: "num",
+    "aria-label": "使用液量下限(L/10a)"
+  }), /*#__PURE__*/React.createElement("span", {
+    style: S.midUnit
+  }, "〜"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    step: "0.1",
+    placeholder: "上限",
+    value: c.vMax || "",
+    onChange: e => p.update(c.id, "vMax", e.target.value),
+    style: {
+      ...S.ratioInput,
+      width: 64
+    },
+    className: "num",
+    "aria-label": "使用液量上限(L/10a)"
+  }), /*#__PURE__*/React.createElement("span", {
+    style: S.midUnit
+  }, "L/10a")), /*#__PURE__*/React.createElement("div", {
     style: S.chemResult,
     className: "num"
   }, c.valid && p.totalMl > 0 ? /*#__PURE__*/React.createElement("span", null, "→ ", /*#__PURE__*/React.createElement("strong", null, fmt(c.ml)), (agriAmountUnit(c.form) === "kg" ? " g" : " mL")) : /*#__PURE__*/React.createElement("span", {
@@ -4186,7 +4255,56 @@ function CalcTab(p) {
     style: S.card
   }, /*#__PURE__*/React.createElement("div", {
     style: S.cardLabel
-  }, "調合結果"), p.over && /*#__PURE__*/React.createElement("div", {
+  }, "調合結果"),
+  // 混用で使える面積あたりの投下量(V)。各剤の使用液量範囲の共通部分。
+  // 範囲を入れたときだけ出す(単剤・未入力のときは邪魔しない)。
+  mix.hasRange && !mix.noCommonV && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#EDF5EE",
+      border: "1px solid #BFD8C4",
+      borderRadius: 8,
+      padding: "9px 11px",
+      fontSize: 13.5,
+      fontWeight: 700,
+      color: "#2E5E43",
+      marginBottom: 10
+    },
+    className: "num"
+  }, "💧 この混用で使える面積あたりの投下量: ", Math.round(mix.vLo * 100) / 100, " 〜 ", Math.round(mix.vHi * 100) / 100, " L/10a", /*#__PURE__*/React.createElement("span", {
+    style: {
+      display: "block",
+      fontSize: 12,
+      fontWeight: 600,
+      color: "#4a5a50",
+      marginTop: 3
+    }
+  }, "「面積から計算」の10aあたり散布量に、この範囲内の値を入れてください。")),
+  mix.noCommonV && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#FDECEA",
+      border: "1px solid #C74E36",
+      borderRadius: 8,
+      padding: "9px 11px",
+      fontSize: 13,
+      fontWeight: 700,
+      color: "#7A0B0B",
+      marginBottom: 10
+    },
+    className: "num"
+  }, "✕ 使用液量の共通範囲がありません(下限の最大 ", Math.round(mix.vLo * 100) / 100, " > 上限の最小 ", Math.round(mix.vHi * 100) / 100, ")。この組み合わせは1回散布での混用不可です。"),
+  mix.tooConc && /*#__PURE__*/React.createElement("div", {
+    style: {
+      background: "#FDECEA",
+      border: "1px solid #C74E36",
+      borderRadius: 8,
+      padding: "9px 11px",
+      fontSize: 13,
+      fontWeight: 700,
+      color: "#7A0B0B",
+      marginBottom: 10
+    },
+    className: "num"
+  }, "✕ 濃すぎます(水が入りません)。Σ(1÷倍数)=", Math.round(mix.concSum * 100) / 100, " ≧ 1。倍数の大きい剤に見直すか、剤数を減らしてください。"), p.over && /*#__PURE__*/React.createElement("div", {
     style: S.alert
   }, "⚠ 薬剤の合計がタンク総量を超えています。倍率か総量を見直してください。"), /*#__PURE__*/React.createElement("div", {
     style: S.waterBox
@@ -4303,291 +4421,6 @@ function computeMixDose(rows) {
     hasRange,
     noCommonV
   };
-}
-function MixDoseCalc(p) {
-  const round2 = x => Math.round(x * 100) / 100;
-  // tank=タンク容量から仕込む / area=散布面積から必要量を出す
-  const [basisMode, setBasisMode] = useState("tank");
-  const [tankL, setTankL] = useState("");
-  const [areaR, setAreaR] = useState("");
-  const [vInput, setVInput] = useState("");
-  const [rows, setRows] = useState([{
-    id: 1,
-    form: "sc",
-    ratio: "",
-    vMin: "",
-    vMax: ""
-  }, {
-    id: 2,
-    form: "wg",
-    ratio: "",
-    vMin: "",
-    vMax: ""
-  }]);
-  const nextId = React.useRef(3);
-  const addRow = () => setRows(rs => [...rs, {
-    id: nextId.current++,
-    form: "sc",
-    ratio: "",
-    vMin: "",
-    vMax: ""
-  }]);
-  const removeRow = id => setRows(rs => rs.length > 1 ? rs.filter(r => r.id !== id) : rs);
-  const setRow = (id, k, v) => setRows(rs => rs.map(r => r.id === id ? {
-    ...r,
-    [k]: v
-  } : r));
-  const m = computeMixDose(rows);
-  const V = parseFloat(vInput);
-  const vOK = isFinite(V) && V > 0;
-  const vInRange = vOK && (!m.hasRange || m.noCommonV || V >= m.vLo - 1e-9 && V <= m.vHi + 1e-9);
-  const basis = basisMode === "tank" ? parseFloat(tankL) : vOK ? V * parseFloat(areaR) / 10 : NaN;
-  const basisOK = isFinite(basis) && basis > 0;
-  const canCompute = m.valid.length > 0 && !m.tooConc && vOK && basisOK && !m.noCommonV;
-  const amountUnit = form => agriAmountUnit(form) === "kg" ? "kg" : "L";
-  const num = (val, on, label, step) => /*#__PURE__*/React.createElement("input", {
-    type: "number",
-    inputMode: "decimal",
-    min: "0",
-    step: step || "0.1",
-    value: val,
-    onChange: e => on(e.target.value),
-    style: {
-      ...S.ratioInput,
-      width: "100%"
-    },
-    className: "num",
-    "aria-label": label
-  });
-  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("section", {
-    style: S.card
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "混用投下量の計算"),
-  // 適用登録・混用可否は別途確認(handoff の前提)。量の計算だけを行う旨を先に出す。
-  /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: "#FFF4D6",
-      border: "1px solid #E3B505",
-      borderRadius: 8,
-      padding: "9px 11px",
-      fontSize: 12.5,
-      lineHeight: 1.6,
-      color: "#6B4E00",
-      marginBottom: 12
-    }
-  }, "⚠ ここでは「量」だけを計算します。", /*#__PURE__*/React.createElement("strong", null, "適用登録(作物×剤×無人航空機)と混用可否(沈殿・分離・薬害)は、必ずラベルとメーカーの混用事例で別途確認"), "してください。"),
-  // 仕込む基準: タンク容量から / 面積から
-  /*#__PURE__*/React.createElement("div", {
-    style: S.segWrap
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => setBasisMode("tank"),
-    style: {
-      ...S.seg,
-      ...(basisMode === "tank" ? S.segOn : {})
-    }
-  }, "タンク容量から"), /*#__PURE__*/React.createElement("button", {
-    onClick: () => setBasisMode("area"),
-    style: {
-      ...S.seg,
-      ...(basisMode === "area" ? S.segOn : {})
-    }
-  }, "面積から")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 10,
-      flexWrap: "wrap",
-      alignItems: "flex-end",
-      marginTop: 10
-    }
-  }, basisMode === "tank" ? /*#__PURE__*/React.createElement("label", {
-    style: {
-      flex: 1,
-      minWidth: 120
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "タンク容量 (L)"), num(tankL, setTankL, "タンク容量(L)", "1")) : /*#__PURE__*/React.createElement("label", {
-    style: {
-      flex: 1,
-      minWidth: 120
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "散布面積 (a=アール)"), num(areaR, setAreaR, "散布面積(a)", "1")), /*#__PURE__*/React.createElement("label", {
-    style: {
-      flex: 1,
-      minWidth: 120
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "投下量 V (L/10a)"), num(vInput, setVInput, "投下量(L/10a)", "0.1")))),
-  // 薬剤の行(倍率・使用液量範囲・剤型)
-  /*#__PURE__*/React.createElement("section", {
-    style: {
-      ...S.card,
-      marginTop: 12
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "混用する薬剤"), rows.map(r => /*#__PURE__*/React.createElement("div", {
-    key: r.id,
-    style: {
-      border: "1px solid #E1E8DC",
-      borderRadius: 10,
-      padding: "10px 10px 12px",
-      marginBottom: 10
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8,
-      alignItems: "center",
-      marginBottom: 8
-    }
-  }, /*#__PURE__*/React.createElement("select", {
-    value: r.form,
-    onChange: e => setRow(r.id, "form", e.target.value),
-    style: {
-      ...S.formSelect,
-      flex: 1,
-      maxWidth: "none"
-    },
-    "aria-label": "剤型"
-  }, FORMS.map(f => /*#__PURE__*/React.createElement("option", {
-    key: f.key,
-    value: f.key
-  }, f.label))), rows.length > 1 && /*#__PURE__*/React.createElement("button", {
-    onClick: () => removeRow(r.id),
-    style: {
-      ...S.smallSecondary,
-      padding: "8px 12px"
-    },
-    "aria-label": "この薬剤を外す"
-  }, "✕")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      gap: 8,
-      flexWrap: "wrap"
-    }
-  }, /*#__PURE__*/React.createElement("label", {
-    style: {
-      flex: 1,
-      minWidth: 90
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "希釈倍数"), num(r.ratio, v => setRow(r.id, "ratio", v), "希釈倍数", "1")), /*#__PURE__*/React.createElement("label", {
-    style: {
-      flex: 1,
-      minWidth: 90
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "使用液量 下限"), num(r.vMin, v => setRow(r.id, "vMin", v), "使用液量下限(L/10a)", "0.1")), /*#__PURE__*/React.createElement("label", {
-    style: {
-      flex: 1,
-      minWidth: 90
-    }
-  }, /*#__PURE__*/React.createElement("span", {
-    style: S.smallLabel
-  }, "使用液量 上限"), num(r.vMax, v => setRow(r.id, "vMax", v), "使用液量上限(L/10a)", "0.1"))))), /*#__PURE__*/React.createElement("button", {
-    onClick: addRow,
-    style: {
-      ...S.smallPrimary,
-      width: "100%",
-      padding: "11px 0"
-    }
-  }, "＋ 薬剤を追加"), /*#__PURE__*/React.createElement("p", {
-    style: S.note
-  }, "使用液量(L/10a)は各剤のラベルの散布液量の範囲です。1点固定の剤は下限・上限に同じ値を入れてください。")),
-  // 判定と結果
-  /*#__PURE__*/React.createElement("section", {
-    style: {
-      ...S.card,
-      marginTop: 12
-    }
-  }, /*#__PURE__*/React.createElement("div", {
-    style: S.cardLabel
-  }, "調合結果"),
-  // 共通投下量の範囲 / 共通なし警告
-  m.hasRange && !m.noCommonV && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 13.5,
-      color: "#2E5E43",
-      fontWeight: 700,
-      marginBottom: 8
-    },
-    className: "num"
-  }, "この混用で使える投下量: ", round2(m.vLo), " 〜 ", round2(m.vHi), " L/10a"), m.noCommonV && /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: "#FDECEA",
-      border: "1px solid #C74E36",
-      borderRadius: 8,
-      padding: "9px 11px",
-      fontSize: 13,
-      color: "#7A0B0B",
-      fontWeight: 700,
-      marginBottom: 8
-    }
-  }, "✕ 使用液量の共通範囲がありません(下限の最大 ", round2(m.vLo), " > 上限の最小 ", round2(m.vHi), ")。この組み合わせは1回散布での混用不可です。"), m.tooConc && /*#__PURE__*/React.createElement("div", {
-    style: {
-      background: "#FDECEA",
-      border: "1px solid #C74E36",
-      borderRadius: 8,
-      padding: "9px 11px",
-      fontSize: 13,
-      color: "#7A0B0B",
-      fontWeight: 700,
-      marginBottom: 8
-    },
-    className: "num"
-  }, "✕ 濃すぎます(水が入りません)。Σ(1÷倍数)=", round2(m.concSum), " ≧ 1。倍数の大きい剤に見直すか、剤数を減らしてください。"), vOK && !vInRange && !m.noCommonV && /*#__PURE__*/React.createElement("div", {
-    style: {
-      fontSize: 12.5,
-      color: "#A15E08",
-      fontWeight: 700,
-      marginBottom: 8
-    }
-  }, "⚠ 投下量が共通範囲の外です。範囲内の値を入れてください。"), canCompute ? /*#__PURE__*/React.createElement("div", null, m.valid.map((r, i) => /*#__PURE__*/React.createElement("div", {
-    key: r.id,
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      padding: "6px 0",
-      borderBottom: "1px solid #EEF2EA"
-    },
-    className: "num"
-  }, /*#__PURE__*/React.createElement("span", null, formLabel(r.form), " (", r.ratio, "倍)"), /*#__PURE__*/React.createElement("strong", null, round2(basis / parseFloat(r.ratio)), " ", amountUnit(r.form)))), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      padding: "6px 0",
-      borderBottom: "1px solid #EEF2EA"
-    },
-    className: "num"
-  }, /*#__PURE__*/React.createElement("span", null, "水(", basisMode === "tank" ? "タンクを満量にする" : "総液量に対して", ")"), /*#__PURE__*/React.createElement("strong", null, round2(basis * (1 - m.concSum)), " L")), /*#__PURE__*/React.createElement("div", {
-    style: {
-      display: "flex",
-      justifyContent: "space-between",
-      alignItems: "baseline",
-      padding: "10px 0 2px"
-    },
-    className: "num"
-  }, /*#__PURE__*/React.createElement("span", {
-    style: {
-      fontWeight: 700
-    }
-  }, basisMode === "tank" ? "散布可能面積" : "総液量"), /*#__PURE__*/React.createElement("strong", {
-    style: {
-      fontSize: 24,
-      color: "#1C2B21"
-    }
-  }, basisMode === "tank" ? round2(10 * basis / V) + " a" : round2(basis) + " L")), basisMode === "area" && /*#__PURE__*/React.createElement("p", {
-    style: S.note
-  }, "面積 ", areaR, " a を V=", round2(V), " L/10a で散布する場合の必要量です。")) : /*#__PURE__*/React.createElement("p", {
-    style: S.empty
-  }, m.tooConc || m.noCommonV ? "上の警告を解消してください。" : "希釈倍数・使用液量・" + (basisMode === "tank" ? "タンク容量" : "散布面積") + "・投下量を入れると計算します。")));
 }
 function TankViz({
   calc,
@@ -7222,6 +7055,12 @@ function useMapHeightFit(mapWrapRef, hidden, drawing, ready, fullMap, resize) {
       window.removeEventListener("orientationchange", fit);
     };
   }, [hidden, drawing, ready, fullMap]);
+  // 全画面のときは下部タブバーを隠す(v9.44)。特にタブレット・スマホでは
+  // タブバーが覆いより手前に描かれて地図に重なるため。body のクラスで CSS 側が消す。
+  React.useEffect(() => {
+    if (fullMap) document.body.classList.add("map-full");else document.body.classList.remove("map-full");
+    return () => document.body.classList.remove("map-full");
+  }, [fullMap]);
 }
 
 // 頂点をドラッグしている最中の「面積 X a」を、指を離す前から追従させる。
@@ -7545,13 +7384,11 @@ function GoogleMapTab(p) {
         center,
         zoom: z,
         mapTypeId: "hybrid",
-        // マップIDが入っているときだけベクター地図にする。
-        // ベクターにすると、指二本での回転が使える。
-        // headingInteractionEnabled はベクター地図のときだけ効く(公式)。
-        // 傾け(tilt)はここでは指定しない。公式によれば、コードで書かなければ
-        // マップID側の設定が使われる。Cloud Console のチェックを
-        // 付け外ししたとおりに効くようにしてある。
-        ...(p.gmapId ? {
+        // マップIDが入っていて、かつ回転優先(mapVector)のときだけベクター地図にする。
+        // 地名優先(mapVector=false)のときはマップIDを渡さない=ラスターのハイブリッドになり、
+        // Googleの地名が必ず出る(回転は不可)(v9.44)。切替時は App 側の key で作り直す。
+        // ベクターにすると指二本での回転が使える。headingInteractionEnabled はベクター時のみ有効(公式)。
+        ...(p.gmapId && p.mapVector ? {
           mapId: p.gmapId,
           headingInteractionEnabled: true
         } : {}),
@@ -7574,8 +7411,15 @@ function GoogleMapTab(p) {
         if (Date.now() - lastEditAtRef.current < 400) return;
         commitPts([...drawPtsRef.current, [e.latLng.lat(), e.latLng.lng()]]);
       });
-      map.addListener("zoom_changed", () => setZoom(map.getZoom()));
-      setZoom(map.getZoom());
+      // ベクター地図(mapId)はピンチ中に zoom_changed が小数倍率で連打される。
+      // そのまま state に入れると、札の描画 effect が1回のピンチで何十回も走る
+      // (このタブの描画は毎回オーバーレイを全消し・全再生成するので特に重い)。
+      // 札の出し分けは整数バンド(scale=2^floor(zoom)・しきい値も整数)でしか
+      // 変わらないので、整数に丸めて保存する。同じ整数なら React が再描画を
+      // 省くため、ピンチ1回あたり倍率の段が変わった回数だけしか走らない。
+      // 見える札は丸め前と同一。ラベルOFFの軽さには影響しない(v9.44)
+      map.addListener("zoom_changed", () => setZoom(Math.floor(map.getZoom())));
+      setZoom(Math.floor(map.getZoom()));
       setStatus("ready");
       setReady(true);
     }).catch(() => {
@@ -8107,7 +7951,20 @@ function GoogleMapTab(p) {
         color: "#8a621f"
       } : {})
     }
-  }, mapType === "hybrid" ? "🗺 地図表示" : "📷 衛星写真"), !drawing ? /*#__PURE__*/React.createElement("button", {
+  }, mapType === "hybrid" ? "🗺 地図表示" : "📷 衛星写真"), p.gmapId && /*#__PURE__*/React.createElement("button", {
+    // 地名(ラスター)⇔回転(ベクター)の切替。マップID設定時のみ出す(v9.44)。
+    // 進捗地図と状態を共有する。
+    onClick: () => p.setMapVector(!p.mapVector),
+    style: {
+      ...S.smallSecondary,
+      ...(!p.mapVector ? {
+        background: "#EAF3FA",
+        borderColor: "#3B7EA1",
+        color: "#2b5a7a"
+      } : {})
+    },
+    title: p.mapVector ? "回転優先(ベクター)。指で回せますが地名はGoogle Cloud設定次第です。押すと地名優先へ" : "地名優先(ラスター)。地名が必ず出ますが地図は回せません。押すと回転優先へ"
+  }, p.mapVector ? "🧭 回転優先" : "🗺 地名優先"), !drawing ? /*#__PURE__*/React.createElement("button", {
     onClick: startDraw,
     style: S.smallPrimary
   }, "✏ 圃場を囲む") : /*#__PURE__*/React.createElement("button", {
@@ -11617,12 +11474,16 @@ function ProgressGoogleCanvas(p) {
         // 進捗を見るだけの地図なので、作図で要る細かい操作は載せない
         clickableIcons: false
       });
-      map.addListener("zoom_changed", () => setZoom(map.getZoom()));
+      // ベクター地図はピンチ中に zoom_changed が小数倍率で連打される。整数に
+      // 丸めて保存し、段が変わったときだけ札の描画 effect を走らせる。全圃場ぶんの
+      // project＋札サイズ計算＋O(n²)間引きが1ジェスチャーで何十回も走るのを防ぐ。
+      // 見える札は丸め前と同一(整数バンド判定・scale=2^floor(zoom))(v9.44)
+      map.addListener("zoom_changed", () => setZoom(Math.floor(map.getZoom())));
       mapRef.current = map;
       // 新しい地図には何も描いていない。前の記憶を残すと、差分が
       // 「もう描いてある」と判断して空のままになる(Leaflet版と同じ)
       drawnRef.current = new Map();
-      setZoom(map.getZoom());
+      setZoom(Math.floor(map.getZoom()));
       setReady(true);
       if (p.apiRef) p.apiRef.current = {
         resize: () => {
@@ -12011,6 +11872,11 @@ function ProgressMapTab(p) {
   const [fitSeq, setFitSeq] = React.useState(0);
   // forceFull=true(作業タブの「作業圃場」から開いたとき)は最初から全画面。
   const [fullMap, setFullMap] = React.useState(!!p.forceFull);
+  // 全画面のときは下部タブバーを隠す(v9.44)。地図が画面いっぱいになる。
+  React.useEffect(() => {
+    if (fullMap) document.body.classList.add("map-full");else document.body.classList.remove("map-full");
+    return () => document.body.classList.remove("map-full");
+  }, [fullMap]);
   // 圃場名・面積の札を出すか。端末に残す(現場で消したまま使い続けられるように)。
   // 既定は出す。これまで出ていたものが更新で消えると、壊れたように見える。
   // ── 位置情報の状態 ──
@@ -12089,6 +11955,10 @@ function ProgressMapTab(p) {
       // 保存できなくても表示は切り替わる。次に開いたとき既定に戻るだけ
     }
   };
+  // 地名(ラスター)⇔回転(ベクター)の切替(v9.44)。状態は App と共有(圃場登録の地図と同じ)。
+  // labels=地名優先(ラスター・回転なし) / rotate=回転優先(ベクター)。
+  const mapLabelMode = p.mapVector ? "rotate" : "labels";
+  const setMapLabelMode = v => p.setMapVector && p.setMapVector(v === "rotate");
   // 既定は全部出す。周りの圃場が見えていないと、どこを見ているのか分からなくなるため。
   // 圃場が多くて対象が埋もれるときのために、絞り込めるようにしてある。
   const [onlyTarget, setOnlyTarget] = React.useState(false);
@@ -12122,6 +11992,11 @@ function ProgressMapTab(p) {
   // 見え方がタブごとに変わって混乱する。Googleを選んでいてAPIキーがないときは
   // 地図を出せないので、地図タブと同じ案内を出す。
   const useGoogle = p.mapEngine === "google";
+  // 地名優先(labels)のときはマップIDを渡さない=ラスターのハイブリッドになり、
+  // Googleの地名が必ず出る(回転は不可)。回転優先(rotate)のときだけマップIDを渡す。
+  const effGmapId = mapLabelMode === "rotate" ? p.gmapId || "" : "";
+  // 切替はマップIDが実際に入っていて、かつGoogleを使うときだけ意味がある。
+  const canToggleMap = useGoogle && !!p.gmapKey && !!p.gmapId;
 
   const refresh = async () => {
     if (loading) return;
@@ -12330,7 +12205,15 @@ function ProgressMapTab(p) {
       ...(showLabels ? S.segOn : {})
     },
     title: "圃場名と面積の札を出す・消す。圃場が多いと札の数だけ地図が重くなります"
-  }, showLabels ? "🏷 札あり" : "🏷 札なし"), geoHint && /*#__PURE__*/React.createElement("button", {
+  }, showLabels ? "🏷 札あり" : "🏷 札なし"), canToggleMap && /*#__PURE__*/React.createElement("button", {
+    // 地名(ラスター)⇔回転(ベクター)の切替。マップID設定時のみ出す(v9.44)
+    onClick: () => setMapLabelMode(mapLabelMode === "rotate" ? "labels" : "rotate"),
+    style: {
+      ...S.mapSeg,
+      ...(mapLabelMode === "labels" ? S.segOn : {})
+    },
+    title: mapLabelMode === "labels" ? "地名優先(ラスター)。地名が必ず出ますが地図は回せません。押すと回転優先に切り替わります" : "回転優先(ベクター)。指で回せますが地名はGoogle Cloud設定次第です。押すと地名優先に切り替わります"
+  }, mapLabelMode === "labels" ? "🗺 地名優先" : "🧭 回転優先"), geoHint && /*#__PURE__*/React.createElement("button", {
     // 現在地が出ているときは出さない。出ていないときだけ、理由と入口を出す
     onClick: askGeo,
     style: {
@@ -12369,7 +12252,7 @@ function ProgressMapTab(p) {
     // マップIDを入れ替えたときも作り直させる。
     // 地図は一度作るとラスターかベクターかが変わらないので、
     // key を変えないと保存しても回せないままになる。
-    key: (useGoogle && p.gmapKey ? "google" : "leaflet") + ":" + (p.gmapId || ""),
+    key: (useGoogle && p.gmapKey ? "google" : "leaflet") + ":" + effGmapId,
     fields: p.fields,
     statusByField,
     onlyTarget,
@@ -12378,7 +12261,8 @@ function ProgressMapTab(p) {
     fitSeq,
     gmapKey: p.gmapKey,
     // v8.70: これを渡し忘れていたため、進捗地図だけ回せなかった
-    gmapId: p.gmapId,
+    // v9.44: 地名優先のときは空(ラスター)にして地名を必ず出す
+    gmapId: effGmapId,
     // 位置情報が取れないときの知らせに使う
     flash: p.flash,
     areaUnitKey: p.areaUnitKey,
@@ -12446,7 +12330,16 @@ function ProgressMapTab(p) {
       },
       title: showLabels ? "圃場名と面積の札を消す" : "圃場名と面積の札を出す",
       "aria-label": showLabels ? "札を消す" : "札を出す"
-    }, "🏷"))), !fullMap && /*#__PURE__*/React.createElement("button", {
+    }, "🏷"), canToggleMap && /*#__PURE__*/React.createElement("button", {
+      // 地名(ラスター)⇔回転(ベクター)の切替。全画面でもここから切れる(v9.44)
+      onClick: () => setMapLabelMode(mapLabelMode === "rotate" ? "labels" : "rotate"),
+      style: {
+        ...S.mapSideBtn,
+        ...(mapLabelMode === "labels" ? {} : S.mapSideBtnOff)
+      },
+      title: mapLabelMode === "labels" ? "地名優先(ラスター)。押すと回転優先へ" : "回転優先(ベクター)。押すと地名優先へ",
+      "aria-label": mapLabelMode === "labels" ? "回転優先に切り替える" : "地名優先に切り替える"
+    }, mapLabelMode === "labels" ? "🗺" : "🧭"))), !fullMap && /*#__PURE__*/React.createElement("button", {
     onClick: () => setFullMap(true),
     style: {
       ...S.smallSecondary,
