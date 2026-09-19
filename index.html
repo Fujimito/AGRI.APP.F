@@ -42,11 +42,9 @@
 <style>
   * { box-sizing: border-box; margin: 0; }
   /* 本文の最大幅。app.js の S.header / S.main がこの値を見る。
-     スマホは今までどおり640px。タブレット横やノートPCでは
-     左右の余白が広すぎて地図も一覧も狭く見えるので広げる。 */
+     画面幅によらず640pxに固定。大画面で横に間延びして見えるのを避け、
+     スマホと同じ縦長のすっきりした見た目に揃える。 */
   :root { --shell-w: 640px; }
-  @media (min-width: 900px)  { :root { --shell-w: 760px; } }
-  @media (min-width: 1280px) { :root { --shell-w: 880px; } }
   html, body { height: 100%; }
   body { background: #F0F3EC; overflow-x: hidden; }
   /* 画面の高さぴったりの器を作り、中身(main)だけをスクロールさせる。

@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.41";
+const APP_VERSION = "v9.42";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -4311,6 +4311,10 @@ function WorkTab(p) {
   // 大きな集計タイルは一覧のときだけ出していたもの。
   // 戻したくなったときのために形は残してある。
   const workView = "map";
+  // 作業タブの中の画面切替。"plan"=本日の予定(集計・準備・送信) / "field"=作業圃場(地図を最初から全画面)。
+  // 「作業圃場」を押すと ProgressMapTab を全画面でマウントし、地図わきの ✕ で "plan" に戻る。
+  // タブを離れると WorkTab ごと外れるので、戻ってきたときは既定の "plan" から始まる。
+  const [workScreen, setWorkScreen] = useState("plan");
   // 「今日の準備」は既定で畳む。まだ圃場が入っていない日は開いた状態で始める
   const [prepOpen, setPrepOpen] = useState(() => p.works.filter(w => w.workDate === p.workDate).length === 0);
   const [pickForDay, setPickForDay] = useState(false);
@@ -4499,6 +4503,30 @@ function WorkTab(p) {
     flash: p.flash,
     onCancel: () => setAgriOpen(false)
   }),
+  // 作業タブの中の切替。「📋 本日の予定」＝集計・準備・送信、「🗺 作業圃場」＝地図を全画面。
+  // 作業圃場を押すと地図が最初から全画面で開き、地図わきの ✕ でここに戻る。
+  /*#__PURE__*/React.createElement("div", {
+    style: {
+      display: "flex",
+      gap: 8,
+      marginBottom: 12
+    },
+    className: "no-print"
+  }, ["plan", "field"].map(k => /*#__PURE__*/React.createElement("button", {
+    key: k,
+    onClick: () => setWorkScreen(k),
+    style: {
+      flex: 1,
+      padding: "11px 8px",
+      borderRadius: 10,
+      border: "1.5px solid " + (workScreen === k ? "#2E7D4F" : "#D8E0D2"),
+      background: workScreen === k ? "#2E7D4F" : "#fff",
+      color: workScreen === k ? "#fff" : "#66756a",
+      fontWeight: 800,
+      fontSize: 15,
+      cursor: "pointer"
+    }
+  }, k === "plan" ? "📋 本日の予定" : "🗺 作業圃場"))),
   // v8.56: 画面下に固定していた「▶ 次の圃場／🚁 実績入力」の帯を外した。
   // 同じ内容が上の「順送りナビ」と各行の実績入力ボタンにあり、常に画面を
   // 塞ぐぶんだけ地図と一覧が狭くなっていた。
@@ -4555,17 +4583,19 @@ function WorkTab(p) {
   }, "合計薬液量", reportedCount > 0 && /*#__PURE__*/React.createElement("span", {
     style: S.totalsNote
   }, "実績 ", reportedCount, "件ぶんを含む")))) : /*#__PURE__*/React.createElement("div", {
-    // 進捗地図のときは集計を大きなタイル3枚ではなじ1行に畳む。
+    // 進捗地図のときは集計を大きなタイル3枚ではなく1行に畳む。
     // タイルのままだとこのカードだけで340pxを使い、地図が画面の
     // 下半分からしか始まらない。数字の中身は一覧のときと同じ。
+    // 数字だけは読みやすいよう大きく(24px)し、単位は totalsUnit で小さく保つ。
     style: {
       display: "flex",
-      gap: 12,
+      gap: 16,
       flexWrap: "wrap",
       alignItems: "baseline",
       marginTop: 10,
-      fontSize: 15,
+      fontSize: 24,
       fontWeight: 800,
+      lineHeight: 1.1,
       color: "#1C2B21"
     },
     className: "num"
@@ -4941,7 +4971,7 @@ function WorkTab(p) {
       ...S.note,
       marginTop: 8
     }
-  }, "タップした順にこの日のリストへ追加されます。地区を選ぶとまとめて追加できます。圃場の登録・編集は「🗺圃場登録・圃場一覧」タブで行えます。")))))), /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement(ProgressMapTab, {
+  }, "タップした順にこの日のリストへ追加されます。地区を選ぶとまとめて追加できます。圃場の登録・編集は「🗺圃場登録・圃場一覧」タブで行えます。")))))), workScreen === "field" && /*#__PURE__*/React.createElement(ProgressMapTab, {
     fields: p.fields,
     works: p.works,
     workDate: p.workDate,
@@ -4963,25 +4993,11 @@ function WorkTab(p) {
     gmapKey: p.gmapKey,
     gmapId: p.gmapId,
     pullSec: p.pullSec,
-    active: true
-  }), /*#__PURE__*/React.createElement("section", {
-    // 地図を見ながら作業を終えられるよう、送信もここに置く。
-    style: {
-      ...S.card,
-      marginTop: 12
-    },
-    className: "no-print"
-  }, /*#__PURE__*/React.createElement("button", {
-    onClick: () => p.pushResults(),
-    disabled: p.syncing || resultPending === 0,
-    style: {
-      ...S.primaryBtn,
-      width: "100%",
-      opacity: p.syncing || resultPending === 0 ? 0.4 : 1
-    }
-  }, p.syncing ? "送信中…" : resultPending === 0 ? "☁ 送信する実績はありません" : "☁ 実績を送信(未送信 " + resultPending + "件)"), /*#__PURE__*/React.createElement("p", {
-    style: S.note
-  }, "散布し終えた圃場の実績を送ります。これを受けたスプレッドシート側が「作業」と「防除記録」(台帳)の両方に書きます。予定の共有は上の「🌾 本日の作業圃場登録」の中のボタンから。送信済みは二重登録されません")) ), recSummary.length > 0 && /*#__PURE__*/React.createElement("section", {
+    active: true,
+    // 「作業圃場」を押したら最初から全画面。地図わきの ✕ で本日の予定へ戻る
+    forceFull: true,
+    onBack: () => setWorkScreen("plan")
+  }), recSummary.length > 0 && /*#__PURE__*/React.createElement("section", {
     style: {
       ...S.card,
       marginTop: 12
@@ -11652,7 +11668,8 @@ function ProgressMapTab(p) {
   // 地図の実体(Leaflet/Google)とのやり取り口。{ resize, fit } を子が入れる
   const apiRef = React.useRef(null);
   const [fitSeq, setFitSeq] = React.useState(0);
-  const [fullMap, setFullMap] = React.useState(false);
+  // forceFull=true(作業タブの「作業圃場」から開いたとき)は最初から全画面。
+  const [fullMap, setFullMap] = React.useState(!!p.forceFull);
   // 圃場名・面積の札を出すか。端末に残す(現場で消したまま使い続けられるように)。
   // 既定は出す。これまで出ていたものが更新で消えると、壊れたように見える。
   // ── 位置情報の状態 ──
@@ -12055,10 +12072,17 @@ function ProgressMapTab(p) {
       style: S.mapSideBtns,
       className: "no-print"
     }, /*#__PURE__*/React.createElement("button", {
-      onClick: () => setFullMap(false),
+      // 作業圃場から開いたときは本日の予定へ戻す。それ以外は全画面をやめて埋め込みに戻す。
+      onClick: () => {
+        if (p.onBack) {
+          p.onBack();
+          return;
+        }
+        setFullMap(false);
+      },
       style: S.mapSideBtn,
-      title: "全画面をやめる",
-      "aria-label": "全画面をやめる"
+      title: p.onBack ? "本日の予定に戻る" : "全画面をやめる",
+      "aria-label": p.onBack ? "本日の予定に戻る" : "全画面をやめる"
     }, "✕"), /*#__PURE__*/React.createElement("button", {
       // 位置が出ていないときは、寄せる先が無いので許可を求めるほうへ回す。
       // 全画面のまま何も起きないと、壊れているのか許可の問題かが分からない

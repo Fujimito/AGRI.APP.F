@@ -1140,18 +1140,19 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   // 予定共有ボタン: 「本日の作業圃場登録」の中と、設定タブの送り直しの計2か所
   eq("作業予定の共有ボタンは pushPlan を呼ぶ(作業タブ+設定タブ=2か所)",
     (src.match(/onClick: \(\) => p\.pushPlan\(\),/g) || []).length, 2);
-  // 実績送信ボタン: 地図側・一覧側・設定タブの送り直しの計3か所
-  eq("実績送信ボタンは pushResults を呼ぶ(地図+一覧+設定タブ=3か所)",
-    (src.match(/onClick: \(\) => p\.pushResults\(\),/g) || []).length, 3);
+  // 実績送信ボタン: 一覧側・設定タブの送り直しの計2か所
+  // v9.42: 重複していた地図直下の送信ボタンを削除(同じ pushResults を呼ぶ2つ目だった)
+  eq("実績送信ボタンは pushResults を呼ぶ(一覧+設定タブ=2か所)",
+    (src.match(/onClick: \(\) => p\.pushResults\(\),/g) || []).length, 2);
   // 見出しの未送信バッジは実績専用(本人の指定)。押すと実績送信
   eq("見出しの未送信バッジは pushResults を呼ぶ",
     src.includes("setTab(\"work\");\n      pushResults();"), true);
   // 予定共有ボタンの文言
   eq("予定共有ボタンの文言が「作業予定を共有」になっている",
     src.includes('"☁ 作業予定を共有(未共有 " + planPending + "件)"'), true);
-  // 実績送信ボタンの文言(地図側・一覧側の2か所)
-  eq("実績送信ボタンの文言が「実績を送信」になっている(2か所)",
-    (src.match(/"☁ 実績を送信\(未送信 " \+ resultPending \+ "件\)"/g) || []).length, 2);
+  // 実績送信ボタンの文言(一覧側の1か所。v9.42で地図直下の重複を削除)
+  eq("実績送信ボタンの文言が「実績を送信」になっている(1か所)",
+    (src.match(/"☁ 実績を送信\(未送信 " \+ resultPending \+ "件\)"/g) || []).length, 1);
   // 見出しのバッジも実績送信の文言・件数(resultPendingCount)で揃える
   eq("見出しのバッジの文言も「実績を送信」になっている",
     src.includes('"☁ 実績を送信(未送信 " + resultPendingCount + "件)"'), true);
