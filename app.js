@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.44";
+const APP_VERSION = "v9.45";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -5166,6 +5166,9 @@ function WorkTab(p) {
     mapEngine: p.mapEngine,
     gmapKey: p.gmapKey,
     gmapId: p.gmapId,
+    // 地名(ラスター)⇔回転(ベクター)の切替。渡し忘れると切替が無反応になる(v9.44修正)
+    mapVector: p.mapVector,
+    setMapVector: p.setMapVector,
     pullSec: p.pullSec,
     active: true,
     // 「作業圃場」を押したら最初から全画面。地図わきの ✕ で本日の予定へ戻る
@@ -6981,7 +6984,9 @@ function loadGoogleMaps(apiKey) {
   if (__gmapsLoadPromise) return __gmapsLoadPromise;
   __gmapsLoadPromise = new Promise((resolve, reject) => {
     const script = document.createElement("script");
-    script.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(apiKey) + "&libraries=geometry&loading=async";
+    // marker ライブラリを足すと g.marker.AdvancedMarkerElement が使える(v9.44)。
+    // 圃場の札を1オーバーレイに集約するのに使う。mapId のあるベクター地図が要る
+    script.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(apiKey) + "&libraries=geometry,marker&loading=async";
     script.async = true;
     script.onload = () => resolve();
     script.onerror = () => {
@@ -7458,9 +7463,7 @@ function GoogleMapTab(p) {
   React.useEffect(() => {
     if (!ready || !mapRef.current) return;
     const g = window.google.maps;
-    fieldOverlaysRef.current.forEach(o => {
-      o.setMap && o.setMap(null);
-    });
+    fieldOverlaysRef.current.forEach(removeGmOverlay);
     fieldOverlaysRef.current = [];
     const showLabel = zoom >= FIELD_LABEL_MIN_ZOOM;
     // Leaflet 版と同じ間引き(v9.02)。getProjection は準備できるまで null で、
@@ -7510,48 +7513,44 @@ function GoogleMapTab(p) {
       const lsz = labelSizeOf(f.areaA);
       if (showLabel && zoom >= FIELD_LABEL_MIN_ZOOM + lsz.step && (!keep || keep.has(String(f.id)))) {
         const c = f.center || polygonCenter(f.polygon);
-        const label = new g.Marker({
-          position: {
-            lat: c[0],
-            lng: c[1]
-          },
-          map: mapRef.current,
-          icon: {
-            path: 0,
-            scale: 0
-          },
-          // 透明アイコン(ラベルだけ表示)
-          label: {
-            text: f.name + (f.crop ? " / " + f.crop : ""),
-            color: "#fff",
-            // 面積で大きさを変える(v9.00)。Leaflet 側の CSS と揃えてある
-            fontSize: lsz.size === "lg" ? "13px" : lsz.size === "md" ? "12px" : "11px",
-            fontWeight: "700",
-            className: "gm-field-label"
-          }
-        });
-        fieldOverlaysRef.current.push(label);
-        // 面積は別の札にして名前の下へ。Googleの札はHTMLを入れられず、
-        // 改行も効かないので、CSS(gm-field-area)で下へずらして二行に見せる。
-        const areaLabel = new g.Marker({
-          position: {
-            lat: c[0],
-            lng: c[1]
-          },
-          map: mapRef.current,
-          icon: {
-            path: 0,
-            scale: 0
-          },
-          label: {
-            text: fieldAreaText(f, p.areaUnitKey),
-            color: "#BFE3CD",
-            fontSize: "11px",
-            fontWeight: "600",
-            className: "gm-field-area"
-          }
-        });
-        fieldOverlaysRef.current.push(areaLabel);
+        const nameText = f.name + (f.crop ? " / " + f.crop : "");
+        const areaText = fieldAreaText(f, p.areaUnitKey);
+        // この地図は p.gmapId && p.mapVector のときだけ mapId を入れてベクターに
+        // している。AdvancedMarkerElement はベクター地図でしか描けないので、
+        // 同じ条件のときだけ1枚に集約する(v9.44)
+        if (gmAdvSupported(g, p.gmapId && p.mapVector)) {
+          fieldOverlaysRef.current.push(makeGmAdvLabel(g, mapRef.current, c,
+            [{ cls: "fl-name", text: nameText }, { cls: "fl-area", text: areaText }],
+            lsz.size));
+        } else {
+          // 旧経路: ラスター地図。透明アイコン+ラベルの g.Marker を縦積み
+          fieldOverlaysRef.current.push(new g.Marker({
+            position: { lat: c[0], lng: c[1] },
+            map: mapRef.current,
+            icon: { path: 0, scale: 0 },
+            label: {
+              text: nameText,
+              color: "#fff",
+              // 面積で大きさを変える(v9.00)。Leaflet 側の CSS と揃えてある
+              fontSize: lsz.size === "lg" ? "13px" : lsz.size === "md" ? "12px" : "11px",
+              fontWeight: "700",
+              className: "gm-field-label"
+            }
+          }));
+          // 面積は別の札にして CSS(gm-field-area)で名前の下へずらして二行に見せる
+          fieldOverlaysRef.current.push(new g.Marker({
+            position: { lat: c[0], lng: c[1] },
+            map: mapRef.current,
+            icon: { path: 0, scale: 0 },
+            label: {
+              text: areaText,
+              color: "#BFE3CD",
+              fontSize: "11px",
+              fontWeight: "600",
+              className: "gm-field-area"
+            }
+          }));
+        }
       }
     });
     // 間引きの結果は倍率で変わるので、帯(v9.00)ではなく倍率そのものを見る。
@@ -10851,6 +10850,41 @@ const makeFieldLabel = (L, latlng, html, sizeClass) => L.marker(latlng, {
   keyboard: false
 });
 
+// ── Google マップ版の札(v9.44) ──
+// 旧版は名前・面積・記録者を透明マーカー(g.Marker)3枚に分けて縦積みしていた。
+// g.Marker のラベルは1行しか入らず改行も効かないためで、圃場1枚で最大3
+// オーバーレイになる。50〜150圃場では札ありのピンチ・パンが重い(レガシー
+// Marker は数が増えると重い)。AdvancedMarkerElement は content に任意のDOMを
+// 置けるので、名前・面積・記録者を1枚のDOMに入れて1オーバーレイに集約する。
+// 見た目は Leaflet 版の札(.fl-inner)に揃える。
+// AdvancedMarkerElement は mapId のあるベクター地図でしか描けない。
+// このアプリは gmapId があるときだけベクターにしているので、そこを満たすときだけ使う。
+const gmAdvSupported = (g, gmapId) =>
+  !!(g && g.marker && g.marker.AdvancedMarkerElement && gmapId);
+// lines は [{cls, text}]。cls は Leaflet 版と同じ fl-name / fl-area / fl-by。
+// 圃場名も記録者名も他端末から来た文字列なので、必ずエスケープしてから入れる(XSS)。
+const makeGmAdvLabel = (g, map, ctr, lines, size) => {
+  const el = document.createElement("div");
+  el.className = "gm-adv-label gm-adv-" + size;
+  el.innerHTML = (lines || []).map(ln =>
+    '<span class="' + ln.cls + '">' + escapeHtml(ln.text) + "</span>").join("");
+  return new g.marker.AdvancedMarkerElement({
+    map: map,
+    position: { lat: ctr[0], lng: ctr[1] },
+    content: el,
+    // 札はクリックを食わない。圃場(ポリゴン)のタップで吹き出しを開く
+    gmpClickable: false
+  });
+};
+// オーバーレイの取り外し。g.Polygon / g.Marker は setMap(null) で外すが、
+// AdvancedMarkerElement は setMap を持たず、map=null で外す。混在しても
+// 落ちないよう両対応にする(v9.44)。片方しか見ないと札が消えずに残る
+const removeGmOverlay = o => {
+  if (!o) return;
+  if (typeof o.setMap === "function") o.setMap(null);
+  else o.map = null;
+};
+
 // ── 面積ごとに札を出す倍率を分ける ──
 //
 // 一律のしきい値(15)だと、小さい圃場の札が圃場より大きくなり、
@@ -11497,7 +11531,7 @@ function ProgressGoogleCanvas(p) {
     });
     return () => {
       cancelled = true;
-      drawnRef.current.forEach(v => v.overlays.forEach(o => o.setMap && o.setMap(null)));
+      drawnRef.current.forEach(v => v.overlays.forEach(removeGmOverlay));
       // 入れ物が新しくなるので、前の地図に描いたという記憶は捨てる。
       // 残すと差分が「もう描いてある」と判断して、新しい地図が空のままになる
       drawnRef.current = new Map();
@@ -11695,7 +11729,7 @@ function ProgressGoogleCanvas(p) {
     d.drop.forEach(id => {
       const cur = drawn.get(id);
       // 1圃場ぶんの重ね物(形・名前の札・面積の札)をまとめて外す
-      if (cur) cur.overlays.forEach(o => o.setMap && o.setMap(null));
+      if (cur) cur.overlays.forEach(removeGmOverlay);
       drawn.delete(id);
     });
     d.draw.forEach(id => {
@@ -11727,71 +11761,60 @@ function ProgressGoogleCanvas(p) {
       // 出すかどうかは上で決め済み(倍率のしきい値と重なりの間引き)
       if (w.showLabel) {
         const ctr = f.center || polygonCenter(f.polygon);
-        // 透明アイコン+ラベルだけのマーカー。Googleマップ側は文字列として
-        // 扱うのでHTMLにはならない(Leaflet側のエスケープに当たる処理は不要)
-        const label = new g.Marker({
-          position: {
-            lat: ctr[0],
-            lng: ctr[1]
-          },
-          map: mapRef.current,
-          icon: {
-            path: 0,
-            scale: 0
-          },
-          label: {
-            text: (c.mark ? c.mark + " " : "") + f.name,
-            color: "#fff",
-            // 面積で大きさを変える(v9.00)。Leaflet 側の CSS と揃えてある
-            fontSize: lsz.size === "lg" ? "13px" : lsz.size === "md" ? "12px" : "11px",
-            fontWeight: "700",
-            className: "gm-field-label"
-          }
-        });
-        mine.push(label);
-        // Googleの札はHTMLも改行も入れられないので、面積は別の札にして
-        // CSS(gm-field-area)で名前の下へずらす。地図タブと同じやり方。
-        const areaLabel = new g.Marker({
-          position: {
-            lat: ctr[0],
-            lng: ctr[1]
-          },
-          map: mapRef.current,
-          icon: {
-            path: 0,
-            scale: 0
-          },
-          label: {
-            text: fieldAreaText(f, p.areaUnitKey),
-            color: "#BFE3CD",
-            fontSize: "11px",
-            fontWeight: "600",
-            className: "gm-field-area"
-          }
-        });
-        mine.push(areaLabel);
-        // 実施済みのときだけ、済ませた人の名前をさらに下へ(v8.97)。
-        // Google 側は札1枚に1行しか入らないので、3枚目を立ててずらす
+        const nameText = (c.mark ? c.mark + " " : "") + f.name;
+        const areaText = fieldAreaText(f, p.areaUnitKey);
+        // 実施済みのときだけ、済ませた人の名前を出す(v8.97)
         const byText = labelByText(key, st && st.by);
-        if (byText) {
+        if (gmAdvSupported(g, p.gmapId)) {
+          // 名前・面積・記録者を1枚のDOMに入れて1オーバーレイに集約(v9.44)。
+          // 旧版は透明マーカー3枚に分けていた(g.Marker のラベルは1行のみ)。
+          const lines = [{ cls: "fl-name", text: nameText }, { cls: "fl-area", text: areaText }];
+          if (byText) lines.push({ cls: "fl-by", text: byText });
+          mine.push(makeGmAdvLabel(g, mapRef.current, ctr, lines, lsz.size));
+        } else {
+          // 旧経路: mapId 無し=ラスター地図で AdvancedMarkerElement が使えない。
+          // 透明アイコン+ラベルの g.Marker を1行ずつ縦積みする。Googleマップ側は
+          // 文字列として扱うのでHTMLにはならない(Leaflet側のエスケープは不要)
           mine.push(new g.Marker({
-            position: {
-              lat: ctr[0],
-              lng: ctr[1]
-            },
+            position: { lat: ctr[0], lng: ctr[1] },
             map: mapRef.current,
-            icon: {
-              path: 0,
-              scale: 0
-            },
+            icon: { path: 0, scale: 0 },
             label: {
-              text: byText,
-              color: "#FFE9A8",
-              fontSize: "11px",
-              fontWeight: "600",
-              className: "gm-field-by"
+              text: nameText,
+              color: "#fff",
+              // 面積で大きさを変える(v9.00)。Leaflet 側の CSS と揃えてある
+              fontSize: lsz.size === "lg" ? "13px" : lsz.size === "md" ? "12px" : "11px",
+              fontWeight: "700",
+              className: "gm-field-label"
             }
           }));
+          // 面積は別の札にして CSS(gm-field-area)で名前の下へずらす
+          mine.push(new g.Marker({
+            position: { lat: ctr[0], lng: ctr[1] },
+            map: mapRef.current,
+            icon: { path: 0, scale: 0 },
+            label: {
+              text: areaText,
+              color: "#BFE3CD",
+              fontSize: "11px",
+              fontWeight: "600",
+              className: "gm-field-area"
+            }
+          }));
+          if (byText) {
+            mine.push(new g.Marker({
+              position: { lat: ctr[0], lng: ctr[1] },
+              map: mapRef.current,
+              icon: { path: 0, scale: 0 },
+              label: {
+                text: byText,
+                color: "#FFE9A8",
+                fontSize: "11px",
+                fontWeight: "600",
+                className: "gm-field-by"
+              }
+            }));
+          }
         }
       }
       drawn.set(id, {

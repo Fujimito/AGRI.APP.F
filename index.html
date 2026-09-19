@@ -116,6 +116,25 @@
   .gm-field-by { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); transform: translateY(26px); }
   /* Googleマップ版の札は背景を持てないので、縁取りで読ませる */
   .gm-field-label { text-shadow: 0 0 3px rgba(0,0,0,0.95), 0 1px 2px rgba(0,0,0,0.9); }
+  /* Googleマップ AdvancedMarkerElement 版の札(v9.44)。名前・面積・記録者を
+     1枚のDOMに入れて1オーバーレイに集約する(旧版は透明マーカー3枚)。
+     見た目は Leaflet 版の .fl-inner に合わせる。AME の content は既定で
+     下端中央が座標に来るので、translateY(50%) で中央を座標に合わせる。 */
+  .gm-adv-label {
+    display:inline-block; white-space:nowrap; transform:translateY(50%);
+    background: rgba(20,26,20,0.86); color:#fff; border-radius:3px;
+    font-weight:700; font-size:12px; padding:2px 6px; line-height:1.25;
+    /* 札がタップを食うと圃場を押しても吹き出しが開かない */
+    pointer-events:none;
+  }
+  .gm-adv-label .fl-name { display:block; line-height:1.25; }
+  .gm-adv-label .fl-area { display:block; font-weight:600; font-size:11px; color:#BFE3CD; line-height:1.2; }
+  .gm-adv-label .fl-by { display:block; font-weight:600; font-size:11px; color:#FFE9A8; line-height:1.2; }
+  .gm-adv-label.gm-adv-lg { font-size:13px; padding:3px 7px; }
+  .gm-adv-label.gm-adv-md { font-size:12px; padding:2px 6px; }
+  .gm-adv-label.gm-adv-sm { font-size:11px; padding:1px 5px; }
+  .gm-adv-label.gm-adv-lg .fl-area, .gm-adv-label.gm-adv-lg .fl-by { font-size:12px; }
+  .gm-adv-label.gm-adv-sm .fl-area, .gm-adv-label.gm-adv-sm .fl-by { font-size:10px; }
   .vtx-icon { background:transparent; border:none; }
   /* 頂点。大きいと隣の頂点と重なって細かい調整ができないので小さめにしてある。
      JS側の iconSize / iconAnchor と必ず同じ値にすること(ずれると位置がずれる) */
