@@ -37,6 +37,7 @@ const EXPORTS = [
   "EXCLUDED_KEY", "normalizeExcluded", "applyExclusion", "toggleExcluded", "commonNamePrefix",
   "normalizeFieldName", "centerDistanceM", "duplicateFieldGroups", "equivRadiusM",
   "DUP_NEAR_RATIO", "DUP_NEAR_MIN_M", "DUP_AREA_RATIO",
+  "computeMixDose",
 ];
 
 // 末尾の描画開始行を差し替える。ここが変わったらテスト側も直すこと
@@ -813,7 +814,8 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     stop();
     eq("二度止めても clearWatch は1回だけ", cleared, null);
   }
-  // 権限を断られたら、その場で止めて一度だけ知らせる
+  // iPad Safari は許可済みでも自動監視に code1 を散発的に返す。即断せず数回張り直し、
+  // 連続して3回(GEO_WATCH_MAX_DENIALS)失敗して初めて止めて一度だけ知らせる。
   {
     const msgs = [];
     let cleared = null, errCb = null;
@@ -823,10 +825,30 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     } };
     g(nav, () => {}, m => msgs.push(m));
     errCb({ code: 1 });
-    eq("権限を断られたら止める", cleared, 5);
+    eq("最初の code1 では知らせない(散発対策)", msgs.length, 0);
+    errCb({ code: 1 });
+    eq("2回目でもまだ知らせない", msgs.length, 0);
+    errCb({ code: 1 });
+    eq("3回連続で初めて止める", cleared, 5);
     eq("知らせは1回", msgs.length, 1);
     errCb({ code: 1 });
     eq("止まったあとは何も知らせない", msgs.length, 1);
+  }
+  // 途中で1点でも取れたら拒否カウントは戻る(散発的な code1 の合間に測れたら止めない)
+  {
+    const msgs = [];
+    let okCb = null, errCb = null;
+    const nav = { geolocation: {
+      watchPosition: (ok, ng) => { okCb = ok; errCb = ng; return 7; },
+      clearWatch: () => {},
+    } };
+    g(nav, () => {}, m => msgs.push(m));
+    errCb({ code: 1 });
+    errCb({ code: 1 });
+    okCb({ coords: { latitude: 35, longitude: 135 } });
+    errCb({ code: 1 });
+    errCb({ code: 1 });
+    eq("取れたら拒否カウントが戻り、まだ止めない", msgs.length, 0);
   }
 }
 
@@ -864,7 +886,8 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("全画面のボタンは fullMap のときだけ",
     /fullMap && [\s\S]{0,1600}S\.mapSideBtns/.test(tab), true);
   eq("全画面に札の切替もある", seg.includes("setShowLabels"), true);
-  eq("全画面のボタンは4つ", (seg.match(/S\.mapSideBtn(?!s|Off|Warn)/g) || []).length, 4);
+  // v9.43: ⊙「今日の圃場へ寄せ直す」を削除。残るは ✕ / 📍 / 🏷 の3つ
+  eq("全画面のボタンは3つ", (seg.match(/S\.mapSideBtn(?!s|Off|Warn)/g) || []).length, 3);
 
   // ── 画面の上下を使わない(v8.93) ──
   eq("上端にも下端にも貼り付けていない",
@@ -885,10 +908,10 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("指で押す的は44px角",
     /mapSideBtn: \{[\s\S]{0,300}width: 44,[\s\S]{0,40}height: 44/.test(src), true);
   // 絵文字だけなので、何のボタンかは title と読み上げ用の名前で補う
-  eq("4つとも読み上げ用の名前がある",
-    (seg.match(/"aria-label":/g) || []).length, 4);
-  eq("4つとも title がある(seg には次の全画面ボタンの title も1つ入る)",
-    (seg.match(/title:/g) || []).length >= 4, true);
+  eq("3つとも読み上げ用の名前がある",
+    (seg.match(/"aria-label":/g) || []).length, 3);
+  eq("3つとも title がある(seg には次の全画面ボタンの title も1つ入る)",
+    (seg.match(/title:/g) || []).length >= 3, true);
   eq("札OFFのときの見た目がある", src.includes("mapSideBtnOff: {"), true);
   eq("使わなくなった帯の定義が残っていない", src.includes("mapFullBar"), false);
 }
@@ -2799,6 +2822,34 @@ eq("版数 app.js と sw.js が一致", swVer, t.APP_VERSION);
     src.includes("form: refineFormByName(chem.nm, chem.f)"), true);
   eq("マスタから調合の行へ入れるときも直す",
     (src.match(/form: refineFormByName\(m\.name, m\.form\)/g) || []).length, 2);
+}
+
+// ── 混用投下量の計算(v9.43) ─────────────────────────────
+// HANDOFF の検算(キャベツ: パレード20FL 16倍・トルネードエースDF 10倍, V=1.6, T=100L)。
+// 落とし穴「合計原液量÷タンク濃度」で V を出すと 1.23L/770〜830a になる。正しくは
+// 各剤 T÷倍数・水 T×(1-Σ(1/倍数))・面積 10×T÷V で、1.6L/625a。
+{
+  const cab = t.computeMixDose([{ ratio: "16", vMin: "1.0", vMax: "2.5" }, { ratio: "10", vMin: "1.6", vMax: "2.0" }]);
+  near("混用 濃度和 Σ(1/16+1/10)=0.1625", cab.concSum, 0.1625, 1e-9);
+  eq("混用 濃すぎない(Σ<1)", cab.tooConc, false);
+  eq("混用 共通投下量あり", cab.noCommonV, false);
+  near("混用 共通Vの下限=下限の最大 1.6", cab.vLo, 1.6, 1e-9);
+  near("混用 共通Vの上限=上限の最小 2.0", cab.vHi, 2.0, 1e-9);
+  // 各剤投入量 = T ÷ 倍数
+  near("混用 パレード投入 100/16=6.25L", 100 / 16, 6.25, 1e-9);
+  near("混用 トルネード投入 100/10=10kg", 100 / 10, 10, 1e-9);
+  // 水 = T ×(1 - Σ(1/倍数))
+  near("混用 水 100×(1-0.1625)=83.75L", 100 * (1 - cab.concSum), 83.75, 1e-9);
+  // 散布可能面積 = 10 × T ÷ V
+  near("混用 面積 10×100÷1.6=625a", 10 * 100 / 1.6, 625, 1e-9);
+  // 逆検算: トルネード原液 10÷62.5=0.16L/10a→10倍, パレード 6.25÷62.5=0.1L/10a→16倍
+  near("混用 逆算 トルネード原液/10a=0.16", 10 / (10 * 100 / 1.6 / 10), 0.16, 1e-9);
+  // 濃すぎ判定: 2倍を2剤で Σ=1.0 → 水が入らない
+  eq("混用 Σ=1.0は濃すぎ", t.computeMixDose([{ ratio: "2" }, { ratio: "2" }]).tooConc, true);
+  // 共通範囲なし: 下限の最大 > 上限の最小
+  eq("混用 共通範囲なしを検知", t.computeMixDose([{ ratio: "16", vMin: "2.5", vMax: "3.0" }, { ratio: "10", vMin: "1.0", vMax: "2.0" }]).noCommonV, true);
+  // 倍率未入力の行は無視する
+  eq("混用 倍率未入力の行は数えない", t.computeMixDose([{ ratio: "16" }, { ratio: "" }]).valid.length, 1);
 }
 
 // ── 結果 ─────────────────────────────────────────────
