@@ -697,9 +697,15 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
   eq("空同士なら差分なし", t.progressMapDiff(new Map(), new Map()), []);
   eq("片方が無くても落ちない", t.progressMapDiff(null, null), []);
 
-  // 配線。地図はこれまでどおり progress を土台にしている(まだ外していない)
+  // 配線。地図はこれまでどおり progress を土台にしている(まだ外していない)。
+  // ただし手元で外した(墓標を積んだ)作業は liveItems で除いてから畳む。
+  // v9.38 で本日の作業の自動送信をやめたため、除かないと外した圃場が
+  // サーバーの写しに残ったまま赤(未実施)で残り、黄(対象外)に戻らない。
   eq("地図は progress を土台にしたまま",
-    src.includes("progressEntries(snap.items, p.works, fetchFrom, fetchTo, p.recorder),"), true);
+    src.includes("progressEntries(liveItems, p.works, fetchFrom, fetchTo, p.recorder),"), true);
+  eq("手元で外した作業を写しから除く",
+    src.includes("const dead = new Set(loadTombs().works.map(t => String(t.id)));") &&
+    src.includes("return (snap.items || []).filter(it => !dead.has(String(it.id)));"), true);
   eq("裏で works だけの結果も作る",
     src.includes("progressEntries([], p.works, fetchFrom, fetchTo, p.recorder),"), true);
   eq("照合の結果を残す", src.includes("save(PROGRESS_DIFF_KEY, next);"), true);
@@ -708,7 +714,7 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
 
   eq("畳む処理は foldProgress に任せる",
     src.includes("return Array.from(byWork.values());") &&
-    src.includes("progressEntries(snap.items, p.works, fetchFrom, fetchTo, p.recorder),"), true);
+    src.includes("progressEntries(liveItems, p.works, fetchFrom, fetchTo, p.recorder),"), true);
   eq("1件でも未実施なら未実施",
     src.includes('v.status = v.doneCount === v.total ? "done" : "planned";'), true);
   eq("大きい方を採る古い判定が残っていない",
@@ -2044,8 +2050,10 @@ eq("薬剤検索 空文字は呼び出し側で弾く前提", t.searchChemDb(db,
     ids(O([item({ id: 8, workDate: "2026-08-30" }), item({ id: 9, workDate: "2026-08-20" })],
       [], "2026-08-30", "2026-08-31")), ["8"]);
 
+  // 墓標を積んだばかりで未送信の作業は「残骸」ではなく送信待ちなので、
+  // liveItems(写しから墓標を除いたもの)を渡して残骸の件数に混ぜない。
   eq("useMemo は serverOrphans を呼ぶ(直書きに戻していない)",
-    src.includes("serverOrphans(snap.items, p.works, fetchFrom, fetchTo)"), true);
+    src.includes("serverOrphans(liveItems, p.works, fetchFrom, fetchTo)"), true);
 }
 
 // ── 札を出す倍率は1か所で決める(v9.10) ─────────────────

@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.45";
+const APP_VERSION = "v9.46";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -12083,6 +12083,19 @@ function ProgressMapTab(p) {
     return () => clearTimeout(t);
   }, [dayWorkCount]);
 
+  // 手元で外した(墓標を積んだ)作業を、サーバーの写しから取り除く。
+  //
+  // removeWork は手元の works から外して墓標を積むが、v9.38 で本日の作業の
+  // 自動送信をやめたため、サーバーの写し(snap.items)は「☁ 作業予定を共有」を
+  // 押すまでその作業を実施予定のまま返し続ける。除いておかないと、外した圃場が
+  // 進捗地図で未実施(赤)のまま残り、対象外(黄)に戻らない。
+  // 墓標はサーバーへ送れた時点で消える(pushWorks_)ので、送信後は写しから
+  // 消えたぶんと入れ替わりに、この除外も外れて食い違わない。
+  // 他の端末は従来どおり、共有ボタンを押すまで色が変わらない(v9.38 の意図)。
+  const liveItems = React.useMemo(() => {
+    const dead = new Set(loadTombs().works.map(t => String(t.id)));
+    return (snap.items || []).filter(it => !dead.has(String(it.id)));
+  }, [snap, p.works]);
   // ── 圃場ごとの状態を決める ──
   // サーバーから来た内容を土台にし、この端末にしかない未送信の実績を上へ重ねる。
   // 自分で入れた実績が、送信するまで地図に出ないのはかえって迷うため。
@@ -12094,9 +12107,9 @@ function ProgressMapTab(p) {
     // 片方が済んだ時点でもう片方が未実施でも緑になっていた。
     // 緑は「終わった」と読まれるので、残りが見えないのは危ない(v8.83)。
     return foldProgress(
-      progressEntries(snap.items, p.works, fetchFrom, fetchTo, p.recorder),
+      progressEntries(liveItems, p.works, fetchFrom, fetchTo, p.recorder),
       p.workDate);
-  }, [snap, p.works, fetchFrom, fetchTo, p.recorder]);
+  }, [liveItems, p.works, fetchFrom, fetchTo, p.recorder]);
 
   // ── 提案A の下ごしらえ: progress をやめて pull だけにできるか照合する ──
   //
@@ -12161,9 +12174,11 @@ function ProgressMapTab(p) {
   // 端末から作業が消えているので removeWork では触れない。
   // ※ 作業IDは Code.gs を v8.80 以降にしないと進捗に入ってこない。
   //   古いままなら id が undefined なので0件になり、何も出ない。
+  // liveItems を渡す(snap.items ではなく)。墓標を積んだばかりで未送信の作業は
+  // 「残骸」ではなく送信待ちなので、残骸の件数に混ぜない。共有すれば消える。
   const orphans = React.useMemo(
-    () => serverOrphans(snap.items, p.works, fetchFrom, fetchTo),
-    [snap, p.works, fetchFrom, fetchTo]);
+    () => serverOrphans(liveItems, p.works, fetchFrom, fetchTo),
+    [liveItems, p.works, fetchFrom, fetchTo]);
 
   // 地図の初期化・塗り分け・寄せはすべて子(ProgressLeafletCanvas /
   // ProgressGoogleCanvas)が持つ。ここは取得した状態と見出しだけを扱う。
