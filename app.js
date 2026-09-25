@@ -15,7 +15,7 @@ const {
 
 // 表示用のアプリ版数。更新を配布するときは sw.js の CACHE_VERSION も同じ番号に上げる
 // (キャッシュが切り替わらないと、画面の版数だけ新しくなって中身が古いままになる)
-const APP_VERSION = "v9.46";
+const APP_VERSION = "v9.47";
 // GASのウェブアプリURLの形。ここから外れた先へ送ると、防除記録(圃場名・作物・
 // 薬剤・記録者名・圃場の緯度経度)が第三者のサーバーへ渡ってしまう。
 // ただし一致しないURLの保存を止めることはしない。Googleが将来URLの形を変えたとき、
@@ -4559,6 +4559,10 @@ function WorkTab(p) {
   // 実績を入力済みの圃場は実散布量で数えている。予定量との違いを黙って混ぜると
   // 調合タブの「必要総量」と合わずに混乱するので、件数を添えて分かるようにする
   const reportedCount = dayList.filter(w => w.reported).length;
+  // 進捗バーの「残り」。まだ実施済みにしていない圃場だけを足すので、
+  // 実施済みを押すたびにその圃場の面積と予定薬液量が引かれていく(v9.47)
+  const restArea = pendingDayList.reduce((s, w) => s + (parseFloat(p.resolveWork(w).areaA) || 0), 0);
+  const restLiters = pendingDayList.reduce((s, w) => s + sprayVolumeL(w), 0);
   // 一括計算の予告。実際に書き換わる圃場だけを、書き換わる値そのもので合計する。
   // 以前は実績入力済みも含む全圃場の面積で概算していたため、押した結果と食い違っていた
   const rateNum = parseFloat(ratePerDay);
@@ -4792,7 +4796,10 @@ function WorkTab(p) {
   }, /*#__PURE__*/React.createElement("span", null, "⚠"), /*#__PURE__*/React.createElement("span", null, "本日の投下量(L/10a)が未入力の圃場があります。下の欄に入力して「面積から一括計算」を押してください。")), 
 /*#__PURE__*/React.createElement(WorkProgress, {
     total: dayList.length,
-    done: dayList.length - pendingDayList.length
+    done: dayList.length - pendingDayList.length,
+    // v9.47: 残りの面積・薬液量も並べる。実施済みにした圃場の分がここから引かれる
+    restArea: dispArea(restArea, p.areaUnitKey) + " " + areaSuffix(p.areaUnitKey),
+    restVol: dispVol(restLiters, p.volUnitKey) + " " + volSuffix(p.volUnitKey)
   }), p.dayChems.length > 0 && /*#__PURE__*/React.createElement("button", {
     onClick: () => setPrepOpen(true),
     style: S.dayChemStrip,
@@ -5403,7 +5410,7 @@ function WorkTab(p) {
 }
 
 // ═══════════════════ 作業の進捗バー ═══════════════════
-// 現場で一番知りたい「あと何枚か」を常に見せる
+// 現場で一番知りたい「あと何枚か」を常に見せる。残りの面積・薬液量も添える
 function WorkProgress(p) {
   if (!p.total) return null;
   const rest = p.total - p.done;
@@ -5425,7 +5432,10 @@ function WorkProgress(p) {
   }, "✓ この日は完了")), /*#__PURE__*/React.createElement("span", {
     style: S.progSub,
     className: "num"
-  }, p.done, " / ", p.total, " 済")), /*#__PURE__*/React.createElement("div", {
+  }, p.done, " / ", p.total, " 済")), rest > 0 && p.restArea && /*#__PURE__*/React.createElement("div", {
+    style: S.progRestSub,
+    className: "num"
+  }, "残り ", /*#__PURE__*/React.createElement("strong", null, p.restArea), "　薬液 ", /*#__PURE__*/React.createElement("strong", null, p.restVol)), /*#__PURE__*/React.createElement("div", {
     style: S.progBar
   }, /*#__PURE__*/React.createElement("div", {
     style: {
@@ -13637,6 +13647,12 @@ const S = {
   progSub: {
     fontSize: 13.5,
     color: "#66756a"
+  },
+  progRestSub: {
+    fontSize: 15,
+    fontWeight: 700,
+    color: "#33443a",
+    marginBottom: 6
   },
   progBar: {
     height: 10,
